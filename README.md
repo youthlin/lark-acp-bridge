@@ -10,7 +10,7 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 - 第一版优先支持 `traex acp serve`，同时保留接入其他 ACP server 的配置空间。
 - 群聊默认一条飞书话题对应一个 ACP session；私聊默认整个 chat 对应一个 ACP session，除非用户发送 `/new` 重开。
 - 将智能体消息、计划、工具调用和权限请求逐步映射回飞书消息或交互卡片。
-- 能力声明保持保守；当前仅在 bot 配置了 workspace 时声明受限的文本文件读写能力，终端能力暂不声明。
+- 能力声明保持保守；当前仅在 bot 配置了 workspace 时声明受限的文本文件读写能力，用于维护 workspace 记忆、知识和技能文件，终端能力暂不声明。
 
 ## 初版架构
 
@@ -30,7 +30,7 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 3. 通过 stdio 启动 `traex acp serve`。
 4. 执行 ACP `initialize`、`session/new` 和 `session/prompt`。
 5. 将 ACP agent 文本、工具调用状态和最终回复转发到飞书。
-6. 为 bot workspace 提供受限的 `fs/read_text_file` 和 `fs/write_text_file`，用于初始化和注入长期记忆文件。
+6. 为 bot workspace 提供受限的 `fs/read_text_file` 和 `fs/write_text_file`，用于初始化和维护长期记忆、知识和技能文件。
 7. 后续再补权限卡片、终端操作和更完整的工具调用展示。
 
 ## 配置
@@ -68,7 +68,7 @@ https://open.larkoffice.com/page/launcher
 }
 ```
 
-`workspace` 是该 bot 的持久化工作目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 等长期记忆内容；启动时会自动创建目录。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
+`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
 第一次和 bot 对话时，如果 workspace 尚未标记为 ready，服务会创建基础知识文件：
 
@@ -77,19 +77,36 @@ $BOT_WORKSPACE/SOUL.md
 $BOT_WORKSPACE/MEMORY.md
 $BOT_WORKSPACE/AGENTS.md
 $BOT_WORKSPACE/TOOLS.md
+$BOT_WORKSPACE/knowledge/AGENTS.md
+$BOT_WORKSPACE/knowledge/core.md
+$BOT_WORKSPACE/knowledge/index.md
+$BOT_WORKSPACE/knowledge/log.md
+$BOT_WORKSPACE/knowledge/lint.md
+$BOT_WORKSPACE/skills/AGENTS.md
+$BOT_WORKSPACE/skills/core.md
+$BOT_WORKSPACE/skills/wiki/SKILL.md
 ```
 
-普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。群聊按话题区分会话，私聊按整个 chat 复用同一会话。创建会话时，即使 workspace 未 ready，服务也会立即启动 ACP server、执行 `initialize` 和 `session/new`，然后把一次性初始化说明作为第一条 `session/prompt` 发送给 ACP agent。
+三层含义：
+
+- L0 根目录记忆：`SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`，记录 bot 身份、用户偏好、工作规则和工具环境。
+- L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
+- L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
+
+普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。群聊按话题区分会话，私聊按整个 chat 复用同一会话。创建会话时，即使 workspace 未 ready，服务也会立即启动 ACP server、执行 `initialize` 和 `session/new`，但 `/new` 只回复会话创建结果；一次性初始化说明会延迟到下一条普通文本，再作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 
 - 用户想叫它什么名字。
 - 它应采用什么性格、语气和边界。
 - 需要长期记住的用户信息、偏好或常用上下文。
+- 是否有需要沉淀到知识库的领域知识、项目经验或常用流程。
 
-用户回答后，由 ACP agent 通过 bridge 提供的 `fs/write_text_file` 写入 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 和 `.setup.json`。`.setup.json` 标记为 `ready=true` 后，新建 session 会把这些 workspace 文件内容注入到第一条 prompt 中。若已经手动写好了文件，也可以在本地直接写入 `.setup.json`。
+用户回答后，由 ACP agent 通过 bridge 提供的 `fs/write_text_file` 写入 L0/L1/L2 相关文件和 `.setup.json`。`.setup.json` 标记为 `ready=true` 后，新建 session 会把根目录记忆、`knowledge/` 入口和 wiki skill 注入到下一条 prompt 中。若已经手动写好了文件，也可以在本地直接写入 `.setup.json`。
 
-bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名。
+ready 后，每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用 `fs/write_text_file` 合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
+
+bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名作为 L0 记忆入口。
 
 会话映射会持久化到每个 bot 的 workspace 下：
 

@@ -23,6 +23,9 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 		}
 		for _, file := range workspaceFiles() {
 			path := filepath.Join(msg.Workspace, file.name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(file.name), err)
+			}
 			if err := os.WriteFile(path, nil, 0o644); err != nil {
 				t.Fatalf("WriteFile(%s) error = %v", file.name, err)
 			}
@@ -404,7 +407,20 @@ func TestHandleFeishuMessageGuidesWorkspaceSetup(t *testing.T) {
 	if !strings.Contains(reply, "当前 bot workspace 尚未 ready") || !strings.Contains(reply, "发送普通文本或 /new [cwd]") {
 		t.Fatalf("reply = %q, want workspace setup guide", reply)
 	}
-	for _, name := range []string{"SOUL.md", "MEMORY.md", "AGENTS.md", "TOOLS.md"} {
+	for _, name := range []string{
+		"SOUL.md",
+		"MEMORY.md",
+		"AGENTS.md",
+		"TOOLS.md",
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "core.md"),
+		filepath.Join("knowledge", "index.md"),
+		filepath.Join("knowledge", "log.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "AGENTS.md"),
+		filepath.Join("skills", "core.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
 		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
 			t.Fatalf("workspace file %s not created: %v", name, err)
 		}
@@ -475,7 +491,7 @@ func TestHandleFeishuMessageNewWhenWorkspaceNotReadyDefersSetupPrompt(t *testing
 		t.Fatalf("promptCalls = %+v, want setup prompt on next message", rt.promptCalls)
 	}
 	setupPrompt := rt.promptCalls[0].Text
-	for _, want := range []string{"Workspace Setup Required", "SOUL.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", ".setup.json", "不要写 ready=true", "## User Message", "你好"} {
+	for _, want := range []string{"Workspace Setup Required", "L0/L1/L2", "knowledge/core.md", "knowledge/index.md", "knowledge/log.md", "SOUL.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", ".setup.json", "不要写 ready=true", "## User Message", "你好"} {
 		if !strings.Contains(setupPrompt, want) {
 			t.Fatalf("setup prompt = %q, want %q", setupPrompt, want)
 		}
@@ -1261,6 +1277,9 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, "MEMORY.md"), []byte("# MEMORY\n\n偏好：中文回复\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(MEMORY.md) error = %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "knowledge", "core.md"), []byte("---\ntitle: core knowledge\ntype: knowledge\n---\n\n# Core Knowledge\n\n- [[repo-workflow]]：仓库开发流程。\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(knowledge/core.md) error = %v", err)
+	}
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
 		Workspace: msg.Workspace,
@@ -1304,7 +1323,7 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 		t.Fatalf("promptCalls = %+v, want ready prompt on next message", rt.promptCalls)
 	}
 	readyPrompt := rt.promptCalls[0].Text
-	for _, want := range []string{"Workspace Knowledge", "SOUL.md", "名字：小助手", "MEMORY.md", "偏好：中文回复"} {
+	for _, want := range []string{"Workspace Knowledge", "SOUL.md", "名字：小助手", "MEMORY.md", "偏好：中文回复", "knowledge/core.md", "repo-workflow", "skills/wiki/SKILL.md"} {
 		if !strings.Contains(readyPrompt, want) {
 			t.Fatalf("ready prompt = %q, want %q", readyPrompt, want)
 		}
@@ -1667,7 +1686,7 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 
 func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, userText string) {
 	t.Helper()
-	for _, want := range []string{"Workspace Memory Policy", "fs/read_text_file", "fs/write_text_file", "MEMORY.md", "## User Message", userText} {
+	for _, want := range []string{"Workspace Memory Policy", "fs/read_text_file", "fs/write_text_file", "MEMORY.md", "knowledge/core.md", "knowledge/index.md", "skills/core.md", "## User Message", userText} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
