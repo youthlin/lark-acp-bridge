@@ -173,6 +173,13 @@ func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) error {
 	return err
 }
 
+func (c *Client) CancelSession(ctx context.Context, sessionID string) error {
+	_, err := c.call(ctx, "session/cancel", map[string]any{
+		"sessionId": sessionID,
+	})
+	return err
+}
+
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
 	return c.PromptWithOptions(ctx, sessionID, text, PromptOptions{})
 }

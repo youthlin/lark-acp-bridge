@@ -99,6 +99,36 @@ func TestClientNewSessionSendsMCPServers(t *testing.T) {
 	<-done
 }
 
+func TestClientCancelSession(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "session/cancel" {
+			t.Errorf("method = %q, want session/cancel", req.Method)
+		}
+		var params struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Errorf("Unmarshal params error = %v", err)
+			return
+		}
+		if params.SessionID != "session-1" {
+			t.Errorf("sessionId = %q, want session-1", params.SessionID)
+		}
+		server.writeResponse(t, req.ID, map[string]any{})
+	}()
+
+	if err := client.CancelSession(context.Background(), "session-1"); err != nil {
+		t.Fatalf("CancelSession() error = %v", err)
+	}
+	<-done
+}
+
 func TestClientHandlesWorkspaceFileRequests(t *testing.T) {
 	workspace := t.TempDir()
 	client, server := newPipeClient(t, workspace)

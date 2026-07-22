@@ -15,6 +15,7 @@ const acpRequestTimeout = 10 * time.Minute
 type acpRuntime interface {
 	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (string, error)
 	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error)
+	CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error
 	CloseSession(key SessionKey) error
 	Shutdown(ctx context.Context) error
 }
@@ -72,6 +73,16 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 		return output, fmt.Errorf("session/prompt: %w", err)
 	}
 	return output, nil
+}
+
+func (r *runtimeManager) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {
+	client, err := r.clientForSession(ctx, session, agent)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return client.CancelSession(ctx, session.ACPSessionID)
 }
 
 func (r *runtimeManager) CloseSession(key SessionKey) error {

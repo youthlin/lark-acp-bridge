@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,6 +26,36 @@ type Service struct {
 	feishu   []*feishu.Adapter        // Bots 实例
 	stores   map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
 	runtime  acpRuntime               // acp client 运行时
+
+	taskMu          sync.Mutex
+	tasks           map[SessionKey]*runningTask
+	wikiTimers      map[SessionKey]*time.Timer
+	wikiGenerations map[SessionKey]int64
+	wikiStatuses    map[SessionKey]wikiRunStatus
+}
+
+type taskKind string
+
+const (
+	taskKindUser taskKind = "user"
+	taskKindWiki taskKind = "wiki"
+
+	defaultWikiInterval = 5 * time.Minute
+)
+
+type runningTask struct {
+	kind    taskKind
+	cancel  context.CancelFunc
+	session Session
+	agent   config.AgentConfig
+}
+
+type wikiRunStatus struct {
+	running     bool
+	lastStarted time.Time
+	lastEnded   time.Time
+	lastError   string
+	lastSuccess bool
 }
 
 // NewService 创建服务实例
@@ -33,10 +64,14 @@ type Service struct {
 //	@param store 会话储存, 实际使用传nil即可, 单元测试可传 [NewSessionStore] 实例进来避免污染真实会话
 func NewService(cfg config.Config, store *SessionStore) *Service {
 	s := &Service{
-		cfg:      cfg,
-		registry: acp.NewRegistry(cfg.Agents),
-		stores:   make(map[string]*SessionStore),
-		runtime:  newRuntimeManager(),
+		cfg:             cfg,
+		registry:        acp.NewRegistry(cfg.Agents),
+		stores:          make(map[string]*SessionStore),
+		runtime:         newRuntimeManager(),
+		tasks:           make(map[SessionKey]*runningTask),
+		wikiTimers:      make(map[SessionKey]*time.Timer),
+		wikiGenerations: make(map[SessionKey]int64),
+		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
 	}
 	for _, bot := range cfg.Bots {
 		s.feishu = append(s.feishu, feishu.NewAdapter(bot, s))
@@ -113,6 +148,10 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return workspaceGuide(workspaceStatus), nil
 	}
 
+	if strings.TrimSpace(text) != "" {
+		s.cancelMessageWork(msg)
+	}
+
 	// 斜杠命令
 	if strings.HasPrefix(text, "/") {
 		return s.handleCommand(ctx, text, msg), nil
@@ -135,6 +174,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/session list - 列出当前聊天的历史 ACP 会话",
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
+			"/wiki on|off|status|interval <duration> - 管理当前会话的自动知识沉淀",
 			"/status - 查看服务状态",
 			"",
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
@@ -143,6 +183,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.newSession(ctx, fields, msg)
 	case "/session":
 		return s.handleSessionCommand(ctx, text, msg)
+	case "/wiki":
+		return s.handleWikiCommand(ctx, text, msg)
 	case "/status":
 		return s.status(msg)
 	default:
@@ -175,6 +217,56 @@ func (s *Service) handleSessionCommand(ctx context.Context, text string, msg fei
 		return s.setSessionTitle(ctx, msg, title)
 	default:
 		return "暂不支持这个 session 命令。可用 /session list、/session resume <index> 或 /session title <title>。"
+	}
+}
+
+func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return "可用命令：/wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
+	}
+	session, ok := s.findSession(msg)
+	if !ok {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再配置 wiki。"
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "会话持久化未初始化。"
+	}
+	switch fields[1] {
+	case "on":
+		session.WikiDisabled = false
+		if err := store.Upsert(session); err != nil {
+			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
+			return "保存 wiki 配置失败：" + err.Error()
+		}
+		return "已开启当前会话的自动知识沉淀。"
+	case "off":
+		session.WikiDisabled = true
+		s.cancelWikiTimer(session.Key)
+		if err := store.Upsert(session); err != nil {
+			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
+			return "保存 wiki 配置失败：" + err.Error()
+		}
+		return "已关闭当前会话的自动知识沉淀。"
+	case "status":
+		return s.wikiStatus(session)
+	case "interval":
+		if len(fields) < 3 {
+			return "请使用 /wiki interval <duration> 指定时间，例如 /wiki interval 5m。"
+		}
+		interval, err := parseWikiInterval(fields[2])
+		if err != nil {
+			return err.Error()
+		}
+		session.WikiIntervalSec = int(interval.Seconds())
+		if err := store.Upsert(session); err != nil {
+			slog.ErrorContext(ctx, "保存 wiki interval 失败", "错误", err)
+			return "保存 wiki interval 失败：" + err.Error()
+		}
+		return "已设置当前会话自动知识沉淀延迟：" + formatDuration(interval) + "。"
+	default:
+		return "暂不支持这个 wiki 命令。可用 /wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
 	}
 }
 
@@ -279,6 +371,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		return Session{}, config.AgentConfig{}, "", "", "初始化 workspace 失败：" + err.Error()
 	}
 	key := sessionKeyFromMessage(msg)
+	s.cancelSessionWork(key)
 	acpSessionID, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
 		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
@@ -424,8 +517,11 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 }
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, clearInitialPrompt bool) (string, error) {
-	reply, sentProgress, err := s.promptRuntimeWithProgress(ctx, msg, session, agent, text)
+	reply, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return "", nil
+		}
 		if strings.TrimSpace(reply) != "" {
 			return reply, nil
 		}
@@ -444,6 +540,19 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		return "ACP session 已完成，但没有返回文本。", nil
 	}
 	return reply, nil
+}
+
+func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, bool, error) {
+	ctx, finish := s.startTask(ctx, session, agent, taskKindUser)
+	defer finish()
+	reply, sentProgress, err := s.promptRuntimeWithProgress(ctx, msg, session, agent, text)
+	if errors.Is(err, context.Canceled) {
+		return reply, sentProgress, err
+	}
+	if err == nil {
+		s.scheduleWikiAfterUserPrompt(session, agent)
+	}
+	return reply, sentProgress, err
 }
 
 func (s *Service) promptRuntime(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, error) {
@@ -477,7 +586,11 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 			stream.updateText(finalReply)
 		}
 		if err != nil {
-			stream.updateProcess("执行失败：" + err.Error())
+			if errors.Is(err, context.Canceled) {
+				stream.updateProcess("已取消")
+			} else {
+				stream.updateProcess("执行失败：" + err.Error())
+			}
 		}
 		stream.close()
 	}
@@ -1552,4 +1665,232 @@ func stripMentionNames(text string, mentions []feishu.Mention) string {
 		text = strings.ReplaceAll(text, "@"+mention.Name, "")
 	}
 	return strings.TrimSpace(text)
+}
+
+func parseWikiInterval(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("wiki interval 不能为空")
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("wiki interval 必须大于 0")
+		}
+		return time.Duration(n) * time.Minute, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("wiki interval 格式无效，可用 5m、30s 或纯数字分钟")
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("wiki interval 必须大于 0")
+	}
+	return d, nil
+}
+
+func wikiInterval(session Session) time.Duration {
+	if session.WikiIntervalSec > 0 {
+		return time.Duration(session.WikiIntervalSec) * time.Second
+	}
+	return defaultWikiInterval
+}
+
+func formatDuration(d time.Duration) string {
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return d.String()
+}
+
+func (s *Service) wikiStatus(session Session) string {
+	enabled := !session.WikiDisabled
+	lines := []string{
+		"当前会话自动知识沉淀：" + map[bool]string{true: "开启", false: "关闭"}[enabled],
+		"延迟：" + formatDuration(wikiInterval(session)),
+	}
+	s.taskMu.Lock()
+	status := s.wikiStatuses[session.Key]
+	_, timerSet := s.wikiTimers[session.Key]
+	task := s.tasks[session.Key]
+	s.taskMu.Unlock()
+	if timerSet {
+		lines = append(lines, "状态：等待定时触发")
+	} else if status.running || (task != nil && task.kind == taskKindWiki) {
+		lines = append(lines, "状态：正在反思")
+	} else if !status.lastStarted.IsZero() {
+		state := "成功"
+		if !status.lastSuccess {
+			state = "失败"
+		}
+		lines = append(lines, "最近一次："+state)
+		lines = append(lines, "开始："+status.lastStarted.Format(time.RFC3339))
+		if !status.lastEnded.IsZero() {
+			lines = append(lines, "结束："+status.lastEnded.Format(time.RFC3339))
+		}
+		if status.lastError != "" {
+			lines = append(lines, "错误："+status.lastError)
+		}
+	} else {
+		lines = append(lines, "状态：尚未触发")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func wikiReflectionPrompt(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		workspace = "$BOT_WORKSPACE"
+	}
+	return strings.Join([]string{
+		"请对刚才的对话进行反思，根据需要更新你的知识体系。",
+		"",
+		"## 操作规范",
+		"先阅读 `" + workspace + "/skills/wiki/SKILL.md` 了解完整的知识维护规范，然后按其中的流程执行。",
+		"如果没有值得沉淀的新信息，不要修改文件。",
+		"本轮是系统内部反思轮次，无需回复用户；如果必须输出文本，只输出 NoReply。",
+	}, "\n")
+}
+
+func (s *Service) startTask(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind) (context.Context, func()) {
+	s.cancelWikiTimer(session.Key)
+	ctx, cancel := context.WithCancel(ctx)
+	task := &runningTask{
+		kind:    kind,
+		cancel:  cancel,
+		session: session,
+		agent:   agent,
+	}
+
+	var previous *runningTask
+	s.taskMu.Lock()
+	previous = s.tasks[session.Key]
+	s.tasks[session.Key] = task
+	s.taskMu.Unlock()
+	if previous != nil {
+		previous.cancel()
+		go s.cancelRuntimeTask(context.Background(), previous)
+	}
+
+	return ctx, func() {
+		s.taskMu.Lock()
+		if s.tasks[session.Key] == task {
+			delete(s.tasks, session.Key)
+		}
+		s.taskMu.Unlock()
+		cancel()
+	}
+}
+
+func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
+	if task == nil || strings.TrimSpace(task.session.ACPSessionID) == "" {
+		return
+	}
+	if err := s.runtime.CancelSession(ctx, task.session, task.agent); err != nil {
+		slog.WarnContext(ctx, "取消 ACP session 失败", "session", task.session.ACPSessionID, "kind", task.kind, "错误", err)
+	}
+}
+
+func (s *Service) cancelSessionWork(key SessionKey) {
+	s.cancelWikiTimer(key)
+	s.taskMu.Lock()
+	task := s.tasks[key]
+	delete(s.tasks, key)
+	s.taskMu.Unlock()
+	if task != nil {
+		task.cancel()
+		go s.cancelRuntimeTask(context.Background(), task)
+	}
+}
+
+func (s *Service) cancelMessageWork(msg feishu.Message) {
+	for _, key := range sessionKeysFromMessage(msg) {
+		s.cancelSessionWork(key)
+	}
+}
+
+func (s *Service) cancelWikiTimer(key SessionKey) {
+	s.taskMu.Lock()
+	if s.wikiGenerations == nil {
+		s.wikiGenerations = make(map[SessionKey]int64)
+	}
+	s.wikiGenerations[key]++
+	timer := s.wikiTimers[key]
+	delete(s.wikiTimers, key)
+	s.taskMu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
+	if session.WikiDisabled || session.Status != "ready" || strings.TrimSpace(session.ACPSessionID) == "" {
+		s.cancelWikiTimer(session.Key)
+		return
+	}
+	interval := wikiInterval(session)
+	if interval <= 0 {
+		interval = defaultWikiInterval
+	}
+	key := session.Key
+	s.taskMu.Lock()
+	if s.wikiGenerations == nil {
+		s.wikiGenerations = make(map[SessionKey]int64)
+	}
+	s.wikiGenerations[key]++
+	generation := s.wikiGenerations[key]
+	if old := s.wikiTimers[key]; old != nil {
+		old.Stop()
+	}
+	timer := time.AfterFunc(interval, func() {
+		s.runWikiTimer(key, generation, session, agent)
+	})
+	s.wikiTimers[key] = timer
+	s.taskMu.Unlock()
+}
+
+func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {
+	s.taskMu.Lock()
+	if s.wikiGenerations[key] != generation {
+		s.taskMu.Unlock()
+		return
+	}
+	delete(s.wikiTimers, key)
+	if current := s.tasks[key]; current != nil {
+		s.wikiGenerations[key]++
+		s.taskMu.Unlock()
+		s.scheduleWikiAfterUserPrompt(session, agent)
+		return
+	}
+	status := s.wikiStatuses[key]
+	status.running = true
+	status.lastStarted = time.Now()
+	status.lastEnded = time.Time{}
+	status.lastError = ""
+	status.lastSuccess = false
+	s.wikiStatuses[key] = status
+	s.taskMu.Unlock()
+
+	ctx, finish := s.startTask(context.Background(), session, agent, taskKindWiki)
+	_, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
+	finish()
+
+	s.taskMu.Lock()
+	status = s.wikiStatuses[key]
+	status.running = false
+	status.lastEnded = time.Now()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		status.lastError = err.Error()
+		status.lastSuccess = false
+	} else {
+		status.lastError = ""
+		status.lastSuccess = true
+	}
+	s.wikiStatuses[key] = status
+	s.taskMu.Unlock()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("wiki 自动知识沉淀失败", "session", session.ACPSessionID, "错误", err)
+	}
 }

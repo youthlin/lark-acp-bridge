@@ -21,6 +21,8 @@ type Session struct {
 	Workspace            string     `json:"workspace,omitempty"`
 	Status               string     `json:"status"`
 	PendingInitialPrompt string     `json:"pending_initial_prompt,omitempty"`
+	WikiDisabled         bool       `json:"wiki_disabled,omitempty"`
+	WikiIntervalSec      int        `json:"wiki_interval_sec,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 }

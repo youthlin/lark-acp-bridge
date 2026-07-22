@@ -1684,6 +1684,262 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	}
 }
 
+func TestHandleWikiCommandPersistsConfig(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Default(), store)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Status:       "ready",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/wiki interval 1s",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki interval) error = %v", err)
+	}
+	if !strings.Contains(reply, "1s") {
+		t.Fatalf("reply = %q, want interval confirmation", reply)
+	}
+	session, ok := store.Get(key)
+	if !ok || session.WikiIntervalSec != 1 {
+		t.Fatalf("session = %+v, want wiki interval persisted", session)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_off",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/wiki off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭") {
+		t.Fatalf("reply = %q, want off confirmation", reply)
+	}
+	session, ok = store.Get(key)
+	if !ok || !session.WikiDisabled {
+		t.Fatalf("session = %+v, want wiki disabled", session)
+	}
+}
+
+func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "ACP 回复",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "旧任务输出\n"},
+				},
+			},
+		},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Status:       "ready",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	ctx := context.Background()
+	var cards []*fakeStreamCard
+	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ThreadID:  "omt_thread",
+			Text:      "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_second",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "改成做这个",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second) error = %v", err)
+	}
+	if reply != "" && reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want empty streamed reply or final text", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "" {
+			t.Fatalf("first reply = %q, want silent cancellation", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt was not cancelled")
+	}
+	if rt.promptCallCount() != 2 {
+		t.Fatalf("prompt calls = %d, want old and new prompt", rt.promptCallCount())
+	}
+	if len(cards) == 0 {
+		t.Fatal("old prompt should create a stream card before cancellation")
+	}
+	cancelled := false
+	for _, update := range cards[0].processUpdatesSnapshot() {
+		if strings.Contains(update, "已取消") {
+			cancelled = true
+			break
+		}
+	}
+	if !cancelled {
+		t.Fatalf("process updates = %+v, want cancellation marker", cards[0].processUpdatesSnapshot())
+	}
+	if !cards[0].isClosed() {
+		t.Fatal("cancelled old card should be closed")
+	}
+}
+
+func TestWikiTimerRunsSilentReflection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "NoReply"}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	session := Session{
+		Key:             SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		Status:          "ready",
+		WikiIntervalSec: 1,
+	}
+	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+
+	waitForCondition(t, 2*time.Second, func() bool { return rt.promptCallCount() == 1 })
+	if got := rt.promptCalls[0].Text; !strings.Contains(got, "请对刚才的对话进行反思") || !strings.Contains(got, "NoReply") {
+		t.Fatalf("wiki prompt = %q, want reflection prompt", got)
+	}
+	svc.taskMu.Lock()
+	status := svc.wikiStatuses[session.Key]
+	_, hasTimer := svc.wikiTimers[session.Key]
+	svc.taskMu.Unlock()
+	if hasTimer {
+		t.Fatal("wiki timer should not reschedule itself after reflection")
+	}
+	if !status.lastSuccess || status.running {
+		t.Fatalf("wiki status = %+v, want completed success", status)
+	}
+}
+
+func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply:   "ACP 回复",
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	session := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		Status:          "ready",
+		WikiIntervalSec: 1,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.taskMu.Lock()
+	svc.wikiGenerations[key] = 1
+	svc.taskMu.Unlock()
+	wikiDone := make(chan struct{})
+	go func() {
+		svc.runWikiTimer(key, 1, session, config.Default().Agents["traex"])
+		close(wikiDone)
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_user",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "先处理我的新问题",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(user) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want user prompt reply", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	select {
+	case <-wikiDone:
+	case <-time.After(time.Second):
+		t.Fatal("wiki reflection was not cancelled")
+	}
+	if rt.promptCallCount() != 2 {
+		t.Fatalf("prompt calls = %d, want wiki then user prompt", rt.promptCallCount())
+	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ok() {
+		return
+	}
+	t.Fatalf("condition not met within %s", timeout)
+}
+
 func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, userText string) {
 	t.Helper()
 	for _, want := range []string{"Workspace Memory Policy", "fs/read_text_file", "fs/write_text_file", "MEMORY.md", "knowledge/core.md", "knowledge/index.md", "skills/core.md", "## User Message", userText} {
@@ -1694,13 +1950,17 @@ func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, user
 }
 
 type fakeRuntime struct {
+	mu            sync.Mutex
 	newSessionID  string
 	newSessionIDs []string
 	promptReply   string
 	promptUpdates []acp.PromptUpdate
 	afterUpdates  func()
+	blockPrompt   chan struct{}
+	blockPromptAt int
 	newCalls      []fakeNewCall
 	promptCalls   []fakePromptCall
+	cancelCalls   []fakeCancelCall
 	closedKeys    []SessionKey
 }
 
@@ -1716,7 +1976,13 @@ type fakePromptCall struct {
 	Text    string
 }
 
+type fakeCancelCall struct {
+	Session Session
+}
+
 func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
 	if len(f.newSessionIDs) > 0 {
 		id := f.newSessionIDs[0]
@@ -1730,25 +1996,61 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 }
 
 func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error) {
+	f.mu.Lock()
 	f.promptCalls = append(f.promptCalls, fakePromptCall{Session: session, Text: text})
+	callNumber := len(f.promptCalls)
+	updates := append([]acp.PromptUpdate(nil), f.promptUpdates...)
+	afterUpdates := f.afterUpdates
+	blockPrompt := f.blockPrompt
+	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
+	reply := f.promptReply
+	f.mu.Unlock()
 	if opts.OnUpdate != nil {
-		for _, update := range f.promptUpdates {
+		for _, update := range updates {
 			opts.OnUpdate(update)
 		}
 	}
-	if f.afterUpdates != nil {
-		f.afterUpdates()
+	if afterUpdates != nil {
+		afterUpdates()
 	}
-	return f.promptReply, nil
+	if blockThisPrompt {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-blockPrompt:
+		}
+	}
+	return reply, nil
+}
+
+func (f *fakeRuntime) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Session: session})
+	return nil
 }
 
 func (f *fakeRuntime) CloseSession(key SessionKey) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closedKeys = append(f.closedKeys, key)
 	return nil
 }
 
 func (f *fakeRuntime) Shutdown(ctx context.Context) error {
 	return nil
+}
+
+func (f *fakeRuntime) promptCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.promptCalls)
+}
+
+func (f *fakeRuntime) cancelCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.cancelCalls)
 }
 
 type fakeStreamCard struct {
