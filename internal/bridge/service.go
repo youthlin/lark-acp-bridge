@@ -148,15 +148,15 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return workspaceGuide(workspaceStatus), nil
 	}
 
-	if strings.TrimSpace(text) != "" {
-		s.cancelMessageWork(msg)
-	}
-
 	// 斜杠命令
 	if strings.HasPrefix(text, "/") {
+		s.cancelRunningMessageWork(msg)
 		return s.handleCommand(ctx, text, msg), nil
 	}
 	// 普通消息
+	if strings.TrimSpace(text) != "" {
+		s.cancelMessageWork(msg)
+	}
 	return s.prompt(ctx, msg, text)
 }
 
@@ -263,6 +263,11 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		if err := store.Upsert(session); err != nil {
 			slog.ErrorContext(ctx, "保存 wiki interval 失败", "错误", err)
 			return "保存 wiki interval 失败：" + err.Error()
+		}
+		if s.hasWikiTimer(session.Key) {
+			if agent, ok := s.registry.Get(session.AgentName); ok {
+				s.scheduleWikiAfterUserPrompt(session, agent)
+			}
 		}
 		return "已设置当前会话自动知识沉淀延迟：" + formatDuration(interval) + "。"
 	default:
@@ -627,12 +632,13 @@ type promptChunkFlush struct {
 }
 
 type promptChunkAccumulator struct {
-	mu       sync.Mutex
-	stream   *promptCardStream
-	current  *promptChunkStream
-	reply    strings.Builder
-	timer    *time.Timer
-	flushing sync.WaitGroup
+	mu              sync.Mutex
+	stream          *promptCardStream
+	current         *promptChunkStream
+	reply           strings.Builder
+	timer           *time.Timer
+	timerGeneration int64
+	flushing        sync.WaitGroup
 }
 
 func newPromptChunkAccumulator(stream *promptCardStream) *promptChunkAccumulator {
@@ -735,22 +741,30 @@ func (a *promptChunkAccumulator) applyFlush(flush promptChunkFlush) {
 }
 
 func (a *promptChunkAccumulator) scheduleLocked() {
+	a.timerGeneration++
+	generation := a.timerGeneration
 	if a.timer != nil {
-		a.timer.Reset(promptCardFlushDelay)
-		return
+		if a.timer.Stop() {
+			a.flushing.Done()
+		}
 	}
 	a.flushing.Add(1)
 	a.timer = time.AfterFunc(promptCardFlushDelay, func() {
 		defer a.flushing.Done()
 		a.mu.Lock()
-		a.timer = nil
+		if a.timerGeneration != generation {
+			a.mu.Unlock()
+			return
+		}
 		flush := a.takeFlushLocked(false)
+		a.timer = nil
 		a.mu.Unlock()
 		a.applyFlush(flush)
 	})
 }
 
 func (a *promptChunkAccumulator) stopTimerLocked() {
+	a.timerGeneration++
 	if a.timer == nil {
 		return
 	}
@@ -1793,8 +1807,7 @@ func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
 	}
 }
 
-func (s *Service) cancelSessionWork(key SessionKey) {
-	s.cancelWikiTimer(key)
+func (s *Service) cancelRunningSessionWork(key SessionKey) {
 	s.taskMu.Lock()
 	task := s.tasks[key]
 	delete(s.tasks, key)
@@ -1805,9 +1818,20 @@ func (s *Service) cancelSessionWork(key SessionKey) {
 	}
 }
 
+func (s *Service) cancelSessionWork(key SessionKey) {
+	s.cancelWikiTimer(key)
+	s.cancelRunningSessionWork(key)
+}
+
 func (s *Service) cancelMessageWork(msg feishu.Message) {
 	for _, key := range sessionKeysFromMessage(msg) {
 		s.cancelSessionWork(key)
+	}
+}
+
+func (s *Service) cancelRunningMessageWork(msg feishu.Message) {
+	for _, key := range sessionKeysFromMessage(msg) {
+		s.cancelRunningSessionWork(key)
 	}
 }
 
@@ -1823,6 +1847,12 @@ func (s *Service) cancelWikiTimer(key SessionKey) {
 	if timer != nil {
 		timer.Stop()
 	}
+}
+
+func (s *Service) hasWikiTimer(key SessionKey) bool {
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	return s.wikiTimers[key] != nil
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {

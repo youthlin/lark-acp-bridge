@@ -943,12 +943,20 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 }
 
 func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
+	var cardsMu sync.Mutex
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
+		cardsMu.Lock()
 		cards = append(cards, card)
+		cardsMu.Unlock()
 		return card, nil
 	})
+	cardsSnapshot := func() []*fakeStreamCard {
+		cardsMu.Lock()
+		defer cardsMu.Unlock()
+		return append([]*fakeStreamCard(nil), cards...)
+	}
 	stream := newPromptCardStream(ctx, feishu.Message{
 		MessageID: "om_msg",
 		ChatID:    "oc_private",
@@ -957,14 +965,15 @@ func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
 	chunks := newPromptChunkAccumulator(stream)
 	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "Hel"})
 	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "lo"})
-	if len(cards) != 0 {
-		t.Fatalf("cards = %+v, want debounce to delay card creation", cards)
+	if got := cardsSnapshot(); len(got) != 0 {
+		t.Fatalf("cards = %+v, want debounce to delay card creation", got)
 	}
 	time.Sleep(promptCardFlushDelay + 80*time.Millisecond)
-	if len(cards) != 1 {
-		t.Fatalf("cards = %+v, want one stream card after debounce flush", cards)
+	gotCards := cardsSnapshot()
+	if len(gotCards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card after debounce flush", gotCards)
 	}
-	if got := cards[0].textUpdatesSnapshot(); len(got) != 1 || got[0] != "Hello" {
+	if got := gotCards[0].textUpdatesSnapshot(); len(got) != 1 || got[0] != "Hello" {
 		t.Fatalf("textUpdates = %+v, want one debounced update", got)
 	}
 	chunks.close()
@@ -1733,6 +1742,111 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 	session, ok = store.Get(key)
 	if !ok || !session.WikiDisabled {
 		t.Fatalf("session = %+v, want wiki disabled", session)
+	}
+}
+
+func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Default(), store)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	session := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Status:          "ready",
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+	svc.taskMu.Lock()
+	beforeGeneration := svc.wikiGenerations[key]
+	_, beforeTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !beforeTimer {
+		t.Fatal("wiki timer should be scheduled before status command")
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_status",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/wiki status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki status) error = %v", err)
+	}
+	if !strings.Contains(reply, "等待定时触发") {
+		t.Fatalf("reply = %q, want scheduled timer status", reply)
+	}
+	svc.taskMu.Lock()
+	afterGeneration := svc.wikiGenerations[key]
+	_, afterTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !afterTimer {
+		t.Fatal("/wiki status should not cancel scheduled wiki timer")
+	}
+	if afterGeneration != beforeGeneration {
+		t.Fatalf("wiki generation = %d, want unchanged %d", afterGeneration, beforeGeneration)
+	}
+}
+
+func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(&fakeRuntime{promptReply: "NoReply"})
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	session := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Status:          "ready",
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+	svc.taskMu.Lock()
+	beforeGeneration := svc.wikiGenerations[key]
+	_, beforeTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !beforeTimer {
+		t.Fatal("wiki timer should be scheduled before interval command")
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_interval",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/wiki interval 1s",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki interval) error = %v", err)
+	}
+	if !strings.Contains(reply, "1s") {
+		t.Fatalf("reply = %q, want interval confirmation", reply)
+	}
+	svc.taskMu.Lock()
+	afterGeneration := svc.wikiGenerations[key]
+	_, afterTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !afterTimer {
+		t.Fatal("/wiki interval should keep wiki timer scheduled")
+	}
+	if afterGeneration <= beforeGeneration {
+		t.Fatalf("wiki generation = %d, want greater than %d after reschedule", afterGeneration, beforeGeneration)
+	}
+	session, ok := store.Get(key)
+	if !ok || session.WikiIntervalSec != 1 {
+		t.Fatalf("session = %+v, want wiki interval persisted", session)
 	}
 }
 
