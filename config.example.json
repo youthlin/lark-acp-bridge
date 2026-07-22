@@ -1,0 +1,18 @@
+{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "",
+      "app_secret": "",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "env": {},
+      "default_cwd": "$HOME"
+    }
+  }
+}

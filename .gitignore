@@ -1,0 +1,5 @@
+.env
+*.local.json
+/dist/
+/tmp/
+/bin/
