@@ -109,6 +109,162 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_reply",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		ParentID:  "om_parent",
+		Text:      "@我的智能助手 这种情况怎么实现",
+		Mentions: []feishu.Mention{
+			{Name: "我的智能助手"},
+		},
+		Reply: &feishu.ReplyContext{
+			MessageID: "om_parent",
+			MsgType:   "text",
+			Text:      "我先发一条消息",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want one prompt", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{"## Replied Message Context", "我先发一条消息", "请结合上面的被回复消息理解下面的用户消息。", "这种情况怎么实现"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHandleFeishuMessageIncludesImageReplyContextInPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	imagePath := filepath.Join(t.TempDir(), "cache", "img_test_reply_image.png")
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_reply",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		ParentID:  "om_parent",
+		Text:      "@我的智能助手 看看这张图",
+		Mentions: []feishu.Mention{
+			{Name: "我的智能助手"},
+		},
+		Reply: &feishu.ReplyContext{
+			MessageID: "om_parent",
+			MsgType:   "image",
+			ImageKey:  "img_test_reply_image",
+			LocalPath: imagePath,
+			Images: []feishu.MessageImage{
+				{ImageKey: "img_test_reply_image", LocalPath: imagePath},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want one prompt", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{"## Replied Message Context", "[图片消息]", "img_test_reply_image", imagePath, "看看这张图"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHandleFeishuImageMessagePromptsWithLocalPath(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	imagePath := filepath.Join(t.TempDir(), "cache", "img_v3_direct.png")
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_image",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		MsgType:   "image",
+		ImageKey:  "img_v3_direct",
+		LocalPath: imagePath,
+		Images: []feishu.MessageImage{
+			{ImageKey: "img_v3_direct", LocalPath: imagePath},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want one prompt", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{"[图片消息]", "image_key: img_v3_direct", "local_path: " + imagePath} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHandleFeishuUnsupportedEmptyMessageDoesNotPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		Workspace: filepath.Join(t.TempDir(), "not-ready-workspace"),
+		MessageID: "om_unsupported",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MsgType:   "unsupported",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "暂不支持的消息类型。" {
+		t.Fatalf("reply = %q, want unsupported message type reply", reply)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want no ACP calls", rt.newCalls, rt.promptCalls)
+	}
+}
+
 func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	firstDir := t.TempDir()
@@ -389,7 +545,7 @@ func TestHandleFeishuAutoSessionUsesFirstPromptAsTitle(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuMessageGuidesWorkspaceSetup(t *testing.T) {
+func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "bot-a")
 	svc := NewService(config.Default(), nil)
 
@@ -404,8 +560,8 @@ func TestHandleFeishuMessageGuidesWorkspaceSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage() error = %v", err)
 	}
-	if !strings.Contains(reply, "当前 bot workspace 尚未 ready") || !strings.Contains(reply, "发送普通文本或 /new [cwd]") {
-		t.Fatalf("reply = %q, want workspace setup guide", reply)
+	if reply != "暂不支持的消息类型。" {
+		t.Fatalf("reply = %q, want unsupported message type reply", reply)
 	}
 	for _, name := range []string{
 		"SOUL.md",
@@ -1259,6 +1415,58 @@ func TestHandleFeishuMessageRecreatesSessionAfterSetupWorkspaceReady(t *testing.
 	}
 	if session.Status != "ready" || session.ACPSessionID != "ready-session" {
 		t.Fatalf("session = %+v, want recreated ready session", session)
+	}
+}
+
+func TestHandleFeishuMessageRecreatesReadySessionTitleUsesUserText(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workspace := filepath.Join(t.TempDir(), "bot-a")
+	if err := markWorkspaceReady(workspace); err != nil {
+		t.Fatalf("markWorkspaceReady() error = %v", err)
+	}
+	workDir := t.TempDir()
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		Cwd:          workDir,
+		Workspace:    workspace,
+		Status:       "ready",
+		ACPSessionID: "",
+	}); err != nil {
+		t.Fatalf("Upsert(ready session) error = %v", err)
+	}
+	rt := &fakeRuntime{newSessionID: "ready-session", promptReply: "ACP 回复"}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		Workspace: workspace,
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "请继续处理",
+		Reply: &feishu.ReplyContext{
+			MessageID: "om_parent",
+			Text:      "这是一段非常长的被回复消息，不应该成为新 ACP session 的标题",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.Title != "请继续处理" {
+		t.Fatalf("session title = %q, want user text title", session.Title)
+	}
+	if len(rt.promptCalls) != 1 || !strings.Contains(rt.promptCalls[0].Text, "## Replied Message Context") {
+		t.Fatalf("prompt calls = %+v, want reply context still included", rt.promptCalls)
 	}
 }
 

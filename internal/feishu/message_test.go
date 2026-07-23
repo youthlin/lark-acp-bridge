@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"strings"
 	"testing"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -55,6 +56,65 @@ func TestParseMessageTextWithMention(t *testing.T) {
 	}
 	if len(msg.Mentions) != 1 || msg.Mentions[0].Name != "我的智能助手" || msg.Mentions[0].ID != "ou_bot" {
 		t.Fatalf("Mentions = %+v", msg.Mentions)
+	}
+}
+
+func TestParseMessagePostWithImage(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_post"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content:     ptr(`{"zh_cn":{"title":"带图消息","content":[[{"tag":"text","text":"看图"},{"tag":"img","image_key":"img_v3_post"}]]}}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.MsgType != "post" || !strings.Contains(msg.Text, "带图消息") || !strings.Contains(msg.Text, "看图") {
+		t.Fatalf("message = %+v, want readable post text", msg)
+	}
+	if len(msg.Images) != 1 || msg.Images[0].ImageKey != "img_v3_post" || msg.ImageKey != "img_v3_post" {
+		t.Fatalf("images = %+v imageKey=%q, want post image key", msg.Images, msg.ImageKey)
+	}
+	if got := msg.PromptText(); !strings.Contains(got, "image_key: img_v3_post") {
+		t.Fatalf("PromptText() = %q, want image key", got)
+	}
+}
+
+func TestParseMessagePostWithTopLevelContentAndImage(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_test_nested_post"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content:     ptr(`{"title":"","content":[[{"tag":"text","text":"测试图文消息：","style":[]}],[{"tag":"img","image_key":"img_test_nested_post","width":1080,"height":1451}]],"content_v2":[[{"tag":"text","text":"测试图文消息：","style":[]}],[{"tag":"img","image_key":"img_test_nested_post","width":1080,"height":1451}]]}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.MsgType != "post" || msg.Text != "测试图文消息：" {
+		t.Fatalf("message = %+v, want readable top-level post text", msg)
+	}
+	if len(msg.Images) != 1 || msg.ImageKey != "img_test_nested_post" {
+		t.Fatalf("images = %+v imageKey=%q, want image key", msg.Images, msg.ImageKey)
+	}
+	prompt := msg.PromptText()
+	for _, want := range []string{"测试图文消息：", "[图片消息]", "img_test_nested_post"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PromptText() = %q, want %q", prompt, want)
+		}
 	}
 }
 

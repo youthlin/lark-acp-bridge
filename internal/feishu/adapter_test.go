@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,11 +17,13 @@ import (
 type countingHandler struct {
 	count int
 	ctx   context.Context
+	msg   Message
 }
 
 func (h *countingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (string, error) {
 	h.count++
 	h.ctx = ctx
+	h.msg = msg
 	return "", nil
 }
 
@@ -50,6 +53,36 @@ func (f *fakeReactionClient) AddReaction(ctx context.Context, messageID string) 
 func (f *fakeReactionClient) DeleteReaction(ctx context.Context, messageID string, reactionID string) error {
 	f.deleted = append(f.deleted, fakeReactionDelete{MessageID: messageID, ReactionID: reactionID})
 	return nil
+}
+
+type fakeMessageClient struct {
+	replies       map[string]*ReplyContext
+	calls         []string
+	downloadCalls []fakeImageDownloadCall
+	err           error
+	downloadErr   error
+}
+
+type fakeImageDownloadCall struct {
+	MessageID string
+	ImageKey  string
+	Workspace string
+}
+
+func (f *fakeMessageClient) GetMessage(ctx context.Context, messageID string, workspace string) (*ReplyContext, error) {
+	f.calls = append(f.calls, messageID)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.replies[messageID], nil
+}
+
+func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error) {
+	f.downloadCalls = append(f.downloadCalls, fakeImageDownloadCall{MessageID: messageID, ImageKey: imageKey, Workspace: workspace})
+	if f.downloadErr != nil {
+		return "", f.downloadErr
+	}
+	return filepath.Join(workspace, "cache", imageKey+".png"), nil
 }
 
 func TestAdapterSkipsDuplicateMessageID(t *testing.T) {
@@ -148,6 +181,261 @@ func TestAdapterAddsMessageAttrsToContext(t *testing.T) {
 		if got := attrs[key]; got != want {
 			t.Fatalf("ctx attr %s = %q, want %q; attrs=%v", key, got, want, attrs)
 		}
+	}
+}
+
+func TestAdapterHydratesReplyContextFromParentMessage(t *testing.T) {
+	handler := &countingHandler{}
+	messages := &fakeMessageClient{
+		replies: map[string]*ReplyContext{
+			"om_parent": {
+				MessageID:  "om_parent",
+				SenderID:   "ou_other",
+				SenderType: "user",
+				MsgType:    "text",
+				Text:       "我先发一条消息",
+			},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.messages = messages
+	event := textEvent("om_reply", "oc_1", "继续处理")
+	event.Event.Message.ChatType = ptr("group")
+	event.Event.Message.ParentId = ptr("om_parent")
+	event.Event.Message.RootId = ptr("om_root")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if len(messages.calls) != 1 || messages.calls[0] != "om_parent" {
+		t.Fatalf("message get calls = %+v, want parent id", messages.calls)
+	}
+	if handler.msg.Reply == nil || handler.msg.Reply.Text != "我先发一条消息" {
+		t.Fatalf("reply context = %+v, want hydrated parent text", handler.msg.Reply)
+	}
+}
+
+func TestAdapterHydratesCurrentImageMessage(t *testing.T) {
+	handler := &countingHandler{}
+	messages := &fakeMessageClient{}
+	workspace := t.TempDir()
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a", Workspace: workspace}, handler)
+	adapter.messages = messages
+	event := imageEvent("om_image", "oc_1", "img_test_reply_image")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.msg.MsgType != "image" || handler.msg.ImageKey != "img_test_reply_image" {
+		t.Fatalf("message = %+v, want image type and key", handler.msg)
+	}
+	wantPath := filepath.Join(workspace, "cache", "img_test_reply_image.png")
+	if handler.msg.LocalPath != wantPath {
+		t.Fatalf("LocalPath = %q, want %q", handler.msg.LocalPath, wantPath)
+	}
+	if got := handler.msg.PromptText(); !strings.Contains(got, "local_path: "+wantPath) {
+		t.Fatalf("PromptText() = %q, want local path", got)
+	}
+	if len(messages.downloadCalls) != 1 || messages.downloadCalls[0] != (fakeImageDownloadCall{
+		MessageID: "om_image",
+		ImageKey:  "img_test_reply_image",
+		Workspace: workspace,
+	}) {
+		t.Fatalf("download calls = %+v, want current image download", messages.downloadCalls)
+	}
+}
+
+func TestAdapterHydratesAppReplyContext(t *testing.T) {
+	handler := &countingHandler{}
+	messages := &fakeMessageClient{
+		replies: map[string]*ReplyContext{
+			"om_parent": {
+				MessageID:  "om_parent",
+				SenderID:   "cli_bot",
+				SenderType: "app",
+				MsgType:    "text",
+				Text:       "bot output",
+			},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.messages = messages
+	event := textEvent("om_reply", "oc_1", "继续处理")
+	event.Event.Message.ChatType = ptr("group")
+	event.Event.Message.ParentId = ptr("om_parent")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.msg.Reply == nil || handler.msg.Reply.Text != "bot output" || handler.msg.Reply.SenderType != "app" {
+		t.Fatalf("reply context = %+v, want hydrated app sender text", handler.msg.Reply)
+	}
+}
+
+func TestAdapterHydratesBotReplyContext(t *testing.T) {
+	handler := &countingHandler{}
+	messages := &fakeMessageClient{
+		replies: map[string]*ReplyContext{
+			"om_parent": {
+				MessageID:  "om_parent",
+				SenderID:   "ou_bot",
+				SenderType: "bot",
+				MsgType:    "text",
+				Text:       "bot output",
+			},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.messages = messages
+	event := textEvent("om_reply", "oc_1", "继续处理")
+	event.Event.Message.ChatType = ptr("group")
+	event.Event.Message.ParentId = ptr("om_parent")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.msg.Reply == nil || handler.msg.Reply.Text != "bot output" || handler.msg.Reply.SenderType != "bot" {
+		t.Fatalf("reply context = %+v, want hydrated bot sender text", handler.msg.Reply)
+	}
+}
+
+func TestReplyContextFromLarkTextMessage(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("text").
+		Sender(larkim.NewSenderBuilder().
+			Id("ou_user").
+			SenderType("user").
+			Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"text":"hello reply"}`).
+			Build()).
+		Build()
+
+	reply := replyContextFromLarkMessage(item)
+	if reply == nil || reply.MessageID != "om_parent" || reply.SenderID != "ou_user" || reply.SenderType != "user" || reply.Text != "hello reply" {
+		t.Fatalf("reply context = %+v", reply)
+	}
+}
+
+func TestReplyContextFromLarkPostMessage(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("post").
+		Sender(larkim.NewSenderBuilder().
+			Id("ou_user").
+			SenderType("user").
+			Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"zh_cn":{"title":"复盘结论","content":[[{"tag":"text","text":"第一段"},{"tag":"a","text":"链接文字"}],[{"tag":"text","text":"第二段"}]]}}`).
+			Build()).
+		Build()
+
+	reply := replyContextFromLarkMessage(item)
+	if reply == nil {
+		t.Fatal("reply context = nil, want post text")
+	}
+	for _, want := range []string{"复盘结论", "第一段", "链接文字", "第二段"} {
+		if !strings.Contains(reply.Text, want) {
+			t.Fatalf("reply text = %q, want %q", reply.Text, want)
+		}
+	}
+}
+
+func TestReplyContextFromLarkPostMessageWithImage(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("post").
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"zh_cn":{"title":"带图消息","content":[[{"tag":"text","text":"看图"},{"tag":"img","image_key":"img_v3_post"}]]}}`).
+			Build()).
+		Build()
+
+	reply := replyContextFromLarkMessage(item)
+	if reply == nil {
+		t.Fatal("reply context = nil, want post image context")
+	}
+	if len(reply.Images) != 1 || reply.Images[0].ImageKey != "img_v3_post" || reply.ImageKey != "img_v3_post" {
+		t.Fatalf("reply images = %+v imageKey=%q, want post image", reply.Images, reply.ImageKey)
+	}
+	if !strings.Contains(reply.PromptText(), "image_key: img_v3_post") {
+		t.Fatalf("PromptText() = %q, want image key", reply.PromptText())
+	}
+}
+
+func TestReplyContextFromLarkInteractiveMessage(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("interactive").
+		Sender(larkim.NewSenderBuilder().
+			Id("cli_other_bot").
+			SenderType("app").
+			Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"**Review 结论**\n- 需要补测试"},{"tag":"button","text":{"tag":"plain_text","content":"查看详情"}}]},"header":{"title":{"tag":"plain_text","content":"QA Review"}}}`).
+			Build()).
+		Build()
+
+	reply := replyContextFromLarkMessage(item)
+	if reply == nil || reply.SenderType != "app" {
+		t.Fatalf("reply context = %+v, want app interactive text", reply)
+	}
+	for _, want := range []string{"QA Review", "Review 结论", "需要补测试", "查看详情"} {
+		if !strings.Contains(reply.Text, want) {
+			t.Fatalf("reply text = %q, want %q", reply.Text, want)
+		}
+	}
+}
+
+func TestReplyContextFromLarkImageMessage(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("image").
+		Sender(larkim.NewSenderBuilder().
+			Id("ou_user").
+			SenderType("user").
+			Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"image_key":"img_test_reply_image"}`).
+			Build()).
+		Build()
+
+	reply := replyContextFromLarkMessage(item)
+	if reply == nil {
+		t.Fatal("reply context = nil, want image context")
+	}
+	if reply.MsgType != "image" || reply.ImageKey != "img_test_reply_image" {
+		t.Fatalf("reply context = %+v, want image key", reply)
+	}
+	for _, want := range []string{"[图片消息]", "img_test_reply_image"} {
+		if !strings.Contains(reply.PromptText(), want) {
+			t.Fatalf("reply prompt text = %q, want %q", reply.PromptText(), want)
+		}
+	}
+}
+
+func TestLarkMessageClientHydratesReplyImageLocalPath(t *testing.T) {
+	reply := &ReplyContext{
+		MessageID: "om_parent",
+		MsgType:   "image",
+		Images:    []MessageImage{{ImageKey: "img_v3_reply"}},
+	}
+	setReplyPrimaryImage(reply)
+	messages := &fakeMessageClient{
+		replies: map[string]*ReplyContext{"om_parent": reply},
+	}
+	workspace := t.TempDir()
+	got, err := messages.GetMessage(context.Background(), "om_parent", workspace)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	// fakeMessageClient intentionally does not hydrate by itself; hydrateMessageImages
+	// is the shared helper used by the real lark client and event path.
+	got.Images = hydrateMessageImages(context.Background(), messages, got.MessageID, workspace, got.Images)
+	setReplyPrimaryImage(got)
+	wantPath := filepath.Join(workspace, "cache", "img_v3_reply.png")
+	if got.LocalPath != wantPath || !strings.Contains(got.PromptText(), "local_path: "+wantPath) {
+		t.Fatalf("reply = %+v prompt=%q, want hydrated local path %q", got, got.PromptText(), wantPath)
 	}
 }
 
@@ -253,6 +541,23 @@ func textEvent(messageID, chatID, text string) *larkim.P2MessageReceiveV1 {
 				ChatType:    ptr("p2p"),
 				MessageType: ptr("text"),
 				Content:     ptr(`{"text":"` + text + `"}`),
+			},
+		},
+	}
+}
+
+func imageEvent(messageID, chatID, imageKey string) *larkim.P2MessageReceiveV1 {
+	return &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: ptr("ou_sender")},
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   ptr(messageID),
+				ChatId:      ptr(chatID),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("image"),
+				Content:     ptr(`{"image_key":"` + imageKey + `"}`),
 			},
 		},
 	}

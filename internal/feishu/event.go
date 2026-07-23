@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -39,6 +40,9 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	if a.handler == nil {
 		return nil
 	}
+	msg.Images = hydrateMessageImages(ctx, a.messages, msg.MessageID, msg.Workspace, msg.Images)
+	setMessagePrimaryImage(&msg)
+	msg = a.withReplyContext(ctx, msg)
 	ctx = WithIntermediateReplySender(ctx, a.SendText)
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
 	reactionID := a.addProcessingReaction(ctx, msg)
@@ -56,6 +60,33 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	slog.InfoContext(ctx, "回复飞书消息成功")
 	return nil
+}
+
+func (a *Adapter) withReplyContext(ctx context.Context, msg Message) Message {
+	replyToID := replyToMessageID(msg)
+	if replyToID == "" || a.messages == nil {
+		return msg
+	}
+	reply, err := a.messages.GetMessage(ctx, replyToID, msg.Workspace)
+	if err != nil {
+		slog.WarnContext(ctx, "读取被回复飞书消息失败", "reply_to_message_id", replyToID, "错误", err)
+		return msg
+	}
+	if reply == nil || strings.TrimSpace(reply.PromptText()) == "" {
+		return msg
+	}
+	msg.Reply = reply
+	return msg
+}
+
+func replyToMessageID(msg Message) string {
+	for _, id := range []string{msg.ParentID, msg.RootID} {
+		id = strings.TrimSpace(id)
+		if id != "" && id != msg.MessageID {
+			return id
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {

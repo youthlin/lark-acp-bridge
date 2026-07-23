@@ -137,15 +137,17 @@ var _ feishu.Handler = (*Service)(nil)
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
 	text := strings.TrimSpace(msg.Text)
 	text = stripMentionNames(text, msg.Mentions)
-	slog.InfoContext(ctx, "处理解析后的消息", "text", text)
+	msg.Text = text
+	promptText := strings.TrimSpace(msg.PromptText())
+	slog.InfoContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
 
-	workspaceStatus, err := ensureWorkspace(msg.Workspace)
+	_, err := ensureWorkspace(msg.Workspace)
 	if err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return "初始化 workspace 失败：" + err.Error(), nil
 	}
-	if text == "" && !workspaceStatus.Ready {
-		return workspaceGuide(workspaceStatus), nil
+	if promptText == "" {
+		return "暂不支持的消息类型。", nil
 	}
 
 	// 斜杠命令
@@ -154,10 +156,10 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return s.handleCommand(ctx, text, msg), nil
 	}
 	// 普通消息
-	if strings.TrimSpace(text) != "" {
+	if promptText != "" {
 		s.cancelMessageWork(msg)
 	}
-	return s.prompt(ctx, msg, text)
+	return s.prompt(ctx, msg, promptText)
 }
 
 func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -439,14 +441,16 @@ func (s *Service) status(msg feishu.Message) string {
 }
 
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
+	userText := text
 	session, ok := s.findSession(msg)
 	clearInitialPrompt := false
 	if !ok {
-		created, agent, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(text)}, msg)
+		created, agent, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(userText)}, msg)
 		if errText != "" {
 			return errText, nil
 		}
 		session = created
+		text = promptTextWithReplyContext(msg, userText)
 		if strings.TrimSpace(initialPrompt) != "" {
 			if session.Status == "ready" {
 				text = promptWithUserMessage([]string{
@@ -466,11 +470,12 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 	if !ok {
 		return "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
 	}
+	text = promptTextWithReplyContext(msg, userText)
 	if session.Status == "setup" && strings.TrimSpace(session.PendingInitialPrompt) == "setup" {
 		text = promptWithUserMessage([]string{workspaceSetupPrompt(sessionWorkspace(session, msg))}, text)
 		clearInitialPrompt = true
 	} else if session.Status == "ready" && strings.TrimSpace(session.ACPSessionID) == "" {
-		created, _, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(text)}, msg)
+		created, _, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(userText)}, msg)
 		if errText != "" {
 			return errText, nil
 		}
@@ -497,6 +502,24 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 		}
 	}
 	return s.promptSession(ctx, msg, session, agent, text, clearInitialPrompt)
+}
+
+func promptTextWithReplyContext(msg feishu.Message, text string) string {
+	replyText := ""
+	if msg.Reply != nil {
+		replyText = strings.TrimSpace(msg.Reply.PromptText())
+	}
+	if replyText == "" {
+		return text
+	}
+	return strings.Join([]string{
+		"## Replied Message Context",
+		replyText,
+		"",
+		"请结合上面的被回复消息理解下面的用户消息。",
+		"",
+		strings.TrimSpace(text),
+	}, "\n")
 }
 
 func (s *Service) clearPendingInitialPrompt(ctx context.Context, msg feishu.Message, session Session) Session {

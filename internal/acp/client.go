@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/youthlin/lark-acp-bridge/internal/arg"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
@@ -279,6 +280,7 @@ func (c *Client) readLoop(stdout io.Reader) {
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
+		slog.Info("read acp line", "line", arg.RawJSON(line), "comp", "acp-loop")
 		var msg Message
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
