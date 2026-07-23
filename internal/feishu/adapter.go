@@ -25,13 +25,14 @@ type Handler interface {
 }
 
 type Adapter struct {
-	cfg      config.BotConfig // Bot配置
-	handler  Handler          // 消息处理
-	client   *lark.Client     // lark sdk Client 用于给用户发送消息
-	ws       *larkws.Client   // WebSocket 客户端 用于监听上行消息
-	deduper  *messageDeduper  // 消息去重
-	reaction reactionClient   // 消息处理期间添加/移除 reaction
-	messages messageClient    // 消息读取
+	cfg             config.BotConfig        // Bot配置
+	handler         Handler                 // 消息处理
+	client          *lark.Client            // lark sdk Client 用于给用户发送消息
+	ws              *larkws.Client          // WebSocket 客户端 用于监听上行消息
+	deduper         *messageDeduper         // 消息去重
+	reaction        reactionClient          // 消息处理期间添加/移除 reaction
+	messages        messageClient           // 消息读取
+	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
 }
 
 type reactionClient interface {
@@ -51,9 +52,10 @@ func NewAdapter(cfg config.BotConfig, handler Handler) *Adapter {
 		deduper.WithPath(filepath.Join(cfg.Workspace, "processed_messages.json"))
 	}
 	return &Adapter{
-		cfg:     cfg,
-		handler: handler,
-		deduper: deduper,
+		cfg:             cfg,
+		handler:         handler,
+		deduper:         deduper,
+		permissionCards: newPermissionCardRegistry(),
 	}
 }
 
@@ -84,7 +86,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
 		OnP2MessageReceiveV1(a.handleMessage).
 		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
-		OnP2MessageReactionDeletedV1(a.handleReactionDeleted)
+		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
+		OnP2CardActionTrigger(a.handleCardAction)
 	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler")))
 
 	a.ws = larkws.NewClient(

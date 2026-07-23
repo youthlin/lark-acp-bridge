@@ -32,6 +32,9 @@ type Service struct {
 	wikiTimers      map[SessionKey]*time.Timer
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
+
+	acpUpdateMu    sync.Mutex
+	acpUpdateUnsub map[SessionKey]func()
 }
 
 type taskKind string
@@ -72,6 +75,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		wikiTimers:      make(map[SessionKey]*time.Timer),
 		wikiGenerations: make(map[SessionKey]int64),
 		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
+		acpUpdateUnsub:  make(map[SessionKey]func()),
 	}
 	for _, bot := range cfg.Bots {
 		s.feishu = append(s.feishu, feishu.NewAdapter(bot, s))
@@ -167,6 +171,9 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 	if len(fields) == 0 {
 		return "" // text以/开头才会进来 这里不可能走到
 	}
+	if strings.HasPrefix(fields[0], "//") && len(fields[0]) > 2 {
+		return s.forwardACPCommand(ctx, "/"+strings.TrimPrefix(text, "//"), msg)
+	}
 	switch fields[0] {
 	case "/help":
 		return strings.Join([]string{
@@ -177,6 +184,11 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
 			"/wiki on|off|status|interval <duration> - 管理当前会话的自动知识沉淀",
+			"/cmds - 查看 ACP server 支持的 slash commands",
+			"/cmds /command [args] - 透传执行 ACP slash command",
+			"//command [args] - 透传执行 ACP slash command 的简写",
+			"/model - 查看当前模型和可用模型",
+			"/model <model> - 设置当前会话模型",
 			"/status - 查看服务状态",
 			"",
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
@@ -187,6 +199,10 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleSessionCommand(ctx, text, msg)
 	case "/wiki":
 		return s.handleWikiCommand(ctx, text, msg)
+	case "/cmds":
+		return s.handleCommandsCommand(ctx, text, msg)
+	case "/model":
+		return s.handleModelCommand(ctx, text, msg)
 	case "/status":
 		return s.status(msg)
 	default:
@@ -220,6 +236,220 @@ func (s *Service) handleSessionCommand(ctx context.Context, text string, msg fei
 	default:
 		return "暂不支持这个 session 命令。可用 /session list、/session resume <index> 或 /session title <title>。"
 	}
+}
+
+func (s *Service) handleCommandsCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	if len(fields) >= 2 {
+		command := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+		return s.forwardACPCommand(ctx, command, msg)
+	}
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再查看 ACP commands。"
+	}
+	if len(session.AvailableCommands) == 0 {
+		return "当前 ACP server 还没有上报可用命令。可以先发送一条普通消息，等 server 返回 available_commands_update 后再查看。"
+	}
+	lines := []string{"当前 ACP server 支持的命令："}
+	for _, cmd := range session.AvailableCommands {
+		name := strings.TrimSpace(cmd.Name)
+		if name == "" {
+			continue
+		}
+		line := "/" + name
+		if desc := strings.TrimSpace(cmd.Description); desc != "" {
+			line += " - " + desc
+		}
+		if cmd.Input != nil && strings.TrimSpace(cmd.Input.Hint) != "" {
+			line += "（参数：" + strings.TrimSpace(cmd.Input.Hint) + "）"
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "", "执行命令：/cmds /review ...，或简写为 //review ...")
+	return strings.Join(lines, "\n")
+}
+
+func (s *Service) forwardACPCommand(ctx context.Context, command string, msg feishu.Message) string {
+	command = strings.TrimSpace(command)
+	if !strings.HasPrefix(command, "/") || strings.HasPrefix(command, "//") {
+		return "请使用 /cmds /command [args]，或简写为 //command [args]。"
+	}
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再执行 ACP command。"
+	}
+	name := strings.TrimPrefix(strings.Fields(command)[0], "/")
+	if len(session.AvailableCommands) > 0 && !sessionHasCommand(session, name) {
+		return "当前 ACP server 未上报该命令：" + "/" + name + "。发送 /cmds 查看可用命令。"
+	}
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return "未找到 agent 配置：" + session.AgentName
+	}
+	reply, _, err := s.runUserPrompt(ctx, msg, session, agent, command)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return ""
+		}
+		if strings.TrimSpace(reply) != "" {
+			return reply
+		}
+		return "执行 ACP command 失败：" + err.Error()
+	}
+	if strings.TrimSpace(reply) == "" {
+		return "ACP command 已执行完成。"
+	}
+	return reply
+}
+
+func sessionHasCommand(session Session, name string) bool {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+	for _, cmd := range session.AvailableCommands {
+		if cmd.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func formatModelStatus(session Session) string {
+	lines := []string{"当前会话模型："}
+	current := currentModelDisplay(session)
+	if current == "" {
+		current = "未知"
+	}
+	lines = append(lines, current)
+	modelOpt, hasModelOpt := findModelConfigOption(session)
+	if hasModelOpt && len(modelOpt.Options) > 0 {
+		lines = append(lines, "", "可用模型：")
+		for _, opt := range modelOpt.Options {
+			if strings.TrimSpace(opt.Value) == "" {
+				continue
+			}
+			marker := ""
+			if opt.Value == modelValueString(modelOpt.CurrentValue) {
+				marker = " *"
+			}
+			label := opt.Value
+			if strings.TrimSpace(opt.Name) != "" && opt.Name != opt.Value {
+				label += " - " + strings.TrimSpace(opt.Name)
+			}
+			lines = append(lines, marker+" "+label)
+		}
+	} else if session.Models != nil && len(session.Models.AvailableModels) > 0 {
+		lines = append(lines, "", "可用模型：")
+		for _, model := range session.Models.AvailableModels {
+			if strings.TrimSpace(model.ModelID) == "" {
+				continue
+			}
+			marker := ""
+			if model.ModelID == session.Models.CurrentModelID {
+				marker = " *"
+			}
+			label := model.ModelID
+			if strings.TrimSpace(model.Name) != "" && model.Name != model.ModelID {
+				label += " - " + strings.TrimSpace(model.Name)
+			}
+			lines = append(lines, marker+" "+label)
+		}
+	} else {
+		lines = append(lines, "", "当前 ACP server 还没有上报可用模型。")
+	}
+	lines = append(lines, "", "设置模型：/model <model>")
+	return strings.Join(lines, "\n")
+}
+
+func currentModelDisplay(session Session) string {
+	if modelOpt, ok := findModelConfigOption(session); ok {
+		current := modelValueString(modelOpt.CurrentValue)
+		if current != "" {
+			return current
+		}
+	}
+	if session.Models != nil {
+		return session.Models.CurrentModelID
+	}
+	return ""
+}
+
+func findModelConfigOption(session Session) (acp.SessionConfigOption, bool) {
+	for _, opt := range session.ConfigOptions {
+		if opt.ID == "model" || opt.Category == "model" {
+			return opt, true
+		}
+	}
+	return acp.SessionConfigOption{}, false
+}
+
+func resolveModelValue(opt acp.SessionConfigOption, target string) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	if len(opt.Options) == 0 {
+		return target, true
+	}
+	for _, value := range opt.Options {
+		if value.Value == target || strings.EqualFold(value.Name, target) {
+			return value.Value, true
+		}
+	}
+	return "", false
+}
+
+func modelValueString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func (s *Service) handleModelCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再查看或设置模型。"
+	}
+	if len(fields) == 1 {
+		return formatModelStatus(session)
+	}
+	target := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+	if target == "" {
+		return "请使用 /model <model> 设置当前会话模型。"
+	}
+	modelOpt, ok := findModelConfigOption(session)
+	if !ok {
+		return "当前 ACP server 没有上报 model 配置项，无法通过 /model 设置。"
+	}
+	value, ok := resolveModelValue(modelOpt, target)
+	if !ok {
+		return "未知模型：" + target + "\n\n" + formatModelStatus(session)
+	}
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return "未找到 agent 配置：" + session.AgentName
+	}
+	options, err := s.runtime.SetConfigOption(ctx, session, agent, modelOpt.ID, value)
+	if err != nil {
+		slog.ErrorContext(ctx, "设置 ACP model 失败", "model", value, "错误", err)
+		return "设置模型失败：" + err.Error()
+	}
+	session.ConfigOptions = options
+	if modelOpt, ok := findModelConfigOption(session); ok {
+		if modelValueString(modelOpt.CurrentValue) == value && session.Models != nil {
+			session.Models.CurrentModelID = value
+		}
+	}
+	s.saveSessionState(ctx, msg, session)
+	return "已设置当前会话模型：" + value
 }
 
 func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -340,6 +570,74 @@ func (s *Service) setSessionTitle(ctx context.Context, msg feishu.Message, title
 	return "已设置当前会话标题：" + session.Title
 }
 
+func (s *Service) subscribeACPStateUpdates(ctx context.Context, msg feishu.Message, key SessionKey) {
+	s.acpUpdateMu.Lock()
+	if old := s.acpUpdateUnsub[key]; old != nil {
+		old()
+	}
+	unsub := s.runtime.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
+		s.handleACPStateUpdate(ctx, msg, key, sessionID, update)
+	})
+	s.acpUpdateUnsub[key] = unsub
+	s.acpUpdateMu.Unlock()
+}
+
+func (s *Service) handleACPStateUpdate(ctx context.Context, msg feishu.Message, key SessionKey, sessionID string, update acp.SessionUpdate) {
+	if !isACPStateUpdate(update) {
+		return
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return
+	}
+	session, ok := store.Get(key)
+	if !ok || session.ACPSessionID != sessionID {
+		return
+	}
+	changed := applyACPStateUpdate(&session, update)
+	if !changed {
+		return
+	}
+	if err := store.Upsert(session); err != nil {
+		slog.WarnContext(ctx, "保存 ACP session 状态失败", "session", sessionID, "update", update.SessionUpdate, "错误", err)
+	}
+}
+
+func (s *Service) saveSessionState(ctx context.Context, msg feishu.Message, session Session) {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return
+	}
+	if err := store.Upsert(session); err != nil {
+		slog.WarnContext(ctx, "保存会话状态失败", "session", session.ACPSessionID, "错误", err)
+	}
+}
+
+func isACPStateUpdate(update acp.SessionUpdate) bool {
+	switch update.SessionUpdate {
+	case "available_commands_update", "config_option_update":
+		return true
+	default:
+		return false
+	}
+}
+
+func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
+	if session == nil {
+		return false
+	}
+	switch update.SessionUpdate {
+	case "available_commands_update":
+		session.AvailableCommands = append([]acp.AvailableCommand(nil), update.AvailableCommands...)
+		return true
+	case "config_option_update":
+		session.ConfigOptions = append([]acp.SessionConfigOption(nil), update.ConfigOptions...)
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
 	session, _, source, _, errText := s.createSession(ctx, fields, msg)
 	if errText != "" {
@@ -379,7 +677,8 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	}
 	key := sessionKeyFromMessage(msg)
 	s.cancelSessionWork(key)
-	acpSessionID, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
+	s.subscribeACPStateUpdates(ctx, msg, key)
+	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
 		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "", "创建 ACP session 失败：" + err.Error()
@@ -388,11 +687,14 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		Key:                  key,
 		Title:                req.Title,
 		AgentName:            agentName,
-		ACPSessionID:         acpSessionID,
+		ACPSessionID:         sessionInfo.SessionID,
 		Cwd:                  filepath.Clean(cwd),
 		Workspace:            msg.Workspace,
 		Status:               "ready",
 		PendingInitialPrompt: "ready",
+		AvailableCommands:    sessionInfo.AvailableCommands,
+		ConfigOptions:        sessionInfo.ConfigOptions,
+		Models:               sessionInfo.Models,
 	}
 	initialPrompt := ""
 	if workspaceStatus.Ready {
@@ -526,8 +828,16 @@ func (s *Service) clearPendingInitialPrompt(ctx context.Context, msg feishu.Mess
 	if strings.TrimSpace(session.PendingInitialPrompt) == "" {
 		return session
 	}
-	session.PendingInitialPrompt = ""
 	store := s.storeForMessage(msg)
+	if store != nil {
+		if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
+			session = latest
+		}
+	}
+	if strings.TrimSpace(session.PendingInitialPrompt) == "" {
+		return session
+	}
+	session.PendingInitialPrompt = ""
 	if store == nil {
 		return session
 	}
@@ -545,6 +855,7 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 }
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, clearInitialPrompt bool) (string, error) {
+	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	reply, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -605,6 +916,16 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 			flushStreams()
 			stream.updatePromptUpdate(update)
 		},
+		OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+			outcome, ok, err := feishu.RequestPermission(reqCtx, msg, req)
+			if err != nil {
+				return acp.PermissionOutcome{}, err
+			}
+			if ok {
+				return outcome, nil
+			}
+			return defaultPermissionOutcome(req), nil
+		},
 	}
 	reply, err := s.runtime.Prompt(ctx, session, agent, text, opts)
 	chunks.close()
@@ -626,6 +947,18 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 		reply = ""
 	}
 	return reply, stream.hasStarted(), err
+}
+
+func defaultPermissionOutcome(req acp.PermissionRequest) acp.PermissionOutcome {
+	for _, option := range req.Options {
+		switch option.Kind {
+		case "reject_once", "reject_always":
+			if strings.TrimSpace(option.OptionID) != "" {
+				return acp.PermissionOutcome{Outcome: "selected", OptionID: option.OptionID}
+			}
+		}
+	}
+	return acp.PermissionOutcome{Outcome: "cancelled"}
 }
 
 const (

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,19 +23,36 @@ type Client struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	workspace string
+	cwd       string
 
 	nextID atomic.Int64
 
 	writeMu sync.Mutex
 
 	pendingMu sync.Mutex
-	pending   map[int64]chan rpcResponse
+	pending   map[string]chan rpcResponse
+
+	capMu      sync.RWMutex
+	initialize InitializeResult
+
+	toolMu    sync.RWMutex
+	toolCalls map[string]map[string]ToolCallInfo
 
 	updateMu       sync.Mutex
 	updateHandlers map[int64]UpdateHandler
 	nextHandlerID  atomic.Int64
 
+	permissionMu     sync.RWMutex
+	permissionScopes map[string]permissionScope
+	nextPromptGen    atomic.Int64
+
 	closeOnce sync.Once
+}
+
+type permissionScope struct {
+	generation int64
+	ctx        context.Context
+	handler    PermissionRequestHandler
 }
 
 type UpdateHandler func(sessionID string, update SessionUpdate)
@@ -42,7 +60,8 @@ type UpdateHandler func(sessionID string, update SessionUpdate)
 type PromptUpdateHandler func(update PromptUpdate)
 
 type PromptOptions struct {
-	OnUpdate PromptUpdateHandler
+	OnUpdate            PromptUpdateHandler
+	OnPermissionRequest PermissionRequestHandler
 }
 
 type PromptUpdate struct {
@@ -51,14 +70,18 @@ type PromptUpdate struct {
 }
 
 type SessionUpdate struct {
-	SessionUpdate string          `json:"sessionUpdate"`
-	Content       *ContentBlock   `json:"content,omitempty"`
-	Message       string          `json:"message,omitempty"`
-	Name          string          `json:"name,omitempty"`
-	Status        string          `json:"status,omitempty"`
-	Title         string          `json:"title,omitempty"`
-	StopReason    string          `json:"stopReason,omitempty"`
-	Raw           json.RawMessage `json:"-"`
+	SessionUpdate     string                `json:"sessionUpdate"`
+	Content           *ContentBlock         `json:"content,omitempty"`
+	Message           string                `json:"message,omitempty"`
+	Name              string                `json:"name,omitempty"`
+	Status            string                `json:"status,omitempty"`
+	Title             string                `json:"title,omitempty"`
+	ToolCallID        string                `json:"toolCallId,omitempty"`
+	Kind              string                `json:"kind,omitempty"`
+	StopReason        string                `json:"stopReason,omitempty"`
+	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
+	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
+	Raw               json.RawMessage       `json:"-"`
 }
 
 type ContentBlock struct {
@@ -66,8 +89,108 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
-type newSessionResult struct {
-	SessionID string `json:"sessionId"`
+type ToolCallInfo struct {
+	ToolCallID string          `json:"toolCallId,omitempty"`
+	Title      string          `json:"title,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Status     string          `json:"status,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	Locations  json.RawMessage `json:"locations,omitempty"`
+	RawInput   json.RawMessage `json:"rawInput,omitempty"`
+	RawOutput  json.RawMessage `json:"rawOutput,omitempty"`
+	generation int64
+}
+
+type PermissionRequestHandler func(context.Context, PermissionRequest) (PermissionOutcome, error)
+
+type PermissionRequest struct {
+	RequestID     string                `json:"-"`
+	SessionID     string                `json:"sessionId"`
+	ToolCall      PermissionToolCallRef `json:"toolCall"`
+	Options       []PermissionOption    `json:"options"`
+	ToolCallState *ToolCallInfo         `json:"-"`
+	Raw           json.RawMessage       `json:"-"`
+}
+
+type PermissionToolCallRef struct {
+	ToolCallID string `json:"toolCallId"`
+}
+
+type PermissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name,omitempty"`
+	Kind     string `json:"kind"`
+}
+
+type PermissionOutcome struct {
+	Outcome  string `json:"outcome"`
+	OptionID string `json:"optionId,omitempty"`
+}
+
+type PermissionResult struct {
+	Outcome PermissionOutcome `json:"outcome"`
+}
+
+type SetConfigOptionResult struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions"`
+}
+
+type InitializeResult struct {
+	ProtocolVersion   int                `json:"protocolVersion"`
+	AgentCapabilities AgentCapabilities  `json:"agentCapabilities"`
+	AgentInfo         ImplementationInfo `json:"agentInfo"`
+	AuthMethods       []AuthMethod       `json:"authMethods,omitempty"`
+}
+
+type AgentCapabilities struct {
+	LoadSession         bool                `json:"loadSession,omitempty"`
+	PromptCapabilities  PromptCapabilities  `json:"promptCapabilities,omitempty"`
+	MCPCapabilities     MCPCapabilities     `json:"mcpCapabilities,omitempty"`
+	SessionCapabilities SessionCapabilities `json:"sessionCapabilities,omitempty"`
+	Auth                AuthCapabilities    `json:"auth,omitempty"`
+}
+
+type PromptCapabilities struct {
+	Image           bool `json:"image,omitempty"`
+	Audio           bool `json:"audio,omitempty"`
+	EmbeddedContext bool `json:"embeddedContext,omitempty"`
+}
+
+type MCPCapabilities struct {
+	HTTP bool `json:"http,omitempty"`
+	SSE  bool `json:"sse,omitempty"`
+}
+
+type SessionCapabilities struct {
+	Resume                any `json:"resume,omitempty"`
+	Close                 any `json:"close,omitempty"`
+	Delete                any `json:"delete,omitempty"`
+	List                  any `json:"list,omitempty"`
+	AdditionalDirectories any `json:"additionalDirectories,omitempty"`
+}
+
+func (c SessionCapabilities) SupportsResume() bool {
+	return c.Resume != nil
+}
+
+func (c SessionCapabilities) SupportsAdditionalDirectories() bool {
+	return c.AdditionalDirectories != nil
+}
+
+type AuthCapabilities struct {
+	Logout any `json:"logout,omitempty"`
+}
+
+type ImplementationInfo struct {
+	Name    string `json:"name,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+type AuthMethod struct {
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type rpcResponse struct {
@@ -104,11 +227,13 @@ func Start(ctx context.Context, agent config.AgentConfig, workspace string) (*Cl
 	}
 
 	client := &Client{
-		cmd:            cmd,
-		stdin:          stdin,
-		workspace:      workspace,
-		pending:        make(map[int64]chan rpcResponse),
-		updateHandlers: make(map[int64]UpdateHandler),
+		cmd:              cmd,
+		stdin:            stdin,
+		workspace:        workspace,
+		pending:          make(map[string]chan rpcResponse),
+		toolCalls:        make(map[string]map[string]ToolCallInfo),
+		permissionScopes: make(map[string]permissionScope),
+		updateHandlers:   make(map[int64]UpdateHandler),
 	}
 	client.nextID.Store(1)
 	go client.readLoop(stdout)
@@ -129,56 +254,106 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Initialize(ctx context.Context) error {
-	_, err := c.call(ctx, "initialize", map[string]any{
+	result, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": 1,
-		"clientCapabilities": map[string]any{
-			"fs": map[string]any{
-				"readTextFile":  strings.TrimSpace(c.workspace) != "",
-				"writeTextFile": strings.TrimSpace(c.workspace) != "",
-			},
-			"terminal": false,
-		},
+		// lark-acp-bridge starts TraeX as a local child process, so TraeX can use
+		// its own local file and command tools under the session cwd. Do not
+		// advertise ACP client-side fs/terminal capabilities unless the bridge
+		// later owns a remote, virtual, or permission-gated workspace surface.
+		"clientCapabilities": map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "lark-acp-bridge",
 			"title":   "Lark ACP Bridge",
 			"version": "dev",
 		},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	var parsed InitializeResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		return fmt.Errorf("解析 initialize 响应: %w", err)
+	}
+	if parsed.ProtocolVersion != 1 {
+		return fmt.Errorf("不支持的 ACP protocolVersion: %d", parsed.ProtocolVersion)
+	}
+	c.capMu.Lock()
+	c.initialize = parsed
+	c.capMu.Unlock()
+	return nil
 }
 
-func (c *Client) NewSession(ctx context.Context, cwd string) (string, error) {
-	result, err := c.call(ctx, "session/new", map[string]any{
-		"cwd":        cwd,
-		"mcpServers": []any{},
-	})
+func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error) {
+	c.cwd = filepath.Clean(cwd)
+	result, err := c.call(ctx, "session/new", c.lifecycleParams("", cwd))
 	if err != nil {
-		return "", err
+		return SessionInfo{}, err
 	}
-	var parsed newSessionResult
+	var parsed SessionInfo
 	if err := json.Unmarshal(result, &parsed); err != nil {
-		return "", fmt.Errorf("解析 session/new 响应: %w", err)
+		return SessionInfo{}, fmt.Errorf("解析 session/new 响应: %w", err)
 	}
 	if parsed.SessionID == "" {
-		return "", fmt.Errorf("session/new 未返回 sessionId")
+		return SessionInfo{}, fmt.Errorf("session/new 未返回 sessionId")
 	}
-	return parsed.SessionID, nil
+	return parsed, nil
 }
 
-func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) error {
-	_, err := c.call(ctx, "session/load", map[string]any{
-		"sessionId":  sessionID,
-		"cwd":        cwd,
-		"mcpServers": []any{},
-	})
-	return err
+func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) (SessionInfo, error) {
+	c.capMu.RLock()
+	supportsLoad := c.initialize.AgentCapabilities.LoadSession
+	c.capMu.RUnlock()
+	if !supportsLoad {
+		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 loadSession capability")
+	}
+	c.cwd = filepath.Clean(cwd)
+	result, err := c.call(ctx, "session/load", c.lifecycleParams(sessionID, cwd))
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return parseSessionInfoResult(result, "session/load")
+}
+
+func (c *Client) ResumeSession(ctx context.Context, sessionID, cwd string) (SessionInfo, error) {
+	c.capMu.RLock()
+	supportsResume := c.initialize.AgentCapabilities.SessionCapabilities.SupportsResume()
+	c.capMu.RUnlock()
+	if !supportsResume {
+		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 sessionCapabilities.resume")
+	}
+	c.cwd = filepath.Clean(cwd)
+	result, err := c.call(ctx, "session/resume", c.lifecycleParams(sessionID, cwd))
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return parseSessionInfoResult(result, "session/resume")
 }
 
 func (c *Client) CancelSession(ctx context.Context, sessionID string) error {
-	_, err := c.call(ctx, "session/cancel", map[string]any{
+	msg, err := NewNotification("session/cancel", map[string]any{
 		"sessionId": sessionID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "Notify ACP", "method", "session/cancel", "req", msg)
+	return c.write(msg)
+}
+
+func (c *Client) SetConfigOption(ctx context.Context, sessionID, configID string, value any) ([]SessionConfigOption, error) {
+	result, err := c.call(ctx, "session/set_config_option", map[string]any{
+		"sessionId": sessionID,
+		"configId":  configID,
+		"value":     value,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parsed SetConfigOptionResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		return nil, fmt.Errorf("解析 session/set_config_option 响应: %w", err)
+	}
+	return parsed.ConfigOptions, nil
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
@@ -188,6 +363,8 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, er
 func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
 	var output strings.Builder
 	var outputMu sync.Mutex
+	generation := c.setPermissionHandler(sessionID, ctx, opts.OnPermissionRequest)
+	defer c.clearPermissionHandler(sessionID, generation)
 	unsubscribe := c.SubscribeUpdates(func(id string, update SessionUpdate) {
 		if id != sessionID {
 			return
@@ -246,15 +423,15 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	slog.InfoContext(ctx, "Call ACP", "method", method, "req", req)
 	ch := make(chan rpcResponse, 1)
 	c.pendingMu.Lock()
-	c.pending[id] = ch
+	c.pending[req.ID.Key()] = ch
 	c.pendingMu.Unlock()
 	if err := c.write(req); err != nil {
-		c.removePending(id)
+		c.removePending(req.ID)
 		return nil, err
 	}
 	select {
 	case <-ctx.Done():
-		c.removePending(id)
+		c.removePending(req.ID)
 		return nil, ctx.Err()
 	case res := <-ch:
 		return res.result, res.err
@@ -309,7 +486,7 @@ func (c *Client) handleMessage(msg Message) {
 }
 
 func (c *Client) handleResponse(msg Message) {
-	ch := c.removePending(*msg.ID)
+	ch := c.removePending(msg.ID)
 	if ch == nil {
 		return
 	}
@@ -352,6 +529,7 @@ func (c *Client) handleSessionUpdate(msg Message) {
 		}
 	}
 	update.Raw = append(json.RawMessage(nil), params.Update...)
+	c.rememberToolCallUpdate(params.SessionID, params.Update)
 
 	c.updateMu.Lock()
 	handlers := make([]UpdateHandler, 0, len(c.updateHandlers))
@@ -371,6 +549,9 @@ func (c *Client) handleAgentRequest(msg Message) {
 		c.replyResult(msg, result, err)
 	case "fs/write_text_file":
 		result, err := c.handleWriteTextFile(msg.Params)
+		c.replyResult(msg, result, err)
+	case "session/request_permission":
+		result, err := c.handleRequestPermission(msg.ID, msg.Params)
 		c.replyResult(msg, result, err)
 	default:
 		c.replyUnsupported(msg)
@@ -406,7 +587,10 @@ func (c *Client) replyResult(msg Message, result any, err error) {
 
 func (c *Client) handleReadTextFile(raw json.RawMessage) (any, error) {
 	var params struct {
-		Path string `json:"path"`
+		SessionID string `json:"sessionId"`
+		Path      string `json:"path"`
+		Line      int    `json:"line,omitempty"`
+		Limit     int    `json:"limit,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, fmt.Errorf("解析 fs/read_text_file 参数: %w", err)
@@ -419,13 +603,18 @@ func (c *Client) handleReadTextFile(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取文件 %s: %w", params.Path, err)
 	}
-	return map[string]string{"content": string(data)}, nil
+	content := string(data)
+	if params.Line > 0 || params.Limit > 0 {
+		content = sliceLines(content, params.Line, params.Limit)
+	}
+	return map[string]string{"content": content}, nil
 }
 
 func (c *Client) handleWriteTextFile(raw json.RawMessage) (any, error) {
 	var params struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		SessionID string `json:"sessionId"`
+		Path      string `json:"path"`
+		Content   string `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, fmt.Errorf("解析 fs/write_text_file 参数: %w", err)
@@ -444,34 +633,253 @@ func (c *Client) handleWriteTextFile(raw json.RawMessage) (any, error) {
 	if err := os.WriteFile(path, []byte(params.Content), 0o644); err != nil {
 		return nil, fmt.Errorf("写入文件 %s: %w", params.Path, err)
 	}
-	return map[string]bool{"created": os.IsNotExist(statErr)}, nil
+	return nil, nil
 }
 
 func (c *Client) workspacePath(path string) (string, error) {
-	if strings.TrimSpace(c.workspace) == "" {
-		return "", fmt.Errorf("未配置 workspace，不能执行文件操作")
-	}
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("文件路径为空")
 	}
-	base, err := filepath.Abs(c.workspace)
-	if err != nil {
-		return "", fmt.Errorf("解析 workspace: %w", err)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("文件路径必须是绝对路径: %s", path)
 	}
-	var target string
-	if filepath.IsAbs(path) {
-		target = filepath.Clean(path)
-	} else {
-		target = filepath.Join(base, path)
-	}
-	target, err = filepath.Abs(target)
+	target := filepath.Clean(path)
+	target, err := filepath.Abs(target)
 	if err != nil {
 		return "", fmt.Errorf("解析文件路径: %w", err)
 	}
-	if target != base && !strings.HasPrefix(target, base+string(os.PathSeparator)) {
-		return "", fmt.Errorf("文件路径超出 workspace: %s", path)
+	roots := c.fileRoots()
+	for _, root := range roots {
+		if target == root || strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return target, nil
+		}
 	}
-	return target, nil
+	return "", fmt.Errorf("文件路径超出允许目录: %s", path)
+}
+
+func (c *Client) fileRoots() []string {
+	seen := make(map[string]struct{}, 2)
+	var roots []string
+	for _, root := range []string{c.cwd, c.workspace} {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		abs = filepath.Clean(abs)
+		if _, ok := seen[abs]; ok {
+			continue
+		}
+		seen[abs] = struct{}{}
+		roots = append(roots, abs)
+	}
+	return roots
+}
+
+func (c *Client) lifecycleParams(sessionID, cwd string) map[string]any {
+	params := map[string]any{
+		"cwd":        filepath.Clean(cwd),
+		"mcpServers": []any{},
+	}
+	if strings.TrimSpace(sessionID) != "" {
+		params["sessionId"] = sessionID
+	}
+	c.capMu.RLock()
+	supportsAdditionalDirectories := c.initialize.AgentCapabilities.SessionCapabilities.SupportsAdditionalDirectories()
+	c.capMu.RUnlock()
+	if supportsAdditionalDirectories && strings.TrimSpace(c.workspace) != "" {
+		if workspace, err := filepath.Abs(c.workspace); err == nil && filepath.Clean(workspace) != filepath.Clean(cwd) {
+			params["additionalDirectories"] = []string{filepath.Clean(workspace)}
+		}
+	}
+	return params
+}
+
+func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (any, error) {
+	var req PermissionRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("解析 session/request_permission 参数: %w", err)
+	}
+	if id != nil {
+		req.RequestID = id.Key()
+	}
+	req.Raw = append(json.RawMessage(nil), raw...)
+	if tool := c.toolCallSnapshot(req.SessionID, req.ToolCall.ToolCallID); tool != nil {
+		req.ToolCallState = tool
+	}
+	ctx, handler := c.permissionRequestHandler(req)
+	if ctx != nil && ctx.Err() != nil {
+		return PermissionResult{Outcome: PermissionOutcome{Outcome: "cancelled"}}, nil
+	}
+	if handler != nil {
+		outcome, err := handler(ctx, req)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || (ctx != nil && ctx.Err() != nil) {
+				return PermissionResult{Outcome: PermissionOutcome{Outcome: "cancelled"}}, nil
+			}
+			return nil, err
+		}
+		if strings.TrimSpace(outcome.Outcome) == "" {
+			outcome.Outcome = "cancelled"
+		}
+		return PermissionResult{Outcome: outcome}, nil
+	}
+	for _, option := range req.Options {
+		switch option.Kind {
+		case "reject_once", "reject_always":
+			if strings.TrimSpace(option.OptionID) != "" {
+				return PermissionResult{Outcome: PermissionOutcome{Outcome: "selected", OptionID: option.OptionID}}, nil
+			}
+		}
+	}
+	return PermissionResult{Outcome: PermissionOutcome{Outcome: "cancelled"}}, nil
+}
+
+func (c *Client) setPermissionHandler(sessionID string, ctx context.Context, handler PermissionRequestHandler) int64 {
+	if strings.TrimSpace(sessionID) == "" {
+		return 0
+	}
+	generation := c.nextPromptGen.Add(1)
+	c.permissionMu.Lock()
+	defer c.permissionMu.Unlock()
+	if c.permissionScopes == nil {
+		c.permissionScopes = make(map[string]permissionScope)
+	}
+	c.permissionScopes[sessionID] = permissionScope{
+		generation: generation,
+		ctx:        ctx,
+		handler:    handler,
+	}
+	return generation
+}
+
+func (c *Client) clearPermissionHandler(sessionID string, generation int64) {
+	if strings.TrimSpace(sessionID) == "" || generation == 0 {
+		return
+	}
+	c.permissionMu.Lock()
+	defer c.permissionMu.Unlock()
+	scope, ok := c.permissionScopes[sessionID]
+	if ok && scope.generation == generation {
+		delete(c.permissionScopes, sessionID)
+	}
+}
+
+func (c *Client) permissionRequestHandler(req PermissionRequest) (context.Context, PermissionRequestHandler) {
+	c.permissionMu.RLock()
+	defer c.permissionMu.RUnlock()
+	scope := c.permissionScopes[req.SessionID]
+	if req.ToolCallState != nil && req.ToolCallState.generation != 0 && scope.generation != 0 && req.ToolCallState.generation != scope.generation {
+		return canceledContext(), nil
+	}
+	if scope.ctx == nil || scope.handler == nil {
+		return scope.ctx, nil
+	}
+	return scope.ctx, scope.handler
+}
+
+func (c *Client) rememberToolCallUpdate(sessionID string, raw json.RawMessage) {
+	var update struct {
+		SessionUpdate string          `json:"sessionUpdate"`
+		ToolCallID    string          `json:"toolCallId"`
+		Title         *string         `json:"title,omitempty"`
+		Kind          *string         `json:"kind,omitempty"`
+		Status        *string         `json:"status,omitempty"`
+		Content       json.RawMessage `json:"content,omitempty"`
+		Locations     json.RawMessage `json:"locations,omitempty"`
+		RawInput      json.RawMessage `json:"rawInput,omitempty"`
+		RawOutput     json.RawMessage `json:"rawOutput,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &update); err != nil {
+		return
+	}
+	if update.SessionUpdate != "tool_call" && update.SessionUpdate != "tool_call_update" {
+		return
+	}
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(update.ToolCallID) == "" {
+		return
+	}
+	generation := c.currentPermissionGeneration(sessionID)
+	c.toolMu.Lock()
+	defer c.toolMu.Unlock()
+	if c.toolCalls == nil {
+		c.toolCalls = make(map[string]map[string]ToolCallInfo)
+	}
+	if c.toolCalls[sessionID] == nil {
+		c.toolCalls[sessionID] = make(map[string]ToolCallInfo)
+	}
+	info := c.toolCalls[sessionID][update.ToolCallID]
+	info.ToolCallID = update.ToolCallID
+	if update.Title != nil {
+		info.Title = *update.Title
+	}
+	if update.Kind != nil {
+		info.Kind = *update.Kind
+	}
+	if update.Status != nil {
+		info.Status = *update.Status
+	}
+	if len(update.Content) > 0 {
+		info.Content = append(json.RawMessage(nil), update.Content...)
+	}
+	if len(update.Locations) > 0 {
+		info.Locations = append(json.RawMessage(nil), update.Locations...)
+	}
+	if len(update.RawInput) > 0 {
+		info.RawInput = append(json.RawMessage(nil), update.RawInput...)
+	}
+	if len(update.RawOutput) > 0 {
+		info.RawOutput = append(json.RawMessage(nil), update.RawOutput...)
+	}
+	if generation != 0 {
+		info.generation = generation
+	}
+	c.toolCalls[sessionID][update.ToolCallID] = info
+}
+
+func (c *Client) currentPermissionGeneration(sessionID string) int64 {
+	c.permissionMu.RLock()
+	defer c.permissionMu.RUnlock()
+	return c.permissionScopes[sessionID].generation
+}
+
+func (c *Client) toolCallSnapshot(sessionID string, toolCallID string) *ToolCallInfo {
+	c.toolMu.RLock()
+	defer c.toolMu.RUnlock()
+	if c.toolCalls == nil || c.toolCalls[sessionID] == nil {
+		return nil
+	}
+	info, ok := c.toolCalls[sessionID][toolCallID]
+	if !ok {
+		return nil
+	}
+	info.Content = append(json.RawMessage(nil), info.Content...)
+	info.Locations = append(json.RawMessage(nil), info.Locations...)
+	info.RawInput = append(json.RawMessage(nil), info.RawInput...)
+	info.RawOutput = append(json.RawMessage(nil), info.RawOutput...)
+	return &info
+}
+
+func sliceLines(content string, line, limit int) string {
+	if line <= 0 && limit <= 0 {
+		return content
+	}
+	lines := strings.SplitAfter(content, "\n")
+	if line <= 0 {
+		line = 1
+	}
+	start := line - 1
+	if start >= len(lines) {
+		return ""
+	}
+	end := len(lines)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	return strings.Join(lines[start:end], "")
 }
 
 func (c *Client) replyUnsupported(msg Message) {
@@ -485,20 +893,41 @@ func (c *Client) replyUnsupported(msg Message) {
 	})
 }
 
-func (c *Client) removePending(id int64) chan rpcResponse {
+func (c *Client) removePending(id *RequestID) chan rpcResponse {
+	if id == nil {
+		return nil
+	}
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
-	ch := c.pending[id]
-	delete(c.pending, id)
+	key := id.Key()
+	ch := c.pending[key]
+	delete(c.pending, key)
 	return ch
 }
 
 func (c *Client) failPending(err error) {
 	c.pendingMu.Lock()
 	pending := c.pending
-	c.pending = make(map[int64]chan rpcResponse)
+	c.pending = make(map[string]chan rpcResponse)
 	c.pendingMu.Unlock()
 	for _, ch := range pending {
 		ch <- rpcResponse{err: err}
 	}
+}
+
+func parseSessionInfoResult(result json.RawMessage, method string) (SessionInfo, error) {
+	if len(result) == 0 || string(result) == "null" {
+		return SessionInfo{}, nil
+	}
+	var parsed SessionInfo
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		return SessionInfo{}, fmt.Errorf("解析 %s 响应: %w", method, err)
+	}
+	return parsed, nil
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }

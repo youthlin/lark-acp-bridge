@@ -37,6 +37,29 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 	return svc.HandleFeishuMessage(ctx, msg)
 }
 
+func testReadySession(t *testing.T, store *SessionStore) Session {
+	t.Helper()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := markWorkspaceReady(workspace); err != nil {
+		t.Fatalf("markWorkspaceReady() error = %v", err)
+	}
+	session := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
+		Title:        "ready session",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+		Status:       "ready",
+	}
+	if store != nil {
+		if err := store.Upsert(session); err != nil {
+			t.Fatalf("Upsert(session) error = %v", err)
+		}
+	}
+	return session
+}
+
 func TestHandleFeishuMessageHelp(t *testing.T) {
 	svc := NewService(config.Default(), nil)
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -47,6 +70,27 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	}
 	if !strings.Contains(reply, "/status") {
 		t.Fatalf("reply = %q, want status help", reply)
+	}
+}
+
+func TestApplyACPStateUpdateAllowsEmptyLists(t *testing.T) {
+	session := Session{
+		AvailableCommands: []acp.AvailableCommand{{Name: "review"}},
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.5"},
+		},
+	}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "available_commands_update"}) {
+		t.Fatal("available_commands_update should be treated as changed even when empty")
+	}
+	if len(session.AvailableCommands) != 0 {
+		t.Fatalf("AvailableCommands = %+v, want cleared", session.AvailableCommands)
+	}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "config_option_update"}) {
+		t.Fatal("config_option_update should be treated as changed even when empty")
+	}
+	if len(session.ConfigOptions) != 0 {
+		t.Fatalf("ConfigOptions = %+v, want cleared", session.ConfigOptions)
 	}
 }
 
@@ -63,6 +107,165 @@ func TestHandleFeishuMessageStatus(t *testing.T) {
 	}
 	if !strings.Contains(reply, "traex") {
 		t.Fatalf("reply = %q, want configured agent name", reply)
+	}
+}
+
+func TestHandleFeishuMessageCommandsListsACPCommands(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{
+		{Name: "review", Description: "Review my current changes", Input: &acp.AvailableCommandInput{Hint: "optional custom review instructions"}},
+		{Name: "compact", Description: "summarize conversation"},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(&fakeRuntime{})
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/cmds",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/cmds) error = %v", err)
+	}
+	for _, want := range []string{"/review - Review my current changes", "参数：optional custom review instructions", "/compact - summarize conversation", "//review"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+}
+
+func TestHandleFeishuMessageCommandsForwardsACPCommand(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "review", Description: "Review my current changes"}}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptReply: "review done"}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/cmds /review 重点看测试",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/cmds /review) error = %v", err)
+	}
+	if reply != "review done" {
+		t.Fatalf("reply = %q, want review output", reply)
+	}
+	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Text != "/review 重点看测试" {
+		t.Fatalf("promptCalls = %+v, want ACP slash command prompt", rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "review"}}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptReply: "review done"}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "//review 快速检查",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(//review) error = %v", err)
+	}
+	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Text != "/review 快速检查" {
+		t.Fatalf("promptCalls = %+v, want double slash forwarded as single slash", rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.6",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/model",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/model) error = %v", err)
+	}
+	for _, want := range []string{"当前会话模型", "gpt-5.5", "gpt-5.6 - GPT-5.6", "/model <model>"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/model gpt-5.6",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/model gpt-5.6) error = %v", err)
+	}
+	if reply != "已设置当前会话模型：gpt-5.6" {
+		t.Fatalf("reply = %q, want set confirmation", reply)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "model" || rt.configCalls[0].Value != "gpt-5.6" {
+		t.Fatalf("configCalls = %+v, want model set_config_option", rt.configCalls)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	modelOpt, ok := findModelConfigOption(updated)
+	if !ok || modelValueString(modelOpt.CurrentValue) != "gpt-5.6" {
+		t.Fatalf("updated config options = %+v, want gpt-5.6", updated.ConfigOptions)
 	}
 }
 
@@ -1002,6 +1205,42 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	rt := &fakeRuntime{
+		promptReply: "done",
+		permissionRequest: &acp.PermissionRequest{
+			RequestID: "1",
+			SessionID: session.ACPSessionID,
+			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
+			Options: []acp.PermissionOption{
+				{OptionID: "allow-once", Kind: "allow_once"},
+				{OptionID: "reject-once", Kind: "reject_once"},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     session.Key.BotID,
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		Text:      "run tests",
+		Workspace: session.Workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "done" {
+		t.Fatalf("reply = %q, want done", reply)
+	}
+	if rt.permissionOutcome.Outcome != "selected" || rt.permissionOutcome.OptionID != "reject-once" {
+		t.Fatalf("permission outcome = %+v, want reject-once", rt.permissionOutcome)
+	}
+}
+
 func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -1554,6 +1793,54 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 	}
 	if session.PendingInitialPrompt != "" {
 		t.Fatalf("pending prompt = %q, want cleared", session.PendingInitialPrompt)
+	}
+}
+
+func TestHandleFeishuMessageClearsPendingPromptWithoutDroppingACPState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.PendingInitialPrompt = "ready"
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptReply: "ACP 回复"}
+	rt.afterUpdates = func() {
+		latest, ok := store.Get(session.Key)
+		if !ok {
+			t.Errorf("session not found during afterUpdates")
+			return
+		}
+		latest.AvailableCommands = []acp.AvailableCommand{{Name: "review", Description: "Review changes"}}
+		if err := store.Upsert(latest); err != nil {
+			t.Errorf("Upsert(latest) error = %v", err)
+		}
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     session.Key.BotID,
+		Workspace: session.Workspace,
+		MessageID: "om_msg",
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		Text:      "介绍一下",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok {
+		t.Fatalf("session not found after prompt")
+	}
+	if updated.PendingInitialPrompt != "" {
+		t.Fatalf("pending prompt = %q, want cleared", updated.PendingInitialPrompt)
+	}
+	if !sessionHasCommand(updated, "review") {
+		t.Fatalf("available commands = %+v, want review preserved", updated.AvailableCommands)
 	}
 }
 
@@ -2264,26 +2551,37 @@ func waitForCondition(t *testing.T, timeout time.Duration, ok func() bool) {
 
 func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, userText string) {
 	t.Helper()
-	for _, want := range []string{"Workspace Memory Policy", "fs/read_text_file", "fs/write_text_file", "MEMORY.md", "knowledge/core.md", "knowledge/index.md", "skills/core.md", "## User Message", userText} {
+	for _, want := range []string{"Workspace Memory Policy", "本地文件工具", "MEMORY.md", "knowledge/core.md", "knowledge/index.md", "skills/core.md", "## User Message", userText} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+	for _, notWant := range []string{"fs/read_text_file", "fs/write_text_file"} {
+		if strings.Contains(prompt, notWant) {
+			t.Fatalf("prompt = %q, should not mention %q", prompt, notWant)
 		}
 	}
 }
 
 type fakeRuntime struct {
-	mu            sync.Mutex
-	newSessionID  string
-	newSessionIDs []string
-	promptReply   string
-	promptUpdates []acp.PromptUpdate
-	afterUpdates  func()
-	blockPrompt   chan struct{}
-	blockPromptAt int
-	newCalls      []fakeNewCall
-	promptCalls   []fakePromptCall
-	cancelCalls   []fakeCancelCall
-	closedKeys    []SessionKey
+	mu                sync.Mutex
+	newSessionID      string
+	newSessionIDs     []string
+	newSessionInfo    acp.SessionInfo
+	promptReply       string
+	promptUpdates     []acp.PromptUpdate
+	afterUpdates      func()
+	permissionRequest *acp.PermissionRequest
+	permissionOutcome acp.PermissionOutcome
+	blockPrompt       chan struct{}
+	blockPromptAt     int
+	configOptions     []acp.SessionConfigOption
+	configCalls       []fakeConfigCall
+	newCalls          []fakeNewCall
+	promptCalls       []fakePromptCall
+	cancelCalls       []fakeCancelCall
+	closedKeys        []SessionKey
+	updateHandlers    map[SessionKey][]acp.UpdateHandler
 }
 
 type fakeNewCall struct {
@@ -2302,19 +2600,30 @@ type fakeCancelCall struct {
 	Session Session
 }
 
-func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (string, error) {
+type fakeConfigCall struct {
+	Session  Session
+	ConfigID string
+	Value    any
+}
+
+func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
+	info := f.newSessionInfo
 	if len(f.newSessionIDs) > 0 {
-		id := f.newSessionIDs[0]
+		info.SessionID = f.newSessionIDs[0]
 		f.newSessionIDs = f.newSessionIDs[1:]
-		return id, nil
+		return info, nil
 	}
 	if f.newSessionID != "" {
-		return f.newSessionID, nil
+		info.SessionID = f.newSessionID
+		return info, nil
 	}
-	return "acp-session", nil
+	if info.SessionID == "" {
+		info.SessionID = "acp-session"
+	}
+	return info, nil
 }
 
 func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error) {
@@ -2335,6 +2644,12 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 	if afterUpdates != nil {
 		afterUpdates()
 	}
+	if f.permissionRequest != nil && opts.OnPermissionRequest != nil {
+		outcome, _ := opts.OnPermissionRequest(ctx, *f.permissionRequest)
+		f.mu.Lock()
+		f.permissionOutcome = outcome
+		f.mu.Unlock()
+	}
 	if blockThisPrompt {
 		select {
 		case <-ctx.Done():
@@ -2350,6 +2665,37 @@ func (f *fakeRuntime) CancelSession(ctx context.Context, session Session, agent 
 	defer f.mu.Unlock()
 	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Session: session})
 	return nil
+}
+
+func (f *fakeRuntime) SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.configCalls = append(f.configCalls, fakeConfigCall{Session: session, ConfigID: configID, Value: value})
+	if len(f.configOptions) > 0 {
+		return append([]acp.SessionConfigOption(nil), f.configOptions...), nil
+	}
+	return []acp.SessionConfigOption{
+		{
+			ID:           configID,
+			Name:         configID,
+			Category:     configID,
+			Type:         "select",
+			CurrentValue: value,
+		},
+	}, nil
+}
+
+func (f *fakeRuntime) SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func() {
+	if handler == nil {
+		return func() {}
+	}
+	f.mu.Lock()
+	if f.updateHandlers == nil {
+		f.updateHandlers = make(map[SessionKey][]acp.UpdateHandler)
+	}
+	f.updateHandlers[key] = append(f.updateHandlers[key], handler)
+	f.mu.Unlock()
+	return func() {}
 }
 
 func (f *fakeRuntime) CloseSession(key SessionKey) error {

@@ -30,8 +30,8 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 3. 通过 stdio 启动 `traex acp serve`。
 4. 执行 ACP `initialize`、`session/new` 和 `session/prompt`。
 5. 将 ACP agent 文本、工具调用状态和最终回复转发到飞书。
-6. 为 bot workspace 提供受限的 `fs/read_text_file` 和 `fs/write_text_file`，用于初始化和维护长期记忆、知识和技能文件。
-7. 后续再补权限卡片、终端操作和更完整的工具调用展示。
+6. 向本机 TraeX 子进程提供 session `cwd` 和 bot workspace 上下文，由 TraeX 使用自身本地工具维护长期记忆、知识和技能文件；bridge 默认不声明 ACP client-side `fs` / `terminal` 能力。
+7. 后续再补更完整的工具调用展示和远程/虚拟 workspace 场景。
 
 ## 配置
 
@@ -102,9 +102,9 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - 需要长期记住的用户信息、偏好或常用上下文。
 - 是否有需要沉淀到知识库的领域知识、项目经验或常用流程。
 
-用户回答后，由 ACP agent 通过 bridge 提供的 `fs/write_text_file` 写入 L0/L1/L2 相关文件和 `.setup.json`。`.setup.json` 标记为 `ready=true` 后，新建 session 会把根目录记忆、`knowledge/` 入口和 wiki skill 注入到下一条 prompt 中。若已经手动写好了文件，也可以在本地直接写入 `.setup.json`。
+用户回答后，由 ACP agent 使用 TraeX 可用的本地文件工具写入 L0/L1/L2 相关文件和 `.setup.json`。`.setup.json` 标记为 `ready=true` 后，新建 session 会把根目录记忆、`knowledge/` 入口和 wiki skill 注入到下一条 prompt 中。若已经手动写好了文件，也可以在本地直接写入 `.setup.json`。
 
-ready 后，每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用 `fs/write_text_file` 合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
+ready 后，每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
 
 自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不创建飞书卡片，也不把 agent 输出转发给用户；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新消息进入，会取消旧定时器并在新消息完成后重新计时。
 
@@ -186,6 +186,11 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；私聊会话 key 不变，群聊仍恢复到当前话题。
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
+- `/cmds`：查看当前 ACP server 上报的 slash commands。
+- `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。
+- `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
+- `/model`：查看当前会话模型和 ACP server 上报的可选模型。
+- `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。
 - 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。群聊卡片会进入当前话题，私聊卡片直接发送到 chat。
 

@@ -150,7 +150,7 @@ func workspaceSetupPrompt(workspace string) string {
 		"- L1 knowledge/：领域知识、项目经验、问题解决方案。",
 		"- L2 skills/：稳定、可复用的操作流程。",
 		"",
-		"当用户回答后，请使用 fs/write_text_file 写入或更新以下文件：",
+		"当用户回答后，请使用你可用的本地文件工具写入或更新以下文件：",
 		"- " + filepath.Join(workspace, "SOUL.md"),
 		"- " + filepath.Join(workspace, "MEMORY.md"),
 		"- " + filepath.Join(workspace, "AGENTS.md"),
@@ -216,7 +216,7 @@ func workspaceMemoryPolicyPrompt(workspace string) string {
 		"- L1 knowledge/：领域知识、项目经验、问题解决方案写入 knowledge/core.md 或独立主题文档。",
 		"- L2 skills/：稳定、可复用的多步骤流程写入 skills/<skill-name>/SKILL.md。",
 		"",
-		"请先使用 fs/read_text_file 读取相关文件，常用入口包括：",
+		"请先使用你可用的本地文件工具读取相关文件，常用入口包括：",
 		"- " + filepath.Join(workspace, "MEMORY.md"),
 		"- " + filepath.Join(workspace, "knowledge", "AGENTS.md"),
 		"- " + filepath.Join(workspace, "knowledge", "core.md"),
@@ -225,7 +225,7 @@ func workspaceMemoryPolicyPrompt(workspace string) string {
 		"- " + filepath.Join(workspace, "skills", "AGENTS.md"),
 		"- " + filepath.Join(workspace, "skills", "core.md"),
 		"",
-		"再合并新信息，并使用 fs/write_text_file 写回对应文件。新增、删除或重命名知识/技能文件后必须同步 knowledge/index.md，并在 knowledge/log.md 末尾追加一行 `[YYYY-MM-DD] 操作 文件 摘要`。只记录可复用的长期信息，不要记录一次性任务结果。",
+		"再合并新信息，并使用你可用的本地文件工具写回对应文件。新增、删除或重命名知识/技能文件后必须同步 knowledge/index.md，并在 knowledge/log.md 末尾追加一行 `[YYYY-MM-DD] 操作 文件 摘要`。只记录可复用的长期信息，不要记录一次性任务结果。",
 	}, "\n")
 }
 

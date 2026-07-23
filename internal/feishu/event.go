@@ -45,6 +45,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	msg = a.withReplyContext(ctx, msg)
 	ctx = WithIntermediateReplySender(ctx, a.SendText)
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
+	ctx = WithPermissionRequester(ctx, a.RequestPermission)
 	reactionID := a.addProcessingReaction(ctx, msg)
 	defer a.deleteProcessingReaction(ctx, msg, reactionID)
 	reply, err := a.handler.HandleFeishuMessage(ctx, msg)
@@ -94,7 +95,7 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.InfoContext(ctx, "Bot消息收到表情回应", "body", eventLogBody(body, event))
+	slog.InfoContext(ctx, "有消息添加了表情回应", "body", eventLogBody(body, event))
 	return nil
 }
 
@@ -103,7 +104,7 @@ func (a *Adapter) handleReactionDeleted(ctx context.Context, event *larkim.P2Mes
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.InfoContext(ctx, "Bot消息取消表情回应", "body", eventLogBody(body, event))
+	slog.InfoContext(ctx, "有消息移除了表情回应", "body", eventLogBody(body, event))
 	return nil
 }
 

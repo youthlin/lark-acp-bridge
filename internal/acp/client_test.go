@@ -12,14 +12,13 @@ import (
 	"time"
 )
 
-func TestClientInitializeAdvertisesWorkspaceFS(t *testing.T) {
+func TestClientInitializeDoesNotAdvertiseLocalFSOrTerminal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		workspace string
-		wantFS    bool
 	}{
-		{name: "workspace configured", workspace: t.TempDir(), wantFS: true},
-		{name: "workspace empty", workspace: "", wantFS: false},
+		{name: "workspace configured", workspace: t.TempDir()},
+		{name: "workspace empty", workspace: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := newPipeClient(t, tc.workspace)
@@ -33,24 +32,23 @@ func TestClientInitializeAdvertisesWorkspaceFS(t *testing.T) {
 					t.Errorf("method = %q, want initialize", req.Method)
 				}
 				var params struct {
-					ClientCapabilities struct {
-						FS struct {
-							ReadTextFile  bool `json:"readTextFile"`
-							WriteTextFile bool `json:"writeTextFile"`
-						} `json:"fs"`
-					} `json:"clientCapabilities"`
+					ClientCapabilities map[string]json.RawMessage `json:"clientCapabilities"`
 				}
 				if err := json.Unmarshal(req.Params, &params); err != nil {
 					t.Errorf("Unmarshal params error = %v", err)
 					return
 				}
-				if params.ClientCapabilities.FS.ReadTextFile != tc.wantFS {
-					t.Errorf("readTextFile = %v, want %v", params.ClientCapabilities.FS.ReadTextFile, tc.wantFS)
+				if _, ok := params.ClientCapabilities["fs"]; ok {
+					t.Errorf("clientCapabilities declares fs, want omitted")
 				}
-				if params.ClientCapabilities.FS.WriteTextFile != tc.wantFS {
-					t.Errorf("writeTextFile = %v, want %v", params.ClientCapabilities.FS.WriteTextFile, tc.wantFS)
+				if _, ok := params.ClientCapabilities["terminal"]; ok {
+					t.Errorf("clientCapabilities declares terminal, want omitted")
 				}
-				server.writeResponse(t, req.ID, map[string]any{})
+				server.writeResponse(t, req.ID, map[string]any{
+					"protocolVersion":   1,
+					"agentCapabilities": map[string]any{},
+					"agentInfo":         map[string]any{"name": "test-agent"},
+				})
 			}()
 
 			if err := client.Initialize(context.Background()); err != nil {
@@ -58,6 +56,36 @@ func TestClientInitializeAdvertisesWorkspaceFS(t *testing.T) {
 			}
 			<-done
 		})
+	}
+}
+
+func TestClientInitializeAllowsAndStoresAuthMethods(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		server.writeResponse(t, req.ID, map[string]any{
+			"protocolVersion":   1,
+			"agentCapabilities": map[string]any{},
+			"agentInfo":         map[string]any{"name": "test-agent"},
+			"authMethods": []map[string]any{
+				{"id": "agent-login", "name": "Agent Login"},
+			},
+		})
+	}()
+
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	<-done
+	client.capMu.RLock()
+	methods := client.initialize.AuthMethods
+	client.capMu.RUnlock()
+	if len(methods) != 1 || methods[0].ID != "agent-login" {
+		t.Fatalf("AuthMethods = %+v, want stored agent-login", methods)
 	}
 }
 
@@ -86,15 +114,173 @@ func TestClientNewSessionSendsMCPServers(t *testing.T) {
 		if params.MCPServers == nil || len(params.MCPServers) != 0 {
 			t.Errorf("mcpServers = %#v, want empty array", params.MCPServers)
 		}
-		server.writeResponse(t, req.ID, map[string]string{"sessionId": "session-1"})
+		server.writeResponse(t, req.ID, map[string]any{
+			"sessionId": "session-1",
+			"availableCommands": []map[string]any{
+				{"name": "review", "description": "Review current changes"},
+			},
+			"configOptions": []map[string]any{
+				{
+					"id":           "model",
+					"name":         "Model",
+					"category":     "model",
+					"type":         "select",
+					"currentValue": "gpt-5.5",
+					"options": []map[string]any{
+						{"value": "gpt-5.5", "name": "GPT-5.5"},
+					},
+				},
+			},
+		})
 	}()
 
-	sessionID, err := client.NewSession(context.Background(), "/repo")
+	sessionInfo, err := client.NewSession(context.Background(), "/repo")
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	if sessionID != "session-1" {
-		t.Fatalf("sessionID = %q, want session-1", sessionID)
+	if sessionInfo.SessionID != "session-1" {
+		t.Fatalf("sessionID = %q, want session-1", sessionInfo.SessionID)
+	}
+	if len(sessionInfo.AvailableCommands) != 1 || sessionInfo.AvailableCommands[0].Name != "review" {
+		t.Fatalf("AvailableCommands = %+v, want review command", sessionInfo.AvailableCommands)
+	}
+	if len(sessionInfo.ConfigOptions) != 1 || sessionInfo.ConfigOptions[0].ID != "model" {
+		t.Fatalf("ConfigOptions = %+v, want model option", sessionInfo.ConfigOptions)
+	}
+	<-done
+}
+
+func TestClientNewSessionSendsAdditionalDirectoriesWhenSupported(t *testing.T) {
+	workspace := t.TempDir()
+	client, server := newPipeClient(t, workspace)
+	defer server.close()
+	client.initialize = InitializeResult{
+		ProtocolVersion: 1,
+		AgentCapabilities: AgentCapabilities{
+			SessionCapabilities: SessionCapabilities{
+				AdditionalDirectories: map[string]any{},
+			},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "session/new" {
+			t.Errorf("method = %q, want session/new", req.Method)
+		}
+		var params struct {
+			Cwd                   string   `json:"cwd"`
+			AdditionalDirectories []string `json:"additionalDirectories"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Errorf("Unmarshal params error = %v", err)
+			return
+		}
+		if params.Cwd != "/repo" {
+			t.Errorf("cwd = %q, want /repo", params.Cwd)
+		}
+		if len(params.AdditionalDirectories) != 1 || params.AdditionalDirectories[0] != workspace {
+			t.Errorf("additionalDirectories = %#v, want workspace", params.AdditionalDirectories)
+		}
+		server.writeResponse(t, req.ID, map[string]any{"sessionId": "session-1"})
+	}()
+
+	if _, err := client.NewSession(context.Background(), "/repo"); err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	<-done
+}
+
+func TestClientSetConfigOption(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "session/set_config_option" {
+			t.Errorf("method = %q, want session/set_config_option", req.Method)
+		}
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ConfigID  string `json:"configId"`
+			Value     string `json:"value"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Errorf("Unmarshal params error = %v", err)
+			return
+		}
+		if params.SessionID != "session-1" || params.ConfigID != "model" || params.Value != "gpt-5.6" {
+			t.Errorf("params = %+v, want model update", params)
+		}
+		server.writeResponse(t, req.ID, map[string]any{
+			"configOptions": []map[string]any{
+				{
+					"id":           "model",
+					"name":         "Model",
+					"category":     "model",
+					"type":         "select",
+					"currentValue": "gpt-5.6",
+					"options": []map[string]any{
+						{"value": "gpt-5.6", "name": "GPT-5.6"},
+					},
+				},
+			},
+		})
+	}()
+
+	options, err := client.SetConfigOption(context.Background(), "session-1", "model", "gpt-5.6")
+	if err != nil {
+		t.Fatalf("SetConfigOption() error = %v", err)
+	}
+	if len(options) != 1 || options[0].ID != "model" || modelValueStringForTest(options[0].CurrentValue) != "gpt-5.6" {
+		t.Fatalf("options = %+v, want updated model option", options)
+	}
+	<-done
+}
+
+func TestClientResumeSessionParsesReturnedState(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{
+		ProtocolVersion: 1,
+		AgentCapabilities: AgentCapabilities{
+			SessionCapabilities: SessionCapabilities{
+				Resume: map[string]any{},
+			},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "session/resume" {
+			t.Errorf("method = %q, want session/resume", req.Method)
+		}
+		server.writeResponse(t, req.ID, map[string]any{
+			"sessionId": "session-1",
+			"configOptions": []map[string]any{
+				{
+					"id":           "model",
+					"name":         "Model",
+					"category":     "model",
+					"type":         "select",
+					"currentValue": "gpt-5.6",
+				},
+			},
+		})
+	}()
+
+	info, err := client.ResumeSession(context.Background(), "session-1", "/repo")
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if len(info.ConfigOptions) != 1 || info.ConfigOptions[0].ID != "model" || modelValueStringForTest(info.ConfigOptions[0].CurrentValue) != "gpt-5.6" {
+		t.Fatalf("ConfigOptions = %+v, want resume state", info.ConfigOptions)
 	}
 	<-done
 }
@@ -120,7 +306,9 @@ func TestClientCancelSession(t *testing.T) {
 		if params.SessionID != "session-1" {
 			t.Errorf("sessionId = %q, want session-1", params.SessionID)
 		}
-		server.writeResponse(t, req.ID, map[string]any{})
+		if req.ID != nil {
+			t.Errorf("session/cancel id = %v, want notification without id", req.ID.Key())
+		}
 	}()
 
 	if err := client.CancelSession(context.Background(), "session-1"); err != nil {
@@ -133,35 +321,34 @@ func TestClientHandlesWorkspaceFileRequests(t *testing.T) {
 	workspace := t.TempDir()
 	client, server := newPipeClient(t, workspace)
 	defer server.close()
+	client.cwd = t.TempDir()
 
 	target := filepath.Join(workspace, "SOUL.md")
 	server.writeRequest(t, 100, "fs/write_text_file", map[string]any{
-		"path":    target,
-		"content": "# SOUL\n\n名字：小助手\n",
+		"sessionId": "session-1",
+		"path":      target,
+		"content":   "line1\nline2\nline3\n",
 	})
 	writeResp := server.readRequest(t)
 	if writeResp.Error != nil {
 		t.Fatalf("write response error = %+v", writeResp.Error)
 	}
-	var writeResult struct {
-		Created bool `json:"created"`
-	}
-	if err := json.Unmarshal(writeResp.Result, &writeResult); err != nil {
-		t.Fatalf("Unmarshal write result error = %v", err)
-	}
-	if !writeResult.Created {
-		t.Fatalf("created = false, want true")
+	if string(writeResp.Result) != "null" {
+		t.Fatalf("write result = %s, want null", writeResp.Result)
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if string(data) != "# SOUL\n\n名字：小助手\n" {
+	if string(data) != "line1\nline2\nline3\n" {
 		t.Fatalf("file content = %q", string(data))
 	}
 
 	server.writeRequest(t, 101, "fs/read_text_file", map[string]any{
-		"path": "SOUL.md",
+		"sessionId": "session-1",
+		"path":      target,
+		"line":      2,
+		"limit":     1,
 	})
 	readResp := server.readRequest(t)
 	if readResp.Error != nil {
@@ -173,8 +360,8 @@ func TestClientHandlesWorkspaceFileRequests(t *testing.T) {
 	if err := json.Unmarshal(readResp.Result, &readResult); err != nil {
 		t.Fatalf("Unmarshal read result error = %v", err)
 	}
-	if readResult.Content != string(data) {
-		t.Fatalf("read content = %q, want %q", readResult.Content, string(data))
+	if readResult.Content != "line2\n" {
+		t.Fatalf("read content = %q, want line2", readResult.Content)
 	}
 
 	outside := filepath.Join(workspace, "..", "outside.md")
@@ -183,14 +370,163 @@ func TestClientHandlesWorkspaceFileRequests(t *testing.T) {
 		"content": "outside",
 	})
 	outsideResp := server.readRequest(t)
-	if outsideResp.Error == nil || !strings.Contains(outsideResp.Error.Message, "超出 workspace") {
-		t.Fatalf("outside response = %+v, want workspace error", outsideResp)
+	if outsideResp.Error == nil || !strings.Contains(outsideResp.Error.Message, "超出允许目录") {
+		t.Fatalf("outside response = %+v, want allowed roots error", outsideResp)
 	}
 	if _, err := os.Stat(filepath.Clean(outside)); !os.IsNotExist(err) {
 		t.Fatalf("outside file should not be written, stat err = %v", err)
 	}
 
 	_ = client
+}
+
+func TestClientHandlesStringIDAndPermissionRequests(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","options":[{"optionId":"reject","kind":"reject_once"}]}}`)
+	resp := server.readRequest(t)
+	if resp.ID == nil || resp.ID.Key() != `"perm-1"` {
+		t.Fatalf("response id = %v, want string id", resp.ID)
+	}
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result struct {
+		Outcome struct {
+			Outcome  string `json:"outcome"`
+			OptionID string `json:"optionId"`
+		} `json:"outcome"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "reject" {
+		t.Fatalf("permission outcome = %+v, want selected reject", result.Outcome)
+	}
+
+	_ = client
+}
+
+func TestClientPermissionRequestUsesHandlerAndToolCallState(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	gotReq := make(chan PermissionRequest, 1)
+	generation := client.setPermissionHandler("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		gotReq <- req
+		return PermissionOutcome{Outcome: "selected", OptionID: "allow-once"}, nil
+	})
+	defer client.clearPermissionHandler("session-1", generation)
+
+	server.writeNotification(t, "session/update", map[string]any{
+		"sessionId": "session-1",
+		"update": map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "call-1",
+			"title":         "Run tests",
+			"kind":          "execute",
+			"status":        "pending",
+			"rawInput": map[string]any{
+				"command": "go test ./...",
+			},
+		},
+	})
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}`)
+
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "allow-once" {
+		t.Fatalf("permission outcome = %+v, want allow-once", result.Outcome)
+	}
+	select {
+	case req := <-gotReq:
+		if req.RequestID != `"perm-1"` {
+			t.Fatalf("requestID = %q, want string JSON-RPC id", req.RequestID)
+		}
+		if req.ToolCall.ToolCallID != "call-1" {
+			t.Fatalf("toolCallID = %q, want call-1", req.ToolCall.ToolCallID)
+		}
+		if req.ToolCallState == nil || req.ToolCallState.Title != "Run tests" || req.ToolCallState.Kind != "execute" {
+			t.Fatalf("toolCallState = %+v, want Run tests execute", req.ToolCallState)
+		}
+		if !strings.Contains(string(req.ToolCallState.RawInput), "go test ./...") {
+			t.Fatalf("rawInput = %s, want command", req.ToolCallState.RawInput)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for permission request")
+	}
+}
+
+func TestClientPermissionRequestReturnsCancelledForCanceledContext(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	generation := client.setPermissionHandler("session-1", ctx, func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		t.Fatal("handler should not be called when prompt context is canceled")
+		return PermissionOutcome{}, nil
+	})
+	defer client.clearPermissionHandler("session-1", generation)
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1"},"options":[{"optionId":"reject","kind":"reject_once"}]}}`)
+
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "cancelled" || result.Outcome.OptionID != "" {
+		t.Fatalf("permission outcome = %+v, want cancelled", result.Outcome)
+	}
+}
+
+func TestClientPermissionRequestReturnsCancelledForStaleToolCall(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	oldGeneration := client.setPermissionHandler("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		return PermissionOutcome{Outcome: "selected", OptionID: "old"}, nil
+	})
+	server.writeNotification(t, "session/update", map[string]any{
+		"sessionId": "session-1",
+		"update": map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "call-old",
+			"title":         "Old call",
+		},
+	})
+	waitForToolCallSnapshot(t, client, "session-1", "call-old")
+	newGeneration := client.setPermissionHandler("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		t.Fatal("new handler should not receive stale permission request")
+		return PermissionOutcome{}, nil
+	})
+	defer client.clearPermissionHandler("session-1", newGeneration)
+	defer client.clearPermissionHandler("session-1", oldGeneration)
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-old"},"options":[{"optionId":"reject","kind":"reject_once"}]}}`)
+
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "cancelled" {
+		t.Fatalf("permission outcome = %+v, want stale request cancelled", result.Outcome)
+	}
 }
 
 func TestClientPromptCollectsAgentMessageChunks(t *testing.T) {
@@ -347,7 +683,7 @@ func newPipeClient(t *testing.T, workspace ...string) (*Client, *pipeServer) {
 	client := &Client{
 		stdin:          clientOut,
 		workspace:      clientWorkspace,
-		pending:        make(map[int64]chan rpcResponse),
+		pending:        make(map[string]chan rpcResponse),
 		updateHandlers: make(map[int64]UpdateHandler),
 	}
 	client.nextID.Store(1)
@@ -362,6 +698,18 @@ func newPipeClient(t *testing.T, workspace ...string) (*Client, *pipeServer) {
 			clientOut,
 		},
 	}
+}
+
+func waitForToolCallSnapshot(t *testing.T, client *Client, sessionID, toolCallID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.toolCallSnapshot(sessionID, toolCallID) != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for tool call snapshot %s", toolCallID)
 }
 
 type pipeServer struct {
@@ -397,7 +745,7 @@ func (s *pipeServer) readRequest(t *testing.T) Message {
 	return Message{}
 }
 
-func (s *pipeServer) writeResponse(t *testing.T, id *int64, result any) {
+func (s *pipeServer) writeResponse(t *testing.T, id *RequestID, result any) {
 	t.Helper()
 	if id == nil {
 		t.Fatalf("response id is nil")
@@ -407,7 +755,7 @@ func (s *pipeServer) writeResponse(t *testing.T, id *int64, result any) {
 
 func (s *pipeServer) writeRequest(t *testing.T, id int64, method string, params any) {
 	t.Helper()
-	s.write(t, Message{JSONRPC: "2.0", ID: &id, Method: method, Params: mustMarshal(t, params)})
+	s.write(t, Message{JSONRPC: "2.0", ID: NewRequestID(id), Method: method, Params: mustMarshal(t, params)})
 }
 
 func (s *pipeServer) writeNotification(t *testing.T, method string, params any) {
@@ -426,6 +774,13 @@ func (s *pipeServer) write(t *testing.T, msg Message) {
 	}
 }
 
+func (s *pipeServer) writeRaw(t *testing.T, raw string) {
+	t.Helper()
+	if _, err := s.writer.Write([]byte(raw + "\n")); err != nil {
+		t.Fatalf("Write raw message error = %v", err)
+	}
+}
+
 func (s *pipeServer) close() {
 	for _, closer := range s.closers {
 		_ = closer.Close()
@@ -439,4 +794,11 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 		t.Fatalf("Marshal raw error = %v", err)
 	}
 	return data
+}
+
+func modelValueStringForTest(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
 }

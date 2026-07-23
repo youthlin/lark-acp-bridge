@@ -1,6 +1,10 @@
 package feishu
 
-import "context"
+import (
+	"context"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
+)
 
 type intermediateReplySender func(context.Context, Message, string) error
 
@@ -16,6 +20,10 @@ type StreamCard interface {
 type streamCardStarter func(context.Context, Message) (StreamCard, error)
 
 type streamCardStarterKey struct{}
+
+type permissionRequester func(context.Context, Message, acp.PermissionRequest) (acp.PermissionOutcome, error)
+
+type permissionRequesterKey struct{}
 
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
@@ -46,4 +54,20 @@ func StartStreamCard(ctx context.Context, msg Message) (StreamCard, bool, error)
 	}
 	card, err := starter(ctx, msg)
 	return card, true, err
+}
+
+func WithPermissionRequester(ctx context.Context, requester func(context.Context, Message, acp.PermissionRequest) (acp.PermissionOutcome, error)) context.Context {
+	if requester == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, permissionRequesterKey{}, permissionRequester(requester))
+}
+
+func RequestPermission(ctx context.Context, msg Message, req acp.PermissionRequest) (acp.PermissionOutcome, bool, error) {
+	requester, ok := ctx.Value(permissionRequesterKey{}).(permissionRequester)
+	if !ok || requester == nil {
+		return acp.PermissionOutcome{}, false, nil
+	}
+	outcome, err := requester(ctx, msg, req)
+	return outcome, true, err
 }
