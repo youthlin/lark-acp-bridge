@@ -11,7 +11,11 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
-const acpRequestTimeout = 10 * time.Minute
+const (
+	acpRequestTimeout    = 10 * time.Minute
+	acpPromptIdleTimeout = 10 * time.Minute
+	acpPromptMaxDuration = time.Hour
+)
 
 var errACPSessionUnavailable = errors.New("acp session unavailable")
 
@@ -70,13 +74,114 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
-	defer cancel()
-	output, err := client.PromptWithOptions(ctx, session.ACPSessionID, text, opts)
+	timeout := newPromptActivityTimeout(ctx, acpPromptIdleTimeout, acpPromptMaxDuration)
+	defer timeout.Stop()
+	onUpdate := opts.OnUpdate
+	opts.OnUpdate = func(update acp.PromptUpdate) {
+		timeout.Touch()
+		if onUpdate != nil {
+			onUpdate(update)
+		}
+	}
+	onPermissionRequest := opts.OnPermissionRequest
+	if onPermissionRequest != nil {
+		opts.OnPermissionRequest = func(ctx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+			timeout.Touch()
+			outcome, err := onPermissionRequest(ctx, req)
+			timeout.Touch()
+			return outcome, err
+		}
+	}
+	output, err := client.PromptWithOptions(timeout.Context(), session.ACPSessionID, text, opts)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if cause := context.Cause(timeout.Context()); errors.Is(cause, context.DeadlineExceeded) {
+				err = cause
+			}
+		}
 		return output, fmt.Errorf("session/prompt: %w", err)
 	}
 	return output, nil
+}
+
+type promptActivityTimeout struct {
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	mu        sync.Mutex
+	idle      time.Duration
+	deadline  time.Time
+	idleTimer *time.Timer
+	maxTimer  *time.Timer
+	stopped   bool
+}
+
+func newPromptActivityTimeout(parent context.Context, idleTimeout, maxDuration time.Duration) *promptActivityTimeout {
+	ctx, cancel := context.WithCancelCause(parent)
+	timeout := &promptActivityTimeout{
+		ctx:      ctx,
+		cancel:   cancel,
+		idle:     idleTimeout,
+		deadline: time.Now().Add(idleTimeout),
+	}
+	timeout.mu.Lock()
+	timeout.idleTimer = time.AfterFunc(idleTimeout, timeout.handleIdleTimeout)
+	timeout.maxTimer = time.AfterFunc(maxDuration, func() {
+		timeout.expire(fmt.Errorf("ACP prompt 执行超过绝对上限 %s: %w", maxDuration, context.DeadlineExceeded))
+	})
+	timeout.mu.Unlock()
+	return timeout
+}
+
+func (t *promptActivityTimeout) Context() context.Context {
+	return t.ctx
+}
+
+func (t *promptActivityTimeout) Touch() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return
+	}
+	t.deadline = time.Now().Add(t.idle)
+	t.idleTimer.Reset(t.idle)
+}
+
+func (t *promptActivityTimeout) Stop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return
+	}
+	t.stopped = true
+	t.idleTimer.Stop()
+	t.maxTimer.Stop()
+	t.cancel(context.Canceled)
+}
+
+func (t *promptActivityTimeout) handleIdleTimeout() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return
+	}
+	if remaining := time.Until(t.deadline); remaining > 0 {
+		t.idleTimer.Reset(remaining)
+		return
+	}
+	t.stopped = true
+	t.maxTimer.Stop()
+	t.cancel(fmt.Errorf("ACP prompt 连续 %s 未收到活动更新: %w", t.idle, context.DeadlineExceeded))
+}
+
+func (t *promptActivityTimeout) expire(cause error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return
+	}
+	t.stopped = true
+	t.idleTimer.Stop()
+	t.cancel(cause)
 }
 
 func (r *runtimeManager) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {

@@ -104,7 +104,11 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 		return permissionCardToast("error", "无效的卡片操作"), nil
 	}
 	value := event.Event.Action.Value
-	if stringValue(value, "action") != permissionCardAction {
+	switch stringValue(value, "action") {
+	case modelSelectionCardAction:
+		return a.handleModelSelectionAction(ctx, event)
+	case permissionCardAction:
+	default:
 		return permissionCardToast("error", "未知的卡片操作"), nil
 	}
 	requestID := stringValue(value, "request_id")
@@ -201,7 +205,12 @@ func permissionCardElements(requestID string, req acp.PermissionRequest, selecte
 	}
 	actions := permissionCardActions(requestID, req.Options)
 	if len(actions) > 0 {
-		elements = append(elements, cardJSON{"tag": "action", "actions": actions})
+		elements = append(elements, cardJSON{
+			"tag":                "column_set",
+			"flex_mode":          "flow",
+			"horizontal_spacing": "8px",
+			"columns":            actions,
+		})
 	}
 	return elements
 }
@@ -215,14 +224,26 @@ func permissionCardActions(requestID string, options []acp.PermissionOption) []a
 		}
 		text, buttonType := permissionButtonStyle(option)
 		actions = append(actions, cardJSON{
-			"tag":  "button",
-			"text": cardJSON{"tag": "plain_text", "content": text},
-			"type": buttonType,
-			"value": cardJSON{
-				"action":      permissionCardAction,
-				"request_id":  requestID,
-				"option_id":   option.OptionID,
-				"option_name": permissionOptionDisplayName(option.OptionID, option.Name),
+			"tag":   "column",
+			"width": "auto",
+			"elements": []any{
+				cardJSON{
+					"tag":   "button",
+					"text":  cardJSON{"tag": "plain_text", "content": text},
+					"type":  buttonType,
+					"width": "fill",
+					"behaviors": []any{
+						cardJSON{
+							"type": "callback",
+							"value": cardJSON{
+								"action":      permissionCardAction,
+								"request_id":  requestID,
+								"option_id":   option.OptionID,
+								"option_name": permissionOptionDisplayName(option.OptionID, option.Name),
+							},
+						},
+					},
+				},
 			},
 		})
 	}

@@ -279,6 +279,138 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := NewService(config.Default(), store)
+	var got feishu.ModelSelectionCard
+	ctx := feishu.WithModelSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModelSelectionCard) error {
+		got = card
+		return nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		SenderID: "ou_requester",
+		Text:     "/model",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/model) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending card", reply)
+	}
+	if got.ACPSessionID != session.ACPSessionID || got.CurrentModel != "gpt-5.5" || got.RequesterID != "ou_requester" {
+		t.Fatalf("card = %+v, want current session model card", got)
+	}
+	if len(got.Options) != 2 || got.Options[1].Value != "gpt-5.6" || got.Options[1].Name != "GPT-5.6" {
+		t.Fatalf("card options = %+v, want available models", got.Options)
+	}
+}
+
+func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
+	session := Session{
+		Models: &acp.SessionModelState{
+			CurrentModelID: "gpt-5.5",
+			AvailableModels: []acp.SessionModel{
+				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
+				{ModelID: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+	}
+	options := modelSelectionOptions(session, acp.SessionConfigOption{ID: "model", Category: "model"})
+	if len(options) != 2 || options[1].Value != "gpt-5.6" || options[1].Name != "GPT-5.6" {
+		t.Fatalf("options = %+v, want models fallback", options)
+	}
+}
+
+func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.6",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	selection := feishu.ModelSelection{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		RequesterID:  "ou_requester",
+		OperatorID:   "ou_requester",
+		Model:        "gpt-5.6",
+	}
+
+	display, err := svc.HandleModelSelection(context.Background(), selection)
+	if err != nil {
+		t.Fatalf("HandleModelSelection() error = %v", err)
+	}
+	if display != "GPT-5.6（gpt-5.6）" {
+		t.Fatalf("display = %q, want friendly model display", display)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].Value != "gpt-5.6" {
+		t.Fatalf("configCalls = %+v, want gpt-5.6", rt.configCalls)
+	}
+
+	selection.OperatorID = "ou_other"
+	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "只有发起") {
+		t.Fatalf("other user error = %v, want requester validation", err)
+	}
+
+	selection.OperatorID = selection.RequesterID
+	selection.ACPSessionID = "stale-session"
+	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "已过期") {
+		t.Fatalf("stale card error = %v, want expired validation", err)
+	}
+}
+
 func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()

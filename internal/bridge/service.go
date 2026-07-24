@@ -136,6 +136,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 }
 
 var _ feishu.Handler = (*Service)(nil)
+var _ feishu.ModelSelectionHandler = (*Service)(nil)
 
 // HandleFeishuMessage 消息处理
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
@@ -184,7 +185,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",
-			"/model - 查看当前模型和可用模型",
+			"/model - 打开模型选择卡片",
 			"/model <model> - 设置当前会话模型",
 			"/status - 查看服务状态",
 			"",
@@ -416,28 +417,118 @@ func (s *Service) handleModelCommand(ctx context.Context, text string, msg feish
 		return "当前会话还没有 ACP session，发送普通文本或 /new 后再查看或设置模型。"
 	}
 	if len(fields) == 1 {
-		return formatModelStatus(session)
+		return s.sendModelSelectionCard(ctx, msg, session)
 	}
 	target := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 	if target == "" {
 		return "请使用 /model <model> 设置当前会话模型。"
 	}
+	value, _, err := s.setSessionModel(ctx, msg, session, target)
+	if err != nil {
+		if errors.Is(err, errUnknownModel) {
+			return "未知模型：" + target + "\n\n" + formatModelStatus(session)
+		}
+		return err.Error()
+	}
+	if value == "" {
+		return "未知模型：" + target + "\n\n" + formatModelStatus(session)
+	}
+	return "已设置当前会话模型：" + value
+}
+
+var errUnknownModel = errors.New("未知模型")
+
+func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message, session Session) string {
 	modelOpt, ok := findModelConfigOption(session)
 	if !ok {
 		return "当前 ACP server 没有上报 model 配置项，无法通过 /model 设置。"
 	}
+	options := modelSelectionOptions(session, modelOpt)
+	if len(options) == 0 {
+		return "当前 ACP server 没有上报可选模型，请使用 /model <model> 设置。"
+	}
+	sent, err := feishu.SendModelSelectionCard(ctx, msg, feishu.ModelSelectionCard{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		RequesterID:  msg.SenderID,
+		CurrentModel: currentModelDisplay(session),
+		Options:      options,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "发送模型选择卡片失败", "错误", err)
+		return "发送模型选择卡片失败：" + err.Error()
+	}
+	if !sent {
+		return formatModelStatus(session)
+	}
+	return ""
+}
+
+func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []feishu.ModelOption {
+	options := make([]feishu.ModelOption, 0, len(modelOpt.Options))
+	for _, option := range modelOpt.Options {
+		if strings.TrimSpace(option.Value) == "" {
+			continue
+		}
+		options = append(options, feishu.ModelOption{Value: option.Value, Name: option.Name})
+	}
+	if len(options) > 0 || session.Models == nil {
+		return options
+	}
+	options = make([]feishu.ModelOption, 0, len(session.Models.AvailableModels))
+	for _, model := range session.Models.AvailableModels {
+		if strings.TrimSpace(model.ModelID) == "" {
+			continue
+		}
+		options = append(options, feishu.ModelOption{Value: model.ModelID, Name: model.Name})
+	}
+	return options
+}
+
+func (s *Service) HandleModelSelection(ctx context.Context, selection feishu.ModelSelection) (string, error) {
+	if selection.RequesterID != "" && selection.OperatorID != "" && selection.RequesterID != selection.OperatorID {
+		return "", fmt.Errorf("只有发起该命令的用户可以设置模型")
+	}
+	msg := feishu.Message{
+		BotID:    selection.BotID,
+		ChatID:   selection.ChatID,
+		ThreadID: selection.ThreadID,
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "", fmt.Errorf("会话持久化未初始化")
+	}
+	key := SessionKey{BotID: selection.BotID, ChatID: selection.ChatID, ThreadID: selection.ThreadID}
+	session, ok := store.Get(key)
+	if !ok || session.ACPSessionID != selection.ACPSessionID {
+		return "", fmt.Errorf("该模型选择卡片已过期，请重新发送 /model")
+	}
+	_, display, err := s.setSessionModel(ctx, msg, session, selection.Model)
+	if err != nil {
+		return "", err
+	}
+	return display, nil
+}
+
+func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, session Session, target string) (string, string, error) {
+	modelOpt, ok := findModelConfigOption(session)
+	if !ok {
+		return "", "", fmt.Errorf("当前 ACP server 没有上报 model 配置项，无法设置模型")
+	}
 	value, ok := resolveModelValue(modelOpt, target)
 	if !ok {
-		return "未知模型：" + target + "\n\n" + formatModelStatus(session)
+		return "", "", fmt.Errorf("%w：%s", errUnknownModel, target)
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
-		return "未找到 agent 配置：" + session.AgentName
+		return "", "", fmt.Errorf("未找到 agent 配置：%s", session.AgentName)
 	}
 	options, err := s.runtime.SetConfigOption(ctx, session, agent, modelOpt.ID, value)
 	if err != nil {
 		slog.ErrorContext(ctx, "设置 ACP model 失败", "model", value, "错误", err)
-		return "设置模型失败：" + err.Error()
+		return "", "", fmt.Errorf("设置模型失败：%w", err)
 	}
 	session.ConfigOptions = options
 	if modelOpt, ok := findModelConfigOption(session); ok {
@@ -446,7 +537,21 @@ func (s *Service) handleModelCommand(ctx context.Context, text string, msg feish
 		}
 	}
 	s.saveSessionState(ctx, msg, session)
-	return "已设置当前会话模型：" + value
+	return value, modelOptionName(modelOpt, value), nil
+}
+
+func modelOptionName(opt acp.SessionConfigOption, value string) string {
+	for _, option := range opt.Options {
+		if option.Value != value {
+			continue
+		}
+		name := strings.TrimSpace(option.Name)
+		if name != "" && name != value {
+			return name + "（" + value + "）"
+		}
+		break
+	}
+	return value
 }
 
 func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -950,7 +1055,7 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 	}
 	opts := acp.PromptOptions{
 		OnUpdate: func(update acp.PromptUpdate) {
-			slog.InfoContext(ctx, "ACP|OnUpdate", "update", update)
+			// slog.InfoContext(ctx, "ACP|OnUpdate", "update", update)
 			if chunk, ok := promptUpdateChunk(update); ok {
 				chunks.add(chunk)
 				return

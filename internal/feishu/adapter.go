@@ -24,6 +24,10 @@ type Handler interface {
 	HandleFeishuMessage(context.Context, Message) (string, error)
 }
 
+type ModelSelectionHandler interface {
+	HandleModelSelection(context.Context, ModelSelection) (string, error)
+}
+
 type Adapter struct {
 	cfg             config.BotConfig        // Bot配置
 	handler         Handler                 // 消息处理

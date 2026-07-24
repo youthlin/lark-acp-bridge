@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/arg"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
@@ -27,7 +28,8 @@ type Client struct {
 
 	nextID atomic.Int64
 
-	writeMu sync.Mutex
+	writeMu  sync.Mutex
+	promptMu sync.Mutex
 
 	pendingMu sync.Mutex
 	pending   map[string]chan rpcResponse
@@ -48,6 +50,8 @@ type Client struct {
 
 	closeOnce sync.Once
 }
+
+const promptCancelResponseTimeout = 10 * time.Second
 
 type permissionScope struct {
 	generation     int64
@@ -362,6 +366,12 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, er
 }
 
 func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
+	c.promptMu.Lock()
+	defer c.promptMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	var output strings.Builder
 	var outputMu sync.Mutex
 	generation := c.setPermissionHandlerPending(sessionID, ctx, opts.OnPermissionRequest)
@@ -384,14 +394,14 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	})
 	defer unsubscribe()
 
-	_, err := c.callWithAfterWrite(ctx, "session/prompt", map[string]any{
+	_, err := c.callWithAfterWriteAndCancelWait(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
 		},
 	}, func() {
 		c.activatePermissionHandler(sessionID, generation)
-	})
+	}, promptCancelResponseTimeout)
 	if err != nil {
 		outputMu.Lock()
 		defer outputMu.Unlock()
@@ -422,6 +432,16 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 }
 
 func (c *Client) callWithAfterWrite(ctx context.Context, method string, params any, afterWrite func()) (json.RawMessage, error) {
+	return c.callWithAfterWriteAndCancelWait(ctx, method, params, afterWrite, 0)
+}
+
+func (c *Client) callWithAfterWriteAndCancelWait(
+	ctx context.Context,
+	method string,
+	params any,
+	afterWrite func(),
+	cancelWait time.Duration,
+) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	req, err := NewRequest(id, method, params)
 	if err != nil {
@@ -441,7 +461,17 @@ func (c *Client) callWithAfterWrite(ctx context.Context, method string, params a
 	}
 	select {
 	case <-ctx.Done():
-		c.removePending(req.ID)
+		if cancelWait <= 0 {
+			c.removePending(req.ID)
+			return nil, ctx.Err()
+		}
+		timer := time.NewTimer(cancelWait)
+		defer timer.Stop()
+		select {
+		case <-ch:
+		case <-timer.C:
+			c.removePending(req.ID)
+		}
 		return nil, ctx.Err()
 	case res := <-ch:
 		return res.result, res.err
@@ -501,6 +531,11 @@ func (c *Client) handleResponse(msg Message) {
 		return
 	}
 	if msg.Error != nil {
+		detail := strings.TrimSpace(msg.Error.Detail())
+		if detail != "" && detail != msg.Error.Message {
+			ch <- rpcResponse{err: fmt.Errorf("ACP JSON-RPC 错误: code=%d message=%s detail=%s", msg.Error.Code, msg.Error.Message, detail)}
+			return
+		}
 		ch <- rpcResponse{err: fmt.Errorf("ACP JSON-RPC 错误: code=%d message=%s", msg.Error.Code, msg.Error.Message)}
 		return
 	}

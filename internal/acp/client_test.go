@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -609,6 +611,92 @@ func TestClientPromptCollectsAgentMessageChunks(t *testing.T) {
 		t.Fatalf("reply = %q, want collected chunks", reply)
 	}
 	<-done
+}
+
+func TestClientPromptWaitsForServerResponseAfterContextCancellation(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := client.Prompt(ctx, "session-1", "开始 review")
+		firstResult <- err
+	}()
+
+	firstReq := server.readRequest(t)
+	if firstReq.Method != "session/prompt" {
+		t.Fatalf("method = %q, want session/prompt", firstReq.Method)
+	}
+	cancel()
+
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := client.Prompt(context.Background(), "session-1", "新的普通消息")
+		secondResult <- err
+	}()
+	secondRequest := make(chan Message, 1)
+	go func() {
+		secondRequest <- server.readRequest(t)
+	}()
+
+	select {
+	case err := <-firstResult:
+		t.Fatalf("Prompt() returned before server cancellation response: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case req := <-secondRequest:
+		t.Fatalf("second prompt was written before first turn ended: %+v", req)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	server.writeResponse(t, firstReq.ID, map[string]any{"stopReason": "cancelled"})
+	select {
+	case err := <-firstResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Prompt() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Prompt() did not return after server cancellation response")
+	}
+
+	var secondReq Message
+	select {
+	case secondReq = <-secondRequest:
+		if secondReq.Method != "session/prompt" {
+			t.Fatalf("second method = %q, want session/prompt", secondReq.Method)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second prompt was not written after first turn ended")
+	}
+	server.writeResponse(t, secondReq.ID, map[string]any{"stopReason": "end_turn"})
+	select {
+	case err := <-secondResult:
+		if err != nil {
+			t.Fatalf("second Prompt() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second Prompt() did not return")
+	}
+}
+
+func TestClientPromptIncludesJSONRPCErrorDetail(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	go func() {
+		req := server.readRequest(t)
+		server.writeRaw(t, fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Internal error","data":{"message":"cannot steer a review turn"}}}`,
+			req.ID.Key(),
+		))
+	}()
+
+	_, err := client.Prompt(context.Background(), "session-1", "新的普通消息")
+	if err == nil || !strings.Contains(err.Error(), "detail=cannot steer a review turn") {
+		t.Fatalf("Prompt() error = %v, want JSON-RPC data.message detail", err)
+	}
 }
 
 func TestClientPromptWithOptionsReportsSessionUpdates(t *testing.T) {

@@ -21,6 +21,19 @@ type RPCError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+func (e *RPCError) Detail() string {
+	if e == nil || len(e.Data) == 0 {
+		return ""
+	}
+	var data struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(e.Data, &data); err != nil {
+		return ""
+	}
+	return data.Message
+}
+
 type RequestID struct {
 	raw json.RawMessage
 }

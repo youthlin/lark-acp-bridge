@@ -25,6 +25,25 @@ type permissionRequester func(context.Context, Message, acp.PermissionRequest) (
 
 type permissionRequesterKey struct{}
 
+type ModelOption struct {
+	Value string
+	Name  string
+}
+
+type ModelSelectionCard struct {
+	BotID        string
+	ChatID       string
+	ThreadID     string
+	ACPSessionID string
+	RequesterID  string
+	CurrentModel string
+	Options      []ModelOption
+}
+
+type modelSelectionCardSender func(context.Context, Message, ModelSelectionCard) error
+
+type modelSelectionCardSenderKey struct{}
+
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
 		return ctx
@@ -70,4 +89,19 @@ func RequestPermission(ctx context.Context, msg Message, req acp.PermissionReque
 	}
 	outcome, err := requester(ctx, msg, req)
 	return outcome, true, err
+}
+
+func WithModelSelectionCardSender(ctx context.Context, sender func(context.Context, Message, ModelSelectionCard) error) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, modelSelectionCardSenderKey{}, modelSelectionCardSender(sender))
+}
+
+func SendModelSelectionCard(ctx context.Context, msg Message, card ModelSelectionCard) (bool, error) {
+	sender, ok := ctx.Value(modelSelectionCardSenderKey{}).(modelSelectionCardSender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender(ctx, msg, card)
 }

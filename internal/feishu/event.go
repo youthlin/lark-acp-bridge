@@ -46,6 +46,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = WithIntermediateReplySender(ctx, a.SendText)
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
 	ctx = WithPermissionRequester(ctx, a.RequestPermission)
+	ctx = WithModelSelectionCardSender(ctx, a.SendModelSelectionCard)
 	// 添加删除表情回应
 	reactionID := a.addProcessingReaction(ctx, msg)
 	defer a.deleteProcessingReaction(ctx, msg, reactionID)
