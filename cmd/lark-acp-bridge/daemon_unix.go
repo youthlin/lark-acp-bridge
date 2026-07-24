@@ -236,7 +236,14 @@ func processLooksLikeSelf(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return bytes.Contains(data, []byte(daemonEnvToken))
+	if !bytes.Contains(data, []byte(daemonEnvToken)) {
+		return false
+	}
+	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(cmdline, []byte("-daemon-child"))
 }
 
 func mustGetwd() string {
