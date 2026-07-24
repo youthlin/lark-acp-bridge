@@ -857,6 +857,14 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, clearInitialPrompt bool) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	reply, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
+	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
+		refreshed, refreshErr := s.refreshACPSession(ctx, msg, session, agent)
+		if refreshErr != nil {
+			return "", refreshErr
+		}
+		session = refreshed
+		reply, sentProgress, err = s.runUserPrompt(ctx, msg, session, agent, text)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", nil
@@ -879,6 +887,35 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		return "ACP session 已完成，但没有返回文本。", nil
 	}
 	return reply, nil
+}
+
+func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) (Session, error) {
+	cwd := strings.TrimSpace(session.Cwd)
+	if cwd == "" {
+		return Session{}, fmt.Errorf("当前会话缺少工作目录，无法重建 ACP session")
+	}
+	slog.WarnContext(ctx, "持久化 ACP session 不可恢复，准备重建", "session", session.ACPSessionID, "cwd", cwd)
+	sessionInfo, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, filepath.Clean(cwd), sessionWorkspace(session, msg))
+	if err != nil {
+		return Session{}, fmt.Errorf("重建 ACP session 失败: %w", err)
+	}
+	session.ACPSessionID = sessionInfo.SessionID
+	session.Cwd = filepath.Clean(cwd)
+	if strings.TrimSpace(session.Workspace) == "" {
+		session.Workspace = msg.Workspace
+	}
+	session.AvailableCommands = sessionInfo.AvailableCommands
+	session.ConfigOptions = sessionInfo.ConfigOptions
+	session.Models = sessionInfo.Models
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return session, nil
+	}
+	if err := store.Upsert(session); err != nil {
+		return Session{}, fmt.Errorf("保存重建后的 ACP session 失败: %w", err)
+	}
+	slog.InfoContext(ctx, "已重建 ACP session", "session", session.ACPSessionID, "cwd", session.Cwd)
+	return session, nil
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, bool, error) {

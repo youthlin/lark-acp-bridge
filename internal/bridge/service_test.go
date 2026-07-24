@@ -312,6 +312,61 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	key := SessionKey{ChatID: "oc_chat", ThreadID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		Title:        "old session",
+		AgentName:    "traex",
+		ACPSessionID: "old-acp-session",
+		Cwd:          workDir,
+		Status:       "ready",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	rt := &fakeRuntime{
+		newSessionID: "new-acp-session",
+		promptReply:  "ACP 回复",
+		promptErrors: []error{errACPSessionUnavailable},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Cwd != workDir {
+		t.Fatalf("newCalls = %+v, want refresh with cwd %q", rt.newCalls, workDir)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want retry after refresh", rt.promptCalls)
+	}
+	if rt.promptCalls[0].Session.ACPSessionID != "old-acp-session" {
+		t.Fatalf("first prompt session = %q, want old session", rt.promptCalls[0].Session.ACPSessionID)
+	}
+	if rt.promptCalls[1].Session.ACPSessionID != "new-acp-session" {
+		t.Fatalf("second prompt session = %q, want refreshed session", rt.promptCalls[1].Session.ACPSessionID)
+	}
+	updated, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found after refresh")
+	}
+	if updated.ACPSessionID != "new-acp-session" {
+		t.Fatalf("persisted session = %q, want new-acp-session", updated.ACPSessionID)
+	}
+}
+
 func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -2569,6 +2624,7 @@ type fakeRuntime struct {
 	newSessionIDs     []string
 	newSessionInfo    acp.SessionInfo
 	promptReply       string
+	promptErrors      []error
 	promptUpdates     []acp.PromptUpdate
 	afterUpdates      func()
 	permissionRequest *acp.PermissionRequest
@@ -2635,6 +2691,11 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 	blockPrompt := f.blockPrompt
 	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
 	reply := f.promptReply
+	var promptErr error
+	if len(f.promptErrors) > 0 {
+		promptErr = f.promptErrors[0]
+		f.promptErrors = f.promptErrors[1:]
+	}
 	f.mu.Unlock()
 	if opts.OnUpdate != nil {
 		for _, update := range updates {
@@ -2656,6 +2717,9 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 			return "", ctx.Err()
 		case <-blockPrompt:
 		}
+	}
+	if promptErr != nil {
+		return "", promptErr
 	}
 	return reply, nil
 }

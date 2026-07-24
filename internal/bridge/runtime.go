@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -11,6 +12,8 @@ import (
 )
 
 const acpRequestTimeout = 10 * time.Minute
+
+var errACPSessionUnavailable = errors.New("acp session unavailable")
 
 type acpRuntime interface {
 	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error)
@@ -187,7 +190,7 @@ func (r *runtimeManager) clientForSession(ctx context.Context, session Session, 
 	if err != nil {
 		if loadInfo, loadErr := client.LoadSession(ctx, session.ACPSessionID, session.Cwd); loadErr != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("session/resume: %w; session/load fallback: %w", err, loadErr)
+			return nil, fmt.Errorf("%w: session/resume: %v; session/load fallback: %v", errACPSessionUnavailable, err, loadErr)
 		} else {
 			sessionInfo = loadInfo
 		}
