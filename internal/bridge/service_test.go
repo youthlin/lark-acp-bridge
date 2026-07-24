@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg feishu.Message) (string, error) {
@@ -35,6 +37,14 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 		}
 	}
 	return svc.HandleFeishuMessage(ctx, msg)
+}
+
+func slogAttrsMap(attrs []slog.Attr) map[string]string {
+	out := make(map[string]string, len(attrs))
+	for _, attr := range attrs {
+		out[attr.Key] = attr.Value.String()
+	}
+	return out
 }
 
 func testReadySession(t *testing.T, store *SessionStore) Session {
@@ -2455,7 +2465,8 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}()
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
-	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+	secondCtx := logging.CtxAddAttr(ctx, slog.String("message_id", "om_second"))
+	reply, err := handleFeishuMessage(t, svc, secondCtx, feishu.Message{
 		BotID:     "bot-a",
 		MessageID: "om_second",
 		ChatID:    "oc_chat",
@@ -2483,6 +2494,11 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	if rt.promptCallCount() != 2 {
 		t.Fatalf("prompt calls = %d, want old and new prompt", rt.promptCallCount())
 	}
+	rt.mu.Lock()
+	if len(rt.cancelCalls) == 0 || rt.cancelCalls[0].Attrs["message_id"] != "om_second" {
+		t.Fatalf("cancel calls = %+v, want cancellation ctx from second message", rt.cancelCalls)
+	}
+	rt.mu.Unlock()
 	if len(cards) == 0 {
 		t.Fatal("old prompt should create a stream card before cancellation")
 	}
@@ -2498,6 +2514,82 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	if !cards[0].isClosed() {
 		t.Fatal("cancelled old card should be closed")
+	}
+}
+
+func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply:   "ACP 回复",
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Status:       "ready",
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ThreadID:  "omt_thread",
+			Text:      "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_status",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	if !strings.Contains(reply, "session：acp-session-1") {
+		t.Fatalf("reply = %q, want status without cancelling running prompt", reply)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want read-only command not to cancel running prompt", got)
+	}
+	select {
+	case got := <-firstDone:
+		t.Fatalf("first prompt finished before unblock: %+v", got)
+	default:
+	}
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "ACP 回复" {
+			t.Fatalf("first reply = %q, want ACP reply after unblock", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt did not finish after unblock")
 	}
 }
 
@@ -2654,6 +2746,7 @@ type fakePromptCall struct {
 
 type fakeCancelCall struct {
 	Session Session
+	Attrs   map[string]string
 }
 
 type fakeConfigCall struct {
@@ -2727,7 +2820,7 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 func (f *fakeRuntime) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Session: session})
+	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Session: session, Attrs: slogAttrsMap(logging.CtxAttrs(ctx))})
 	return nil
 }
 

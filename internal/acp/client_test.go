@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -317,67 +315,45 @@ func TestClientCancelSession(t *testing.T) {
 	<-done
 }
 
-func TestClientHandlesWorkspaceFileRequests(t *testing.T) {
-	workspace := t.TempDir()
-	client, server := newPipeClient(t, workspace)
+func TestClientRejectsWorkspaceFileRequests(t *testing.T) {
+	client, server := newPipeClient(t, t.TempDir())
 	defer server.close()
 	client.cwd = t.TempDir()
-
-	target := filepath.Join(workspace, "SOUL.md")
-	server.writeRequest(t, 100, "fs/write_text_file", map[string]any{
-		"sessionId": "session-1",
-		"path":      target,
-		"content":   "line1\nline2\nline3\n",
-	})
-	writeResp := server.readRequest(t)
-	if writeResp.Error != nil {
-		t.Fatalf("write response error = %+v", writeResp.Error)
-	}
-	if string(writeResp.Result) != "null" {
-		t.Fatalf("write result = %s, want null", writeResp.Result)
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	if string(data) != "line1\nline2\nline3\n" {
-		t.Fatalf("file content = %q", string(data))
-	}
-
-	server.writeRequest(t, 101, "fs/read_text_file", map[string]any{
-		"sessionId": "session-1",
-		"path":      target,
-		"line":      2,
-		"limit":     1,
-	})
-	readResp := server.readRequest(t)
-	if readResp.Error != nil {
-		t.Fatalf("read response error = %+v", readResp.Error)
-	}
-	var readResult struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(readResp.Result, &readResult); err != nil {
-		t.Fatalf("Unmarshal read result error = %v", err)
-	}
-	if readResult.Content != "line2\n" {
-		t.Fatalf("read content = %q, want line2", readResult.Content)
-	}
-
-	outside := filepath.Join(workspace, "..", "outside.md")
-	server.writeRequest(t, 102, "fs/write_text_file", map[string]any{
-		"path":    outside,
-		"content": "outside",
-	})
-	outsideResp := server.readRequest(t)
-	if outsideResp.Error == nil || !strings.Contains(outsideResp.Error.Message, "超出允许目录") {
-		t.Fatalf("outside response = %+v, want allowed roots error", outsideResp)
-	}
-	if _, err := os.Stat(filepath.Clean(outside)); !os.IsNotExist(err) {
-		t.Fatalf("outside file should not be written, stat err = %v", err)
-	}
-
 	_ = client
+
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{
+			method: "fs/write_text_file",
+			params: map[string]any{
+				"sessionId": "session-1",
+				"path":      "/tmp/SOUL.md",
+				"content":   "line1\nline2\nline3\n",
+			},
+		},
+		{
+			method: "fs/read_text_file",
+			params: map[string]any{
+				"sessionId": "session-1",
+				"path":      "/tmp/SOUL.md",
+				"line":      2,
+				"limit":     1,
+			},
+		},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			server.writeRequest(t, 100, tc.method, tc.params)
+			resp := server.readRequest(t)
+			if resp.Error == nil {
+				t.Fatalf("%s response error = nil, want unsupported method error", tc.method)
+			}
+			if resp.Error.Code != -32601 || !strings.Contains(resp.Error.Message, "method not supported") {
+				t.Fatalf("%s response error = %+v, want unsupported method", tc.method, resp.Error)
+			}
+		})
+	}
 }
 
 func TestClientHandlesStringIDAndPermissionRequests(t *testing.T) {
@@ -526,6 +502,44 @@ func TestClientPermissionRequestReturnsCancelledForStaleToolCall(t *testing.T) {
 	}
 	if result.Outcome.Outcome != "cancelled" {
 		t.Fatalf("permission outcome = %+v, want stale request cancelled", result.Outcome)
+	}
+}
+
+func TestClientPermissionRequestReturnsCancelledForLateOldToolCallBeforeNewPromptWrite(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	oldGeneration := client.setPermissionHandler("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		return PermissionOutcome{Outcome: "selected", OptionID: "old"}, nil
+	})
+	newGeneration := client.setPermissionHandlerPending("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		t.Fatal("new handler should not receive late old-turn permission request")
+		return PermissionOutcome{}, nil
+	})
+	defer client.clearPermissionHandler("session-1", newGeneration)
+	defer client.clearPermissionHandler("session-1", oldGeneration)
+
+	server.writeNotification(t, "session/update", map[string]any{
+		"sessionId": "session-1",
+		"update": map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "call-late-old",
+			"title":         "Late old call",
+		},
+	})
+	waitForToolCallSnapshot(t, client, "session-1", "call-late-old")
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-late","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-late-old"},"options":[{"optionId":"reject","kind":"reject_once"}]}}`)
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "cancelled" {
+		t.Fatalf("permission outcome = %+v, want late old-turn request cancelled", result.Outcome)
 	}
 }
 

@@ -38,7 +38,7 @@ func run() error {
 
 	loaded, err := config.LoadOrCreate(configPath)
 	if err != nil {
-		slog.Error("读取配置失败", "err", err)
+		fmt.Fprintf(os.Stderr, "读取配置失败, err=%v\n", err)
 		return err
 	}
 	if loaded.Created {
@@ -52,11 +52,11 @@ func run() error {
 		msg := fmt.Sprintf(`
 未配置 app_id/app_secret, 请编辑配置文件: %s
 可访问 https://open.larkoffice.com/page/launcher 创建飞书智能体`, loaded.Path)
-		slog.Error(msg)
+		fmt.Fprintln(os.Stderr, msg)
 		return errors.New(msg)
 	}
 	if err := loaded.Config.ValidateAgentCommands(); err != nil {
-		slog.Error("启动失败: " + err.Error())
+		fmt.Fprintf(os.Stderr, "无法识别的acp命令失败, err=%v\n", err)
 		return err
 	}
 
@@ -72,17 +72,20 @@ func runForeground(cfg config.Config, configPath string) error {
 
 	svc := bridge.NewService(cfg, nil)
 	if err := svc.Start(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "启动失败, err=%v\n", err)
 		return err
 	}
 	cleanup, err := writeDaemonPIDFile(configPath)
 	if err != nil {
 		_ = svc.Shutdown(context.Background())
+		fmt.Fprintf(os.Stderr, "写入pid文件失败, err=%v\n", err)
 		return err
 	}
 	defer cleanup()
 
 	<-ctx.Done()
 	if err := svc.Shutdown(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "停止服务异常, err=%v\n", err)
 		return err
 	}
 	return nil

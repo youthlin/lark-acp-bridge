@@ -46,8 +46,10 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = WithIntermediateReplySender(ctx, a.SendText)
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
 	ctx = WithPermissionRequester(ctx, a.RequestPermission)
+	// 添加删除表情回应
 	reactionID := a.addProcessingReaction(ctx, msg)
 	defer a.deleteProcessingReaction(ctx, msg, reactionID)
+
 	reply, err := a.handler.HandleFeishuMessage(ctx, msg)
 	if err != nil {
 		slog.ErrorContext(ctx, "处理飞书消息失败", "错误", err)
@@ -68,11 +70,12 @@ func (a *Adapter) withReplyContext(ctx context.Context, msg Message) Message {
 	if replyToID == "" || a.messages == nil {
 		return msg
 	}
-	reply, err := a.messages.GetMessage(ctx, replyToID, msg.Workspace)
+	replyMessage, err := a.messages.GetMessage(ctx, replyToID, msg.Workspace)
 	if err != nil {
 		slog.WarnContext(ctx, "读取被回复飞书消息失败", "reply_to_message_id", replyToID, "错误", err)
 		return msg
 	}
+	reply := replyContextFromMessage(replyMessage)
 	if reply == nil || strings.TrimSpace(reply.PromptText()) == "" {
 		return msg
 	}

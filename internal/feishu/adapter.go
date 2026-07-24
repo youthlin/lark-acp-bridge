@@ -16,11 +16,11 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
-
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
 type Handler interface {
+	// Message 是一次事件解析后的轻量值对象，按值传递可以让 handler 安全持有快照。
 	HandleFeishuMessage(context.Context, Message) (string, error)
 }
 
@@ -41,7 +41,7 @@ type reactionClient interface {
 }
 
 type messageClient interface {
-	GetMessage(ctx context.Context, messageID string, workspace string) (*ReplyContext, error)
+	GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error)
 	DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error)
 }
 
@@ -98,7 +98,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	)
 	go func() {
 		if err := a.ws.Start(ctx); err != nil {
-			slog.Error("飞书 WebSocket 监听已停止", "错误", err)
+			slog.Error("飞书 WebSocket 监听已停止", "err", err)
 		}
 	}()
 	slog.Info("启动飞书 WebSocket 监听")
@@ -180,14 +180,21 @@ func (a *Adapter) ReplyText(ctx context.Context, messageID string, text string) 
 	return nil
 }
 
+// processingReactionEmojis 收到消息时随机选一个表情加在消息上
+// 表情列表: https://open.larkoffice.com/document/server-docs/im-v1/message-reaction/emojis-introduce
 var processingReactionEmojis = []string{
-	"OneSecond",
-	"Typing",
-	"Get",
-	"Lark_Emoji_OK_0",
-	"Lark_Emoji_Witty_0",
-	"OnIt",
-	"SaluteFace",
+	"OK",         // OK
+	"Get",        // 收到
+	"WINK",       // Wink 眨眼
+	"WITTY",      // 灵光一闪
+	"DIZZY",      // 头晕
+	"MeMeMe",     // 举手, 我我我
+	"THINKING",   // 思考
+	"Typing",     // 打字
+	"OnIt",       // 在看了
+	"OneSecond",  // 再等一下
+	"GoGoGo",     // 开始干
+	"SaluteFace", // 敬礼
 }
 
 type larkReactionClient struct {
@@ -198,7 +205,7 @@ type larkMessageClient struct {
 	client *lark.Client
 }
 
-func (c larkMessageClient) GetMessage(ctx context.Context, messageID string, workspace string) (*ReplyContext, error) {
+func (c larkMessageClient) GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error) {
 	if c.client == nil {
 		return nil, fmt.Errorf("飞书客户端未初始化")
 	}
@@ -219,41 +226,42 @@ func (c larkMessageClient) GetMessage(ctx context.Context, messageID string, wor
 	if resp.Data == nil || len(resp.Data.Items) == 0 || resp.Data.Items[0] == nil {
 		return nil, fmt.Errorf("飞书获取消息接口未返回消息")
 	}
-	reply := replyContextFromLarkMessage(resp.Data.Items[0])
-	if reply == nil {
+	msg := messageFromLarkMessage(resp.Data.Items[0])
+	if msg == nil {
 		return nil, nil
 	}
-	reply.Images = hydrateMessageImages(ctx, c, reply.MessageID, workspace, reply.Images)
-	setReplyPrimaryImage(reply)
-	return reply, nil
+	msg.Workspace = workspace
+	msg.Images = hydrateMessageImages(ctx, c, msg.MessageID, workspace, msg.Images)
+	setMessagePrimaryImage(msg)
+	return msg, nil
 }
 
-func replyContextFromLarkMessage(item *larkim.Message) *ReplyContext {
+func messageFromLarkMessage(item *larkim.Message) *Message {
 	if item == nil {
 		return nil
 	}
-	reply := &ReplyContext{
+	msg := &Message{
 		MessageID: value(item.MessageId),
 		MsgType:   value(item.MsgType),
 	}
 	if item.Sender != nil {
-		reply.SenderID = value(item.Sender.Id)
-		reply.SenderType = value(item.Sender.SenderType)
+		msg.SenderID = value(item.Sender.Id)
+		msg.SenderType = value(item.Sender.SenderType)
 	}
 	if item.Body != nil {
 		content := value(item.Body.Content)
-		reply.Images = parseMessageImages(content)
-		setReplyPrimaryImage(reply)
-		if strings.EqualFold(reply.MsgType, "image") {
-			reply.Text = ""
+		msg.Images = parseMessageImages(content)
+		setMessagePrimaryImage(msg)
+		if strings.EqualFold(msg.MsgType, "image") {
+			msg.Text = ""
 		} else {
-			reply.Text = parseMessageTextContent(content)
+			msg.Text = parseMessageTextContent(content)
 		}
 	}
-	if reply.MessageID == "" && reply.MsgType == "" && reply.Text == "" && reply.ImageKey == "" && len(reply.Images) == 0 {
+	if msg.MessageID == "" && msg.MsgType == "" && msg.Text == "" && msg.ImageKey == "" && len(msg.Images) == 0 {
 		return nil
 	}
-	return reply
+	return msg
 }
 
 func (c larkMessageClient) DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error) {
@@ -354,10 +362,11 @@ func (c larkReactionClient) AddReaction(ctx context.Context, messageID string) (
 	if messageID == "" {
 		return "", fmt.Errorf("飞书 message_id 为空")
 	}
+	emojiType := randomProcessingReactionEmoji()
 	req := larkim.NewCreateMessageReactionReqBuilder().
 		MessageId(messageID).
 		Body(larkim.NewCreateMessageReactionReqBodyBuilder().
-			ReactionType(larkim.NewEmojiBuilder().EmojiType(randomProcessingReactionEmoji()).Build()).
+			ReactionType(larkim.NewEmojiBuilder().EmojiType(emojiType).Build()).
 			Build()).
 		Build()
 	resp, err := c.client.Im.V1.MessageReaction.Create(ctx, req)

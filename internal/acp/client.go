@@ -50,9 +50,10 @@ type Client struct {
 }
 
 type permissionScope struct {
-	generation int64
-	ctx        context.Context
-	handler    PermissionRequestHandler
+	generation     int64
+	toolGeneration int64
+	ctx            context.Context
+	handler        PermissionRequestHandler
 }
 
 type UpdateHandler func(sessionID string, update SessionUpdate)
@@ -363,7 +364,7 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, er
 func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
 	var output strings.Builder
 	var outputMu sync.Mutex
-	generation := c.setPermissionHandler(sessionID, ctx, opts.OnPermissionRequest)
+	generation := c.setPermissionHandlerPending(sessionID, ctx, opts.OnPermissionRequest)
 	defer c.clearPermissionHandler(sessionID, generation)
 	unsubscribe := c.SubscribeUpdates(func(id string, update SessionUpdate) {
 		if id != sessionID {
@@ -383,11 +384,13 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	})
 	defer unsubscribe()
 
-	_, err := c.call(ctx, "session/prompt", map[string]any{
+	_, err := c.callWithAfterWrite(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
 		},
+	}, func() {
+		c.activatePermissionHandler(sessionID, generation)
 	})
 	if err != nil {
 		outputMu.Lock()
@@ -415,6 +418,10 @@ func (c *Client) SubscribeUpdates(handler UpdateHandler) func() {
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.callWithAfterWrite(ctx, method, params, nil)
+}
+
+func (c *Client) callWithAfterWrite(ctx context.Context, method string, params any, afterWrite func()) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	req, err := NewRequest(id, method, params)
 	if err != nil {
@@ -428,6 +435,9 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	if err := c.write(req); err != nil {
 		c.removePending(req.ID)
 		return nil, err
+	}
+	if afterWrite != nil {
+		afterWrite()
 	}
 	select {
 	case <-ctx.Done():
@@ -544,12 +554,6 @@ func (c *Client) handleSessionUpdate(msg Message) {
 
 func (c *Client) handleAgentRequest(msg Message) {
 	switch msg.Method {
-	case "fs/read_text_file":
-		result, err := c.handleReadTextFile(msg.Params)
-		c.replyResult(msg, result, err)
-	case "fs/write_text_file":
-		result, err := c.handleWriteTextFile(msg.Params)
-		c.replyResult(msg, result, err)
 	case "session/request_permission":
 		result, err := c.handleRequestPermission(msg.ID, msg.Params)
 		c.replyResult(msg, result, err)
@@ -583,100 +587,6 @@ func (c *Client) replyResult(msg Message, result any, err error) {
 		return
 	}
 	c.write(Message{JSONRPC: "2.0", ID: msg.ID, Result: raw})
-}
-
-func (c *Client) handleReadTextFile(raw json.RawMessage) (any, error) {
-	var params struct {
-		SessionID string `json:"sessionId"`
-		Path      string `json:"path"`
-		Line      int    `json:"line,omitempty"`
-		Limit     int    `json:"limit,omitempty"`
-	}
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, fmt.Errorf("解析 fs/read_text_file 参数: %w", err)
-	}
-	path, err := c.workspacePath(params.Path)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读取文件 %s: %w", params.Path, err)
-	}
-	content := string(data)
-	if params.Line > 0 || params.Limit > 0 {
-		content = sliceLines(content, params.Line, params.Limit)
-	}
-	return map[string]string{"content": content}, nil
-}
-
-func (c *Client) handleWriteTextFile(raw json.RawMessage) (any, error) {
-	var params struct {
-		SessionID string `json:"sessionId"`
-		Path      string `json:"path"`
-		Content   string `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, fmt.Errorf("解析 fs/write_text_file 参数: %w", err)
-	}
-	path, err := c.workspacePath(params.Path)
-	if err != nil {
-		return nil, err
-	}
-	_, statErr := os.Stat(path)
-	if statErr != nil && !os.IsNotExist(statErr) {
-		return nil, fmt.Errorf("检查文件 %s: %w", params.Path, statErr)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("创建目录: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(params.Content), 0o644); err != nil {
-		return nil, fmt.Errorf("写入文件 %s: %w", params.Path, err)
-	}
-	return nil, nil
-}
-
-func (c *Client) workspacePath(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("文件路径为空")
-	}
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("文件路径必须是绝对路径: %s", path)
-	}
-	target := filepath.Clean(path)
-	target, err := filepath.Abs(target)
-	if err != nil {
-		return "", fmt.Errorf("解析文件路径: %w", err)
-	}
-	roots := c.fileRoots()
-	for _, root := range roots {
-		if target == root || strings.HasPrefix(target, root+string(os.PathSeparator)) {
-			return target, nil
-		}
-	}
-	return "", fmt.Errorf("文件路径超出允许目录: %s", path)
-}
-
-func (c *Client) fileRoots() []string {
-	seen := make(map[string]struct{}, 2)
-	var roots []string
-	for _, root := range []string{c.cwd, c.workspace} {
-		root = strings.TrimSpace(root)
-		if root == "" {
-			continue
-		}
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		abs = filepath.Clean(abs)
-		if _, ok := seen[abs]; ok {
-			continue
-		}
-		seen[abs] = struct{}{}
-		roots = append(roots, abs)
-	}
-	return roots
 }
 
 func (c *Client) lifecycleParams(sessionID, cwd string) map[string]any {
@@ -739,21 +649,47 @@ func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (an
 }
 
 func (c *Client) setPermissionHandler(sessionID string, ctx context.Context, handler PermissionRequestHandler) int64 {
+	return c.setPermissionHandlerWithToolGeneration(sessionID, ctx, handler, true)
+}
+
+func (c *Client) setPermissionHandlerPending(sessionID string, ctx context.Context, handler PermissionRequestHandler) int64 {
+	return c.setPermissionHandlerWithToolGeneration(sessionID, ctx, handler, false)
+}
+
+func (c *Client) setPermissionHandlerWithToolGeneration(sessionID string, ctx context.Context, handler PermissionRequestHandler, active bool) int64 {
 	if strings.TrimSpace(sessionID) == "" {
 		return 0
 	}
 	generation := c.nextPromptGen.Add(1)
+	toolGeneration := int64(0)
+	if active {
+		toolGeneration = generation
+	}
 	c.permissionMu.Lock()
 	defer c.permissionMu.Unlock()
 	if c.permissionScopes == nil {
 		c.permissionScopes = make(map[string]permissionScope)
 	}
 	c.permissionScopes[sessionID] = permissionScope{
-		generation: generation,
-		ctx:        ctx,
-		handler:    handler,
+		generation:     generation,
+		toolGeneration: toolGeneration,
+		ctx:            ctx,
+		handler:        handler,
 	}
 	return generation
+}
+
+func (c *Client) activatePermissionHandler(sessionID string, generation int64) {
+	if strings.TrimSpace(sessionID) == "" || generation == 0 {
+		return
+	}
+	c.permissionMu.Lock()
+	defer c.permissionMu.Unlock()
+	scope, ok := c.permissionScopes[sessionID]
+	if ok && scope.generation == generation {
+		scope.toolGeneration = generation
+		c.permissionScopes[sessionID] = scope
+	}
 }
 
 func (c *Client) clearPermissionHandler(sessionID string, generation int64) {
@@ -773,6 +709,9 @@ func (c *Client) permissionRequestHandler(req PermissionRequest) (context.Contex
 	defer c.permissionMu.RUnlock()
 	scope := c.permissionScopes[req.SessionID]
 	if req.ToolCallState != nil && req.ToolCallState.generation != 0 && scope.generation != 0 && req.ToolCallState.generation != scope.generation {
+		return canceledContext(), nil
+	}
+	if strings.TrimSpace(req.ToolCall.ToolCallID) != "" && req.ToolCallState != nil && req.ToolCallState.generation == 0 && scope.generation != 0 {
 		return canceledContext(), nil
 	}
 	if scope.ctx == nil || scope.handler == nil {
@@ -843,7 +782,7 @@ func (c *Client) rememberToolCallUpdate(sessionID string, raw json.RawMessage) {
 func (c *Client) currentPermissionGeneration(sessionID string) int64 {
 	c.permissionMu.RLock()
 	defer c.permissionMu.RUnlock()
-	return c.permissionScopes[sessionID].generation
+	return c.permissionScopes[sessionID].toolGeneration
 }
 
 func (c *Client) toolCallSnapshot(sessionID string, toolCallID string) *ToolCallInfo {
@@ -861,25 +800,6 @@ func (c *Client) toolCallSnapshot(sessionID string, toolCallID string) *ToolCall
 	info.RawInput = append(json.RawMessage(nil), info.RawInput...)
 	info.RawOutput = append(json.RawMessage(nil), info.RawOutput...)
 	return &info
-}
-
-func sliceLines(content string, line, limit int) string {
-	if line <= 0 && limit <= 0 {
-		return content
-	}
-	lines := strings.SplitAfter(content, "\n")
-	if line <= 0 {
-		line = 1
-	}
-	start := line - 1
-	if start >= len(lines) {
-		return ""
-	}
-	end := len(lines)
-	if limit > 0 && start+limit < end {
-		end = start + limit
-	}
-	return strings.Join(lines[start:end], "")
 }
 
 func (c *Client) replyUnsupported(msg Message) {

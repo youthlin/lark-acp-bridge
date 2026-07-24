@@ -78,6 +78,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		acpUpdateUnsub:  make(map[SessionKey]func()),
 	}
 	for _, bot := range cfg.Bots {
+		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
 		s.feishu = append(s.feishu, feishu.NewAdapter(bot, s))
 		if store != nil {
 			s.stores[bot.ID] = store
@@ -137,7 +138,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 var _ feishu.Handler = (*Service)(nil)
 
 // HandleFeishuMessage 消息处理
-// 实现 [feishu.Handler]
+// 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
 	text := strings.TrimSpace(msg.Text)
 	text = stripMentionNames(text, msg.Mentions)
@@ -156,13 +157,9 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 
 	// 斜杠命令
 	if strings.HasPrefix(text, "/") {
-		s.cancelRunningMessageWork(msg)
 		return s.handleCommand(ctx, text, msg), nil
 	}
 	// 普通消息
-	if promptText != "" {
-		s.cancelMessageWork(msg)
-	}
 	return s.prompt(ctx, msg, promptText)
 }
 
@@ -676,7 +673,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		return Session{}, config.AgentConfig{}, "", "", "初始化 workspace 失败：" + err.Error()
 	}
 	key := sessionKeyFromMessage(msg)
-	s.cancelSessionWork(key)
+	s.cancelSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
 	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
@@ -743,16 +740,29 @@ func (s *Service) status(msg feishu.Message) string {
 }
 
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
-	userText := text
+	session, agent, promptText, clearInitialPrompt, errText, err := s.preparePrompt(ctx, msg, text)
+	if err != nil {
+		return "", err
+	}
+	if errText != "" {
+		return errText, nil
+	}
+	return s.promptSession(ctx, msg, session, agent, promptText, clearInitialPrompt)
+}
+
+func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (
+	// TODO 返回值太多了吧 用结构体包装一下?
+	Session, config.AgentConfig, string, bool, string, error,
+) {
 	session, ok := s.findSession(msg)
 	clearInitialPrompt := false
 	if !ok {
 		created, agent, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(userText)}, msg)
 		if errText != "" {
-			return errText, nil
+			return Session{}, config.AgentConfig{}, "", false, errText, nil
 		}
 		session = created
-		text = promptTextWithReplyContext(msg, userText)
+		text := promptTextWithReplyContext(msg, userText)
 		if strings.TrimSpace(initialPrompt) != "" {
 			if session.Status == "ready" {
 				text = promptWithUserMessage([]string{
@@ -766,20 +776,20 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 		} else if session.Status == "ready" {
 			text = promptWithUserMessage([]string{workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg))}, text)
 		}
-		return s.promptSession(ctx, msg, session, agent, text, clearInitialPrompt)
+		return session, agent, text, clearInitialPrompt, "", nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
-		return "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
+		return Session{}, config.AgentConfig{}, "", false, "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
 	}
-	text = promptTextWithReplyContext(msg, userText)
+	text := promptTextWithReplyContext(msg, userText)
 	if session.Status == "setup" && strings.TrimSpace(session.PendingInitialPrompt) == "setup" {
 		text = promptWithUserMessage([]string{workspaceSetupPrompt(sessionWorkspace(session, msg))}, text)
 		clearInitialPrompt = true
 	} else if session.Status == "ready" && strings.TrimSpace(session.ACPSessionID) == "" {
 		created, _, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(userText)}, msg)
 		if errText != "" {
-			return errText, nil
+			return Session{}, config.AgentConfig{}, "", false, errText, nil
 		}
 		session = created
 		if strings.TrimSpace(initialPrompt) != "" {
@@ -803,7 +813,7 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 			text = promptWithUserMessage([]string{memoryPolicy}, text)
 		}
 	}
-	return s.promptSession(ctx, msg, session, agent, text, clearInitialPrompt)
+	return session, agent, text, clearInitialPrompt, "", nil
 }
 
 func promptTextWithReplyContext(msg feishu.Message, text string) string {
@@ -929,11 +939,6 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 		s.scheduleWikiAfterUserPrompt(session, agent)
 	}
 	return reply, sentProgress, err
-}
-
-func (s *Service) promptRuntime(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, error) {
-	reply, _, err := s.promptRuntimeWithProgress(ctx, msg, session, agent, text)
-	return reply, err
 }
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, bool, error) {
@@ -2178,7 +2183,7 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 	s.taskMu.Unlock()
 	if previous != nil {
 		previous.cancel()
-		go s.cancelRuntimeTask(context.Background(), previous)
+		go s.cancelRuntimeTask(ctx, previous)
 	}
 
 	return ctx, func() {
@@ -2200,32 +2205,20 @@ func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
 	}
 }
 
-func (s *Service) cancelRunningSessionWork(key SessionKey) {
+func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) {
 	s.taskMu.Lock()
 	task := s.tasks[key]
 	delete(s.tasks, key)
 	s.taskMu.Unlock()
 	if task != nil {
 		task.cancel()
-		go s.cancelRuntimeTask(context.Background(), task)
+		go s.cancelRuntimeTask(ctx, task)
 	}
 }
 
-func (s *Service) cancelSessionWork(key SessionKey) {
+func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {
 	s.cancelWikiTimer(key)
-	s.cancelRunningSessionWork(key)
-}
-
-func (s *Service) cancelMessageWork(msg feishu.Message) {
-	for _, key := range sessionKeysFromMessage(msg) {
-		s.cancelSessionWork(key)
-	}
-}
-
-func (s *Service) cancelRunningMessageWork(msg feishu.Message) {
-	for _, key := range sessionKeysFromMessage(msg) {
-		s.cancelRunningSessionWork(key)
-	}
+	s.cancelRunningSessionWork(ctx, key)
 }
 
 func (s *Service) cancelWikiTimer(key SessionKey) {

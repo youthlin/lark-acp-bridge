@@ -9,22 +9,23 @@ import (
 )
 
 type Message struct {
-	BotID     string
-	Workspace string
-	MessageID string
-	ChatID    string
-	ChatType  string
-	ThreadID  string
-	RootID    string
-	ParentID  string
-	SenderID  string
-	MsgType   string
-	Text      string
-	ImageKey  string
-	LocalPath string
-	Images    []MessageImage
-	Mentions  []Mention
-	Reply     *ReplyContext
+	BotID      string
+	Workspace  string
+	MessageID  string
+	ChatID     string
+	ChatType   string
+	ThreadID   string
+	RootID     string
+	ParentID   string
+	SenderID   string
+	SenderType string
+	MsgType    string
+	Text       string
+	ImageKey   string
+	LocalPath  string
+	Images     []MessageImage
+	Mentions   []Mention
+	Reply      *ReplyContext
 }
 
 type Mention struct {
@@ -71,6 +72,9 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 	if event.Event.Sender != nil && event.Event.Sender.SenderId != nil {
 		msg.SenderID = value(event.Event.Sender.SenderId.OpenId)
 	}
+	if event.Event.Sender != nil {
+		msg.SenderType = value(event.Event.Sender.SenderType)
+	}
 	content := value(raw.Content)
 	msg.Images = parseMessageImages(content)
 	if len(msg.Images) > 0 {
@@ -111,6 +115,27 @@ func (m Message) PromptText() string {
 
 func (r ReplyContext) PromptText() string {
 	return messageTextWithImages(r.Text, r.Images)
+}
+
+// replyContextFromMessage 将一条消息转换成被引用的上下文
+func replyContextFromMessage(msg *Message) *ReplyContext {
+	if msg == nil {
+		return nil
+	}
+	reply := &ReplyContext{
+		MessageID:  msg.MessageID,
+		SenderID:   msg.SenderID,
+		SenderType: msg.SenderType,
+		MsgType:    msg.MsgType,
+		Text:       msg.Text,
+		ImageKey:   msg.ImageKey,
+		LocalPath:  msg.LocalPath,
+		Images:     append([]MessageImage(nil), msg.Images...),
+	}
+	if reply.MessageID == "" && reply.SenderID == "" && reply.SenderType == "" && reply.MsgType == "" && reply.Text == "" && reply.ImageKey == "" && len(reply.Images) == 0 {
+		return nil
+	}
+	return reply
 }
 
 func parseTextContent(content string) (string, error) {

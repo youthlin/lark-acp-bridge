@@ -56,7 +56,7 @@ func (f *fakeReactionClient) DeleteReaction(ctx context.Context, messageID strin
 }
 
 type fakeMessageClient struct {
-	replies       map[string]*ReplyContext
+	messages      map[string]*Message
 	calls         []string
 	downloadCalls []fakeImageDownloadCall
 	err           error
@@ -69,12 +69,12 @@ type fakeImageDownloadCall struct {
 	Workspace string
 }
 
-func (f *fakeMessageClient) GetMessage(ctx context.Context, messageID string, workspace string) (*ReplyContext, error) {
+func (f *fakeMessageClient) GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error) {
 	f.calls = append(f.calls, messageID)
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.replies[messageID], nil
+	return f.messages[messageID], nil
 }
 
 func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error) {
@@ -187,7 +187,7 @@ func TestAdapterAddsMessageAttrsToContext(t *testing.T) {
 func TestAdapterHydratesReplyContextFromParentMessage(t *testing.T) {
 	handler := &countingHandler{}
 	messages := &fakeMessageClient{
-		replies: map[string]*ReplyContext{
+		messages: map[string]*Message{
 			"om_parent": {
 				MessageID:  "om_parent",
 				SenderID:   "ou_other",
@@ -248,7 +248,7 @@ func TestAdapterHydratesCurrentImageMessage(t *testing.T) {
 func TestAdapterHydratesAppReplyContext(t *testing.T) {
 	handler := &countingHandler{}
 	messages := &fakeMessageClient{
-		replies: map[string]*ReplyContext{
+		messages: map[string]*Message{
 			"om_parent": {
 				MessageID:  "om_parent",
 				SenderID:   "cli_bot",
@@ -275,7 +275,7 @@ func TestAdapterHydratesAppReplyContext(t *testing.T) {
 func TestAdapterHydratesBotReplyContext(t *testing.T) {
 	handler := &countingHandler{}
 	messages := &fakeMessageClient{
-		replies: map[string]*ReplyContext{
+		messages: map[string]*Message{
 			"om_parent": {
 				MessageID:  "om_parent",
 				SenderID:   "ou_bot",
@@ -312,9 +312,9 @@ func TestReplyContextFromLarkTextMessage(t *testing.T) {
 			Build()).
 		Build()
 
-	reply := replyContextFromLarkMessage(item)
-	if reply == nil || reply.MessageID != "om_parent" || reply.SenderID != "ou_user" || reply.SenderType != "user" || reply.Text != "hello reply" {
-		t.Fatalf("reply context = %+v", reply)
+	msg := messageFromLarkMessage(item)
+	if msg == nil || msg.MessageID != "om_parent" || msg.SenderID != "ou_user" || msg.SenderType != "user" || msg.Text != "hello reply" {
+		t.Fatalf("message = %+v", msg)
 	}
 }
 
@@ -331,13 +331,13 @@ func TestReplyContextFromLarkPostMessage(t *testing.T) {
 			Build()).
 		Build()
 
-	reply := replyContextFromLarkMessage(item)
-	if reply == nil {
-		t.Fatal("reply context = nil, want post text")
+	msg := messageFromLarkMessage(item)
+	if msg == nil {
+		t.Fatal("message = nil, want post text")
 	}
 	for _, want := range []string{"复盘结论", "第一段", "链接文字", "第二段"} {
-		if !strings.Contains(reply.Text, want) {
-			t.Fatalf("reply text = %q, want %q", reply.Text, want)
+		if !strings.Contains(msg.Text, want) {
+			t.Fatalf("message text = %q, want %q", msg.Text, want)
 		}
 	}
 }
@@ -351,15 +351,15 @@ func TestReplyContextFromLarkPostMessageWithImage(t *testing.T) {
 			Build()).
 		Build()
 
-	reply := replyContextFromLarkMessage(item)
-	if reply == nil {
-		t.Fatal("reply context = nil, want post image context")
+	msg := messageFromLarkMessage(item)
+	if msg == nil {
+		t.Fatal("message = nil, want post image context")
 	}
-	if len(reply.Images) != 1 || reply.Images[0].ImageKey != "img_v3_post" || reply.ImageKey != "img_v3_post" {
-		t.Fatalf("reply images = %+v imageKey=%q, want post image", reply.Images, reply.ImageKey)
+	if len(msg.Images) != 1 || msg.Images[0].ImageKey != "img_v3_post" || msg.ImageKey != "img_v3_post" {
+		t.Fatalf("message images = %+v imageKey=%q, want post image", msg.Images, msg.ImageKey)
 	}
-	if !strings.Contains(reply.PromptText(), "image_key: img_v3_post") {
-		t.Fatalf("PromptText() = %q, want image key", reply.PromptText())
+	if !strings.Contains(msg.PromptText(), "image_key: img_v3_post") {
+		t.Fatalf("PromptText() = %q, want image key", msg.PromptText())
 	}
 }
 
@@ -376,13 +376,13 @@ func TestReplyContextFromLarkInteractiveMessage(t *testing.T) {
 			Build()).
 		Build()
 
-	reply := replyContextFromLarkMessage(item)
-	if reply == nil || reply.SenderType != "app" {
-		t.Fatalf("reply context = %+v, want app interactive text", reply)
+	msg := messageFromLarkMessage(item)
+	if msg == nil || msg.SenderType != "app" {
+		t.Fatalf("message = %+v, want app interactive text", msg)
 	}
 	for _, want := range []string{"QA Review", "Review 结论", "需要补测试", "查看详情"} {
-		if !strings.Contains(reply.Text, want) {
-			t.Fatalf("reply text = %q, want %q", reply.Text, want)
+		if !strings.Contains(msg.Text, want) {
+			t.Fatalf("message text = %q, want %q", msg.Text, want)
 		}
 	}
 }
@@ -400,29 +400,51 @@ func TestReplyContextFromLarkImageMessage(t *testing.T) {
 			Build()).
 		Build()
 
-	reply := replyContextFromLarkMessage(item)
-	if reply == nil {
-		t.Fatal("reply context = nil, want image context")
+	msg := messageFromLarkMessage(item)
+	if msg == nil {
+		t.Fatal("message = nil, want image context")
 	}
-	if reply.MsgType != "image" || reply.ImageKey != "img_test_reply_image" {
-		t.Fatalf("reply context = %+v, want image key", reply)
+	if msg.MsgType != "image" || msg.ImageKey != "img_test_reply_image" {
+		t.Fatalf("message = %+v, want image key", msg)
 	}
 	for _, want := range []string{"[图片消息]", "img_test_reply_image"} {
-		if !strings.Contains(reply.PromptText(), want) {
-			t.Fatalf("reply prompt text = %q, want %q", reply.PromptText(), want)
+		if !strings.Contains(msg.PromptText(), want) {
+			t.Fatalf("message prompt text = %q, want %q", msg.PromptText(), want)
 		}
 	}
 }
 
-func TestLarkMessageClientHydratesReplyImageLocalPath(t *testing.T) {
-	reply := &ReplyContext{
+func TestReplyContextFromMessage(t *testing.T) {
+	msg := &Message{
+		MessageID:  "om_parent",
+		SenderID:   "ou_user",
+		SenderType: "user",
+		MsgType:    "text",
+		Text:       "hello",
+		Images:     []MessageImage{{ImageKey: "img_v3_reply", LocalPath: "/tmp/img.png"}},
+	}
+	reply := replyContextFromMessage(msg)
+	if reply == nil || reply.MessageID != msg.MessageID || reply.SenderID != msg.SenderID || reply.SenderType != msg.SenderType || reply.Text != msg.Text {
+		t.Fatalf("reply context = %+v, want copied message fields", reply)
+	}
+	if len(reply.Images) != 1 || reply.Images[0].LocalPath != "/tmp/img.png" {
+		t.Fatalf("reply images = %+v, want copied images", reply.Images)
+	}
+	msg.Images[0].LocalPath = "/tmp/changed.png"
+	if reply.Images[0].LocalPath != "/tmp/img.png" {
+		t.Fatalf("reply images share backing array with message: %+v", reply.Images)
+	}
+}
+
+func TestLarkMessageClientHydratesMessageImageLocalPath(t *testing.T) {
+	msg := &Message{
 		MessageID: "om_parent",
 		MsgType:   "image",
 		Images:    []MessageImage{{ImageKey: "img_v3_reply"}},
 	}
-	setReplyPrimaryImage(reply)
+	setMessagePrimaryImage(msg)
 	messages := &fakeMessageClient{
-		replies: map[string]*ReplyContext{"om_parent": reply},
+		messages: map[string]*Message{"om_parent": msg},
 	}
 	workspace := t.TempDir()
 	got, err := messages.GetMessage(context.Background(), "om_parent", workspace)
@@ -432,10 +454,10 @@ func TestLarkMessageClientHydratesReplyImageLocalPath(t *testing.T) {
 	// fakeMessageClient intentionally does not hydrate by itself; hydrateMessageImages
 	// is the shared helper used by the real lark client and event path.
 	got.Images = hydrateMessageImages(context.Background(), messages, got.MessageID, workspace, got.Images)
-	setReplyPrimaryImage(got)
+	setMessagePrimaryImage(got)
 	wantPath := filepath.Join(workspace, "cache", "img_v3_reply.png")
 	if got.LocalPath != wantPath || !strings.Contains(got.PromptText(), "local_path: "+wantPath) {
-		t.Fatalf("reply = %+v prompt=%q, want hydrated local path %q", got, got.PromptText(), wantPath)
+		t.Fatalf("message = %+v prompt=%q, want hydrated local path %q", got, got.PromptText(), wantPath)
 	}
 }
 
