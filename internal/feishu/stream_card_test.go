@@ -57,6 +57,8 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 			Kind:       "execute",
 			Status:     "pending",
 			RawInput:   json.RawMessage(`{"command":"go test ./..."}`),
+			Content:    json.RawMessage(`[{"type":"diff","path":"go.mod"}]`),
+			Locations:  json.RawMessage(`[{"path":"go.mod"}]`),
 		},
 	}
 	var card any
@@ -64,9 +66,14 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"Run tests", "go test ./...", "允许", "本会话总是允许", "拒绝"} {
+	for _, want := range []string{"Run tests", "go.mod", "允许", "本会话总是允许", "拒绝"} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("permission card does not contain %q: %#v", want, card)
+		}
+	}
+	for _, unwanted := range []string{"go test ./...", "type\":\"diff"} {
+		if jsonContainsSubstring(card, unwanted) {
+			t.Fatalf("permission card contains verbose field %q: %#v", unwanted, card)
 		}
 	}
 	if jsonContainsTaggedElement(card, "action") {
@@ -83,7 +90,20 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 func TestPermissionCardActionCompletesWaiter(t *testing.T) {
 	adapter := &Adapter{permissionCards: newPermissionCardRegistry()}
 	waiter := newPermissionCardWaiter()
-	adapter.permissionCards.add("perm-1", waiter)
+	adapter.permissionCards.add("perm-1", waiter, acp.PermissionRequest{
+		RequestID: "perm-1",
+		ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
+		ToolCallState: &acp.ToolCallInfo{
+			ToolCallID: "call-1",
+			Title:      "Run tests",
+			Kind:       "execute",
+			Status:     "pending",
+			Locations:  json.RawMessage(`[{"path":"go.mod"}]`),
+		},
+		Options: []acp.PermissionOption{
+			{OptionID: "allow-once", Kind: "allow_once"},
+		},
+	})
 
 	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
@@ -101,6 +121,14 @@ func TestPermissionCardActionCompletesWaiter(t *testing.T) {
 	}
 	if resp == nil || resp.Toast == nil || resp.Toast.Type != "success" {
 		t.Fatalf("response = %+v, want success toast", resp)
+	}
+	if resp.Card == nil || jsonContainsTaggedElement(resp.Card.Data, "button") {
+		t.Fatalf("completed permission card should hide buttons: %+v", resp.Card)
+	}
+	for _, want := range []string{"Run tests", "go.mod", "已选择", "allow-once"} {
+		if !jsonContainsSubstring(resp.Card.Data, want) {
+			t.Fatalf("completed permission card does not contain %q: %#v", want, resp.Card.Data)
+		}
 	}
 	select {
 	case outcome := <-waiter.once:
@@ -204,6 +232,12 @@ func (f *fakeModelSelectionHandler) HandleModelSelection(ctx context.Context, se
 
 func jsonContainsValue(v any, want string) bool {
 	switch value := v.(type) {
+	case cardJSON:
+		for _, child := range value {
+			if jsonContainsValue(child, want) {
+				return true
+			}
+		}
 	case map[string]any:
 		for _, child := range value {
 			if jsonContainsValue(child, want) {
@@ -224,6 +258,12 @@ func jsonContainsValue(v any, want string) bool {
 
 func jsonContainsSubstring(v any, want string) bool {
 	switch value := v.(type) {
+	case cardJSON:
+		for _, child := range value {
+			if jsonContainsSubstring(child, want) {
+				return true
+			}
+		}
 	case map[string]any:
 		for _, child := range value {
 			if jsonContainsSubstring(child, want) {
@@ -244,6 +284,15 @@ func jsonContainsSubstring(v any, want string) bool {
 
 func jsonContainsTaggedElement(v any, tag string) bool {
 	switch value := v.(type) {
+	case cardJSON:
+		if value["tag"] == tag {
+			return true
+		}
+		for _, child := range value {
+			if jsonContainsTaggedElement(child, tag) {
+				return true
+			}
+		}
 	case map[string]any:
 		if value["tag"] == tag {
 			return true
@@ -265,6 +314,16 @@ func jsonContainsTaggedElement(v any, tag string) bool {
 
 func jsonButtonContainsTopLevelValue(v any) bool {
 	switch value := v.(type) {
+	case cardJSON:
+		if value["tag"] == "button" {
+			_, ok := value["value"]
+			return ok
+		}
+		for _, child := range value {
+			if jsonButtonContainsTopLevelValue(child) {
+				return true
+			}
+		}
 	case map[string]any:
 		if value["tag"] == "button" {
 			_, ok := value["value"]
@@ -287,6 +346,15 @@ func jsonButtonContainsTopLevelValue(v any) bool {
 
 func jsonContainsKey(v any, key string) bool {
 	switch value := v.(type) {
+	case cardJSON:
+		if _, ok := value[key]; ok {
+			return true
+		}
+		for _, child := range value {
+			if jsonContainsKey(child, key) {
+				return true
+			}
+		}
 	case map[string]any:
 		if _, ok := value[key]; ok {
 			return true
