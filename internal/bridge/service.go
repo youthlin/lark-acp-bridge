@@ -147,7 +147,7 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	promptText := strings.TrimSpace(msg.PromptText())
 	slog.InfoContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
 
-	_, err := ensureWorkspace(msg.Workspace)
+	_, err := ensureWorkspace(msg.Workspace, msg.BotID)
 	if err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return "初始化 workspace 失败：" + err.Error(), nil
@@ -772,7 +772,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if !ok {
 		return Session{}, config.AgentConfig{}, "", "未找到默认 agent 配置。"
 	}
-	if _, err := ensureWorkspace(msg.Workspace); err != nil {
+	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
 	}
@@ -851,7 +851,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
 		session = created
-		text := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), promptTextWithReplyContext(msg, userText))
+		text := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, promptTextWithReplyContext(msg, userText))
 		return session, agent, text, "", nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
@@ -866,7 +866,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		}
 		session = created
 	}
-	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), text)
+	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
 	return session, agent, text, "", nil
 }
 
@@ -878,14 +878,105 @@ func promptTextWithReplyContext(msg feishu.Message, text string) string {
 	if replyText == "" {
 		return text
 	}
-	return strings.Join([]string{
+	sections := []string{
+		replyMetadataPrompt(msg.Reply),
 		"## Replied Message Context",
 		replyText,
 		"",
 		"请结合上面的被回复消息理解下面的用户消息。",
 		"",
 		strings.TrimSpace(text),
+	}
+	return strings.Join(nonEmptySections(sections), "\n")
+}
+
+func messageMetadataPrompt(msg feishu.Message) string {
+	metadata := orderedPromptMetadata{
+		{"bot_id", msg.BotID},
+		{"message_id", msg.MessageID},
+		{"chat_id", msg.ChatID},
+		{"chat_type", msg.ChatType},
+		{"thread_id", msg.ThreadID},
+		{"root_id", msg.RootID},
+		{"parent_id", msg.ParentID},
+		{"sender_id", msg.SenderID},
+		{"sender_type", msg.SenderType},
+		{"msg_type", msg.MsgType},
+	}
+	return promptMetadataSection("## Message Metadata", metadata)
+}
+
+func replyMetadataPrompt(reply *feishu.ReplyContext) string {
+	if reply == nil {
+		return ""
+	}
+	metadata := orderedPromptMetadata{
+		{"message_id", reply.MessageID},
+		{"sender_id", reply.SenderID},
+		{"sender_type", reply.SenderType},
+		{"msg_type", reply.MsgType},
+	}
+	return promptMetadataSection("## Replied Message Metadata", metadata)
+}
+
+type promptMetadataField struct {
+	Key   string
+	Value string
+}
+
+type orderedPromptMetadata []promptMetadataField
+
+func (m orderedPromptMetadata) MarshalJSON() ([]byte, error) {
+	var b strings.Builder
+	b.WriteByte('{')
+	written := 0
+	for _, field := range m {
+		key := strings.TrimSpace(field.Key)
+		value := strings.TrimSpace(field.Value)
+		if key == "" || value == "" {
+			continue
+		}
+		if written > 0 {
+			b.WriteByte(',')
+		}
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		valueJSON, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(keyJSON)
+		b.WriteByte(':')
+		b.Write(valueJSON)
+		written++
+	}
+	b.WriteByte('}')
+	return []byte(b.String()), nil
+}
+
+func promptMetadataSection(title string, metadata orderedPromptMetadata) string {
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil || string(data) == "{}" {
+		return ""
+	}
+	return strings.Join([]string{
+		title,
+		"```json",
+		string(data),
+		"```",
 	}, "\n")
+}
+
+func nonEmptySections(sections []string) []string {
+	out := sections[:0]
+	for _, section := range sections {
+		if strings.TrimSpace(section) != "" {
+			out = append(out, section)
+		}
+	}
+	return out
 }
 
 func sessionWorkspace(session Session, msg feishu.Message) string {
@@ -895,10 +986,11 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 	return msg.Workspace
 }
 
-func promptTextWithWorkspaceContext(workspace string, text string) string {
+func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
 	return promptWithUserMessage([]string{
 		workspaceContextPrompt(workspace),
 		workspaceMemoryPolicyPrompt(workspace),
+		messageMetadataPrompt(msg),
 	}, text)
 }
 

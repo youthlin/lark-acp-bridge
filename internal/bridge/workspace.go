@@ -18,7 +18,7 @@ type WorkspaceStatus struct {
 	CreatedFiles []string
 }
 
-func ensureWorkspace(path string) (WorkspaceStatus, error) {
+func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 	if strings.TrimSpace(path) == "" {
 		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
 	}
@@ -30,7 +30,7 @@ func ensureWorkspace(path string) (WorkspaceStatus, error) {
 		return WorkspaceStatus{}, fmt.Errorf("创建 bot workspace: %w", err)
 	}
 	status := WorkspaceStatus{Path: path}
-	for _, file := range workspaceFiles() {
+	for _, file := range workspaceFiles(botID) {
 		fullPath := filepath.Join(path, file.name)
 		if _, err := os.Stat(fullPath); err == nil {
 			continue // 文件存在 跳过
@@ -75,7 +75,7 @@ func workspaceGuide(status WorkspaceStatus) string {
 }
 
 func workspaceHasManagedFiles(path string) (bool, error) {
-	for _, file := range workspaceFiles() {
+	for _, file := range workspaceFiles("") {
 		_, err := os.Stat(filepath.Join(path, file.name))
 		if err == nil {
 			return true, nil
@@ -205,10 +205,14 @@ func workspaceMemoryPolicyPrompt(workspace string) string {
 	}, "\n")
 }
 
-func workspaceFiles() []struct {
+func workspaceFiles(botID string) []struct {
 	name    string
 	content string
 } {
+	profileName := "lark-acp-<bot-id>"
+	if botID = strings.TrimSpace(botID); botID != "" {
+		profileName = "lark-acp-" + botID
+	}
 	return []struct {
 		name    string
 		content string
@@ -262,6 +266,13 @@ func workspaceFiles() []struct {
 ## 工具与环境
 
 请在这里记录这个 bot 可用的工具、关键路径、账号 profile 和环境约束。
+
+## 飞书 CLI
+
+- 如果当前环境没有安装 lark-cli，按飞书 CLI 安装指南安装：https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md
+- 需要调用 lark-cli 时，优先使用当前对话智能体对应的 profile；当前 bot 建议使用 profile：` + profileName + `。
+- 如果不存在对应 profile，先查看 lark-cli 的帮助命令确认创建方式，再使用 config.json 中当前 bot 的 app_id 和 app_secret 创建该 profile，后续固定使用这个 profile。
+- app_secret 属于敏感信息，不要写入提示词、回复、日志或命令行参数；需要传给 lark-cli 时，应使用 stdin 等不回显到命令文本的方式。
 `,
 		},
 		{

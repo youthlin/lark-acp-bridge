@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -24,7 +25,11 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 		if err := os.MkdirAll(msg.Workspace, 0o755); err != nil {
 			t.Fatalf("MkdirAll(workspace) error = %v", err)
 		}
-		for _, file := range workspaceFiles() {
+		botID := msg.BotID
+		if strings.TrimSpace(botID) == "" {
+			botID = "bot-a"
+		}
+		for _, file := range workspaceFiles(botID) {
 			path := filepath.Join(msg.Workspace, file.name)
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(file.name), err)
@@ -40,7 +45,7 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 
 func markWorkspaceBootstrapped(t *testing.T, workspace string) {
 	t.Helper()
-	if _, err := ensureWorkspace(workspace); err != nil {
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
 		t.Fatalf("ensureWorkspace(%s) error = %v", workspace, err)
 	}
 	if err := os.Remove(filepath.Join(workspace, workspaceBootstrapFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -78,7 +83,7 @@ func testReadySession(t *testing.T, store *SessionStore) Session {
 
 func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	status, err := ensureWorkspace(workspace)
+	status, err := ensureWorkspace(workspace, "bot-a")
 	if err != nil {
 		t.Fatalf("ensureWorkspace(new) error = %v", err)
 	}
@@ -87,7 +92,7 @@ func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
 	}
 
 	markWorkspaceBootstrapped(t, workspace)
-	status, err = ensureWorkspace(workspace)
+	status, err = ensureWorkspace(workspace, "bot-a")
 	if err != nil {
 		t.Fatalf("ensureWorkspace(existing) error = %v", err)
 	}
@@ -100,8 +105,35 @@ func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
 }
 
 func TestEnsureWorkspaceRejectsEmptyPath(t *testing.T) {
-	if _, err := ensureWorkspace(""); err == nil || !strings.Contains(err.Error(), "workspace 为空") {
+	if _, err := ensureWorkspace("", "bot-a"); err == nil || !strings.Contains(err.Error(), "workspace 为空") {
 		t.Fatalf("ensureWorkspace(empty) error = %v, want workspace empty error", err)
+	}
+}
+
+func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if _, err := ensureWorkspace(workspace, "default"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "TOOLS.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(TOOLS.md) error = %v", err)
+	}
+	tools := string(data)
+	for _, want := range []string{
+		"飞书 CLI",
+		"lark-cli",
+		"https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md",
+		"lark-acp-default",
+		"config.json",
+		"app_id",
+		"app_secret",
+		"stdin",
+		"不要写入提示词、回复、日志或命令行参数",
+	} {
+		if !strings.Contains(tools, want) {
+			t.Fatalf("TOOLS.md = %q, want %q", tools, want)
+		}
 	}
 }
 
@@ -126,7 +158,7 @@ func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
 	if got := workspaceContextPrompt(""); got != "" {
 		t.Fatalf("workspaceContextPrompt(empty) = %q, want empty", got)
 	}
-	if got := promptTextWithWorkspaceContext("", "hello"); got != "hello" {
+	if got := promptTextWithWorkspaceContext("", feishu.Message{}, "hello"); got != "hello" {
 		t.Fatalf("promptTextWithWorkspaceContext(empty) = %q, want user text only", got)
 	}
 }
@@ -591,9 +623,11 @@ func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 			{Name: "我的智能助手"},
 		},
 		Reply: &feishu.ReplyContext{
-			MessageID: "om_parent",
-			MsgType:   "text",
-			Text:      "我先发一条消息",
+			MessageID:  "om_parent",
+			SenderID:   "ou_parent_sender",
+			SenderType: "user",
+			MsgType:    "text",
+			Text:       "我先发一条消息",
 		},
 	})
 	if err != nil {
@@ -611,6 +645,12 @@ func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
 	}
+	assertPromptContainsSectionMetadata(t, prompt, "## Replied Message Metadata", map[string]string{
+		"message_id":  "om_parent",
+		"sender_id":   "ou_parent_sender",
+		"sender_type": "user",
+		"msg_type":    "text",
+	})
 }
 
 func TestHandleFeishuMessageIncludesImageReplyContextInPrompt(t *testing.T) {
@@ -2238,6 +2278,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	workDir := t.TempDir()
 	msg := feishu.Message{
+		BotID:     "bot-a",
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
@@ -2248,6 +2289,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
 		MessageID: "om_status",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
@@ -2363,6 +2405,7 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
 	msg := feishu.Message{
+		BotID:     "bot-a",
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
@@ -2373,10 +2416,17 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		MessageID: "om_prompt",
-		ChatID:    "oc_chat",
-		ThreadID:  "omt_thread",
-		Text:      "@我的智能助手 介绍一下这个仓库",
+		BotID:      "bot-a",
+		MessageID:  "om_prompt",
+		ChatID:     "oc_chat",
+		ChatType:   "group",
+		ThreadID:   "omt_thread",
+		RootID:     "om_root",
+		ParentID:   "om_parent",
+		SenderID:   "ou_sender",
+		SenderType: "user",
+		MsgType:    "text",
+		Text:       "@我的智能助手 介绍一下这个仓库",
 		Mentions: []feishu.Mention{
 			{Name: "我的智能助手"},
 		},
@@ -2391,6 +2441,18 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
 	}
 	assertReadyPromptContainsUserTextAndMemoryPolicy(t, rt.promptCalls[0].Text, "介绍一下这个仓库")
+	assertPromptContainsMessageMetadata(t, rt.promptCalls[0].Text, map[string]string{
+		"bot_id":      "bot-a",
+		"message_id":  "om_prompt",
+		"chat_id":     "oc_chat",
+		"chat_type":   "group",
+		"thread_id":   "omt_thread",
+		"root_id":     "om_root",
+		"parent_id":   "om_parent",
+		"sender_id":   "ou_sender",
+		"sender_type": "user",
+		"msg_type":    "text",
+	})
 	if strings.Contains(rt.promptCalls[0].Text, "@我的智能助手") {
 		t.Fatalf("prompt text = %q, should strip bot mention", rt.promptCalls[0].Text)
 	}
@@ -2847,6 +2909,49 @@ func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, user
 			t.Fatalf("prompt = %q, should not mention %q", prompt, notWant)
 		}
 	}
+}
+
+func assertPromptContainsMessageMetadata(t *testing.T, prompt string, want map[string]string) {
+	t.Helper()
+	assertPromptContainsSectionMetadata(t, prompt, "## Message Metadata", want)
+	messageIdx := strings.Index(prompt, "## Message Metadata")
+	userIdx := strings.Index(prompt, "## User Message")
+	if messageIdx < 0 || userIdx < 0 || messageIdx > userIdx {
+		t.Fatalf("prompt = %q, want message metadata before user message", prompt)
+	}
+}
+
+func assertPromptContainsSectionMetadata(t *testing.T, prompt string, section string, want map[string]string) {
+	t.Helper()
+	metadata := promptSectionJSON(t, prompt, section)
+	for key, value := range want {
+		if got := metadata[key]; got != value {
+			t.Fatalf("%s metadata[%q] = %q, want %q; prompt = %q", section, key, got, value, prompt)
+		}
+	}
+}
+
+func promptSectionJSON(t *testing.T, prompt string, section string) map[string]string {
+	t.Helper()
+	idx := strings.Index(prompt, section)
+	if idx < 0 {
+		t.Fatalf("prompt = %q, want section %q", prompt, section)
+	}
+	rest := prompt[idx+len(section):]
+	start := strings.Index(rest, "```json")
+	if start < 0 {
+		t.Fatalf("section %q in prompt = %q, want json fence", section, prompt)
+	}
+	rest = rest[start+len("```json"):]
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		t.Fatalf("section %q in prompt = %q, want closing fence", section, prompt)
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rest[:end])), &metadata); err != nil {
+		t.Fatalf("Unmarshal(%s metadata) error = %v", section, err)
+	}
+	return metadata
 }
 
 type fakeRuntime struct {
