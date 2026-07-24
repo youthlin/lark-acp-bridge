@@ -93,7 +93,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
 
-普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。群聊按话题区分会话，私聊按整个 chat 复用同一会话。创建会话时，即使 workspace 未 ready，服务也会立即启动 ACP server、执行 `initialize` 和 `session/new`，但 `/new` 只回复会话创建结果；一次性初始化说明会延迟到下一条普通文本，再作为 `session/prompt` 发给 ACP agent。
+普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。群聊按话题区分会话，私聊按整个 chat 复用同一会话。`/new` 只回复会话创建结果，不额外发送 prompt；下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 
@@ -102,9 +102,11 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - 需要长期记住的用户信息、偏好或常用上下文。
 - 是否有需要沉淀到知识库的领域知识、项目经验或常用流程。
 
-用户回答后，由 ACP agent 使用 TraeX 可用的本地文件工具写入 L0/L1/L2 相关文件和 `.setup.json`。`.setup.json` 标记为 `ready=true` 后，新建 session 会把根目录记忆、`knowledge/` 入口和 wiki skill 注入到下一条 prompt 中。若已经手动写好了文件，也可以在本地直接写入 `.setup.json`。
+首次生成 workspace 时，bridge 会额外创建 `Bootstrap.md`，其中写明一次性初始化引导提示词。每条普通 prompt 都会拼接当前 workspace 的引导、长期记忆、知识入口和技能入口；只要 `Bootstrap.md` 还存在，它就会作为普通 workspace 文件被注入给 ACP agent，让 agent 先向用户提问并完成初始化。
 
-ready 后，每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
+用户回答后，由 ACP agent 使用 TraeX 可用的本地文件工具写入 L0/L1/L2 相关文件，然后删除 `Bootstrap.md`。`Bootstrap.md` 不存在后，后续 prompt 自然只会注入根目录记忆、`knowledge/` 入口、wiki skill 和记忆策略。若已经手动写好了文件，也可以在本地直接删除 `Bootstrap.md`。
+
+每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
 
 自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不创建飞书卡片，也不把 agent 输出转发给用户；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新消息进入，会取消旧定时器并在新消息完成后重新计时。
 
@@ -116,7 +118,7 @@ bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁�
 $BOT_WORKSPACE/sessions.json
 ```
 
-第一版使用 JSON 文件保存 `bot_id + chat_id + thread_id -> ACP session` 映射；私聊会话的 `thread_id` 为空，表示整个 chat 共用一个 ACP session。重启后不会丢失当前会话的 `agent`、`cwd`、`acp_session_id` 和状态；暂不需要 SQLite。`sessions.json` 还会保留同一聊天里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`。把 session 放在 workspace 下，可以让每个 bot 的记忆、会话映射和后续缓存一起迁移、备份和清理。服务进程内会为活跃飞书会话维护对应的 `traex acp serve` 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
+第一版使用 JSON 文件保存 `bot_id + chat_id + thread_id -> ACP session` 映射；私聊会话的 `thread_id` 为空，表示整个 chat 共用一个 ACP session。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`sessions.json` 还会保留同一聊天里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`。把 session 放在 workspace 下，可以让每个 bot 的记忆、会话映射和后续缓存一起迁移、备份和清理。服务进程内会为活跃飞书会话维护对应的 `traex acp serve` 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
 
 配置中的路径支持 `~` 和 `$HOME` 展开，例如：
 

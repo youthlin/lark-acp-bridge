@@ -1,33 +1,31 @@
 package bridge
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 const (
-	workspaceSetupFile = ".setup.json"
+	workspaceBootstrapFile = "Bootstrap.md"
 )
 
 type WorkspaceStatus struct {
 	Path         string
 	CreatedFiles []string
-	Ready        bool
-}
-
-type workspaceSetup struct {
-	Version int       `json:"version"`
-	Ready   bool      `json:"ready"`
-	Updated time.Time `json:"updated_at"`
 }
 
 func ensureWorkspace(path string) (WorkspaceStatus, error) {
+	if strings.TrimSpace(path) == "" {
+		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
+	}
+	hadManagedFiles, err := workspaceHasManagedFiles(path)
+	if err != nil {
+		return WorkspaceStatus{}, err
+	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return WorkspaceStatus{}, fmt.Errorf("创建 bot workspace: %w", err)
 	}
@@ -49,126 +47,104 @@ func ensureWorkspace(path string) (WorkspaceStatus, error) {
 		}
 		status.CreatedFiles = append(status.CreatedFiles, file.name)
 	}
-	setup, _, err := loadWorkspaceSetup(path)
+	bootstrapExists, err := workspaceBootstrapExists(path)
 	if err != nil {
 		return WorkspaceStatus{}, err
 	}
-	status.Ready = setup.Ready
-	return status, nil
-}
-
-func workspaceReady(path string) (bool, error) {
-	setup, _, err := loadWorkspaceSetup(path)
-	if err != nil {
-		return false, err
+	if !hadManagedFiles && !bootstrapExists {
+		if err := writeWorkspaceBootstrap(path); err != nil {
+			return WorkspaceStatus{}, err
+		}
+		status.CreatedFiles = append(status.CreatedFiles, workspaceBootstrapFile)
 	}
-	return setup.Ready, nil
+	return status, nil
 }
 
 func workspaceGuide(status WorkspaceStatus) string {
 	lines := []string{
-		"当前 bot workspace 尚未 ready。",
 		"已准备 workspace：" + status.Path,
 	}
 	if len(status.CreatedFiles) > 0 {
 		lines = append(lines, "已创建基础文件："+strings.Join(status.CreatedFiles, "、"))
 	}
 	lines = append(lines,
-		"发送普通文本或 /new [cwd] 会创建 ACP 会话，并让 ACP agent 完成一次性初始化引导。",
-		"初始化完成后由 ACP agent 写入 .setup.json 的 ready=true。",
+		"发送普通文本或 /new [cwd] 会创建 ACP 会话。",
+		"如果 workspace 中存在 Bootstrap.md，后续普通消息会把它作为工作区上下文注入给 ACP agent。",
 	)
 	return strings.Join(lines, "\n")
 }
 
-func markWorkspaceReady(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("workspace 为空")
-	}
-	if _, err := ensureWorkspace(path); err != nil {
-		return err
-	}
-	setup, _, err := loadWorkspaceSetup(path)
-	if err != nil {
-		return err
-	}
-	setup.Version = 1
-	setup.Ready = true
-	setup.Updated = time.Now()
-	return saveWorkspaceSetup(path, setup)
-}
-
-func loadWorkspaceSetup(path string) (workspaceSetup, bool, error) {
-	data, err := os.ReadFile(filepath.Join(path, workspaceSetupFile))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return workspaceSetup{Version: 1}, false, nil
+func workspaceHasManagedFiles(path string) (bool, error) {
+	for _, file := range workspaceFiles() {
+		_, err := os.Stat(filepath.Join(path, file.name))
+		if err == nil {
+			return true, nil
 		}
-		return workspaceSetup{}, false, fmt.Errorf("读取 workspace 设置状态: %w", err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("检查 workspace 文件 %s: %w", file.name, err)
+		}
 	}
-	var setup workspaceSetup
-	if err := json.Unmarshal(data, &setup); err != nil {
-		return workspaceSetup{}, false, fmt.Errorf("解析 workspace 设置状态: %w", err)
-	}
-	if setup.Version == 0 {
-		setup.Version = 1
-	}
-	return setup, true, nil
+	return false, nil
 }
 
-func saveWorkspaceSetup(path string, setup workspaceSetup) error {
-	if setup.Version == 0 {
-		setup.Version = 1
+func workspaceBootstrapExists(path string) (bool, error) {
+	_, err := os.Stat(filepath.Join(path, workspaceBootstrapFile))
+	if err == nil {
+		return true, nil
 	}
-	if setup.Updated.IsZero() {
-		setup.Updated = time.Now()
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	data, err := json.MarshalIndent(setup, "", "  ")
-	if err != nil {
-		return fmt.Errorf("编码 workspace 设置状态: %w", err)
-	}
-	data = append(data, '\n')
-	if err := os.WriteFile(filepath.Join(path, workspaceSetupFile), data, 0o644); err != nil {
-		return fmt.Errorf("写入 workspace 设置状态: %w", err)
+	return false, fmt.Errorf("检查 workspace 初始化引导文件: %w", err)
+}
+
+func writeWorkspaceBootstrap(path string) error {
+	if err := os.WriteFile(filepath.Join(path, workspaceBootstrapFile), []byte(workspaceBootstrapContent()), 0o644); err != nil {
+		return fmt.Errorf("创建 workspace 初始化引导文件: %w", err)
 	}
 	return nil
 }
 
-func workspaceSetupPrompt(workspace string) string {
+func workspaceBootstrapContent() string {
 	return strings.Join([]string{
-		"## Workspace Setup Required",
+		"# Workspace Bootstrap",
 		"",
-		"当前 bot workspace 还没有 ready。请你完成一次性初始化引导。",
+		"当前 workspace 尚未完成初始化。你必须先完成一次性引导，再处理普通开发或问答任务。",
 		"",
-		"请一次性询问用户以下信息，允许用户在下一条消息里一次回答：",
-		"1. 用户想叫你什么名字。",
-		"2. 你是什么性格、语气和边界。",
-		"3. 需要长期记住的用户信息、偏好或常用上下文。",
-		"4. 是否有需要沉淀到知识库的领域知识、项目经验或常用流程。",
+		"## 你的任务",
 		"",
-		"workspace 已包含 L0/L1/L2 三层：",
-		"- L0 根目录记忆：SOUL.md、MEMORY.md、AGENTS.md、TOOLS.md。",
-		"- L1 knowledge/：领域知识、项目经验、问题解决方案。",
-		"- L2 skills/：稳定、可复用的操作流程。",
+		"1. 先向用户提问，收集初始化所需信息。问题应简洁，可以一次性列出。",
+		"2. 等用户回答后，使用你可用的本地文件工具更新 workspace 中的 L0/L1/L2 文件。",
+		"3. 写入完成后，删除本文件 `Bootstrap.md`。本文件不存在即表示初始化完成，后续会话不会再注入本引导。",
 		"",
-		"当用户回答后，请使用你可用的本地文件工具写入或更新以下文件：",
-		"- " + filepath.Join(workspace, "SOUL.md"),
-		"- " + filepath.Join(workspace, "MEMORY.md"),
-		"- " + filepath.Join(workspace, "AGENTS.md"),
-		"- " + filepath.Join(workspace, "TOOLS.md"),
-		"- " + filepath.Join(workspace, "knowledge", "core.md"),
-		"- " + filepath.Join(workspace, "knowledge", "index.md"),
-		"- " + filepath.Join(workspace, "knowledge", "log.md"),
-		"- " + filepath.Join(workspace, workspaceSetupFile),
+		"## 需要询问的信息",
 		"",
-		".setup.json 必须写成 JSON：",
-		"{\"version\":1,\"ready\":true,\"updated_at\":\"<RFC3339 time>\"}",
+		"- 用户想叫你什么名字。",
+		"- 你应采用什么角色、性格、语气和协作边界。",
+		"- 需要长期记住的用户信息、偏好、常用路径、账号 profile 或环境约束。",
+		"- 是否有需要沉淀到知识库的领域知识、项目经验或常用流程。",
 		"",
-		"在用户回答前，不要写 ready=true。先直接回复引导问题。",
+		"如果用户已经在消息里给出了足够信息，可以直接整理写入；如果信息不足，先回复引导问题，不要删除 `Bootstrap.md`。",
+		"如果用户明确要求跳过初始化，请写入最小可用默认内容，然后删除 `Bootstrap.md`。",
+		"",
+		"## 写入位置",
+		"",
+		"- L0 根目录记忆：`SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`，记录 bot 身份、用户偏好、工作规则和工具环境。",
+		"- L1 `knowledge/`：领域知识、项目经验、问题解决方案；常用入口是 `knowledge/core.md`、`knowledge/index.md`、`knowledge/log.md`。",
+		"- L2 `skills/`：稳定、可复用的多步骤流程；入口是 `skills/core.md`，每个技能使用 `skills/<skill-name>/SKILL.md`。",
+		"",
+		"新增、删除或重命名知识/技能文件后，必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。",
+		"如果删除 `Bootstrap.md` 后 `knowledge/index.md` 仍列出了它，也要同步移除对应索引项。",
 	}, "\n")
 }
 
-func workspaceReadyPrompt(workspace string) string {
+func workspaceContextPrompt(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
 	files := []string{
+		workspaceBootstrapFile,
 		"SOUL.md",
 		"MEMORY.md",
 		"AGENTS.md",
@@ -193,9 +169,9 @@ func workspaceReadyPrompt(workspace string) string {
 		return ""
 	}
 	sections := []string{
-		"## Workspace Knowledge",
+		"## Workspace Context",
 		"",
-		"下面是当前 bot workspace 的长期记忆和工作规则。后续回复应遵循这些内容。",
+		"下面是当前 bot workspace 的引导、长期记忆和工作规则。后续回复应遵循这些内容。",
 	}
 	sections = append(sections, fileSections...)
 	return strings.Join(sections, "\n\n")

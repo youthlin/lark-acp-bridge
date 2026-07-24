@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,11 +33,19 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 				t.Fatalf("WriteFile(%s) error = %v", file.name, err)
 			}
 		}
-		if err := markWorkspaceReady(msg.Workspace); err != nil {
-			t.Fatalf("markWorkspaceReady() error = %v", err)
-		}
+		markWorkspaceBootstrapped(t, msg.Workspace)
 	}
 	return svc.HandleFeishuMessage(ctx, msg)
+}
+
+func markWorkspaceBootstrapped(t *testing.T, workspace string) {
+	t.Helper()
+	if _, err := ensureWorkspace(workspace); err != nil {
+		t.Fatalf("ensureWorkspace(%s) error = %v", workspace, err)
+	}
+	if err := os.Remove(filepath.Join(workspace, workspaceBootstrapFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(%s) error = %v", workspaceBootstrapFile, err)
+	}
 }
 
 func slogAttrsMap(attrs []slog.Attr) map[string]string {
@@ -50,17 +59,14 @@ func slogAttrsMap(attrs []slog.Attr) map[string]string {
 func testReadySession(t *testing.T, store *SessionStore) Session {
 	t.Helper()
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	session := Session{
 		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
-		Title:        "ready session",
+		Title:        "test session",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
 		Workspace:    workspace,
-		Status:       "ready",
 	}
 	if store != nil {
 		if err := store.Upsert(session); err != nil {
@@ -68,6 +74,61 @@ func testReadySession(t *testing.T, store *SessionStore) Session {
 		}
 	}
 	return session
+}
+
+func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	status, err := ensureWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("ensureWorkspace(new) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); err != nil {
+		t.Fatalf("Bootstrap.md should exist after new workspace: %v", err)
+	}
+
+	markWorkspaceBootstrapped(t, workspace)
+	status, err = ensureWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("ensureWorkspace(existing) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Bootstrap.md should stay deleted after bootstrapped workspace, err=%v", err)
+	}
+	if len(status.CreatedFiles) != 0 {
+		t.Fatalf("created files = %+v, want none for existing workspace", status.CreatedFiles)
+	}
+}
+
+func TestEnsureWorkspaceRejectsEmptyPath(t *testing.T) {
+	if _, err := ensureWorkspace(""); err == nil || !strings.Contains(err.Error(), "workspace 为空") {
+		t.Fatalf("ensureWorkspace(empty) error = %v, want workspace empty error", err)
+	}
+}
+
+func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, workspaceBootstrapFile), []byte("# Should Not Leak\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(Bootstrap.md) error = %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir(tmp) error = %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("Chdir(oldWd) error = %v", err)
+		}
+	}()
+
+	if got := workspaceContextPrompt(""); got != "" {
+		t.Fatalf("workspaceContextPrompt(empty) = %q, want empty", got)
+	}
+	if got := promptTextWithWorkspaceContext("", "hello"); got != "hello" {
+		t.Fatalf("promptTextWithWorkspaceContext(empty) = %q, want user text only", got)
+	}
 }
 
 func TestHandleFeishuMessageHelp(t *testing.T) {
@@ -464,7 +525,6 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 		AgentName:    "traex",
 		ACPSessionID: "old-acp-session",
 		Cwd:          workDir,
-		Status:       "ready",
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
@@ -983,7 +1043,7 @@ func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuMessageNewWhenWorkspaceNotReadyDefersSetupPrompt(t *testing.T) {
+func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := NewService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "请告诉我你想叫我什么名字，以及我的工作风格和需要长期记住的信息。"}
@@ -1019,14 +1079,14 @@ func TestHandleFeishuMessageNewWhenWorkspaceNotReadyDefersSetupPrompt(t *testing
 		t.Fatalf("new call workspace = %q, want %q", rt.newCalls[0].Workspace, workspace)
 	}
 	if len(rt.promptCalls) != 0 {
-		t.Fatalf("promptCalls = %+v, want /new to defer setup prompt", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want /new to defer workspace context prompt", rt.promptCalls)
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
 		t.Fatalf("persisted session not found")
 	}
-	if session.Status != "setup" || session.Workspace != workspace || session.PendingInitialPrompt != "setup" {
-		t.Fatalf("session = %+v, want setup session with workspace", session)
+	if session.Workspace != workspace {
+		t.Fatalf("session workspace = %q, want %q", session.Workspace, workspace)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1044,27 +1104,19 @@ func TestHandleFeishuMessageNewWhenWorkspaceNotReadyDefersSetupPrompt(t *testing
 		t.Fatalf("reply = %q, want ACP setup question", reply)
 	}
 	if len(rt.promptCalls) != 1 {
-		t.Fatalf("promptCalls = %+v, want setup prompt on next message", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want workspace context prompt on next message", rt.promptCalls)
 	}
 	setupPrompt := rt.promptCalls[0].Text
-	for _, want := range []string{"Workspace Setup Required", "L0/L1/L2", "knowledge/core.md", "knowledge/index.md", "knowledge/log.md", "SOUL.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", ".setup.json", "不要写 ready=true", "## User Message", "你好"} {
+	for _, want := range []string{"Workspace Context", "Workspace Bootstrap", "L0/L1/L2", "knowledge/core.md", "knowledge/index.md", "knowledge/log.md", "SOUL.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", "Bootstrap.md", "## User Message", "你好"} {
 		if !strings.Contains(setupPrompt, want) {
-			t.Fatalf("setup prompt = %q, want %q", setupPrompt, want)
+			t.Fatalf("workspace context prompt = %q, want %q", setupPrompt, want)
 		}
 	}
-	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
-	if !ok {
-		t.Fatalf("persisted session not found after next prompt")
+	if strings.Contains(setupPrompt, ".setup.json") {
+		t.Fatalf("workspace context prompt = %q, should not mention .setup.json", setupPrompt)
 	}
-	if session.PendingInitialPrompt != "" {
-		t.Fatalf("session pending prompt = %q, want cleared", session.PendingInitialPrompt)
-	}
-	ready, err := workspaceReady(workspace)
-	if err != nil {
-		t.Fatalf("workspaceReady() error = %v", err)
-	}
-	if ready {
-		t.Fatalf("workspace should stay not ready until ACP agent writes .setup.json")
+	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); err != nil {
+		t.Fatalf("Bootstrap.md should stay until ACP agent deletes it: %v", err)
 	}
 }
 
@@ -1099,7 +1151,7 @@ func TestHandleFeishuMessageNewOnlyConfirmsSessionCreation(t *testing.T) {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
 	if len(rt.promptCalls) != 0 {
-		t.Fatalf("promptCalls = %+v, want /new not to send workspace setup prompt", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want /new not to send workspace context prompt", rt.promptCalls)
 	}
 }
 
@@ -1693,7 +1745,7 @@ func TestNormalizeStreamMarkdownFoldsSoftLineBreaks(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuMessageAutoCreatesSetupSessionWhenWorkspaceNotReady(t *testing.T) {
+func TestHandleFeishuMessageAutoCreatesSessionWithBootstrapContext(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -1717,49 +1769,46 @@ func TestHandleFeishuMessageAutoCreatesSetupSessionWhenWorkspaceNotReady(t *test
 		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
 	}
 	if reply != "请先告诉我基础设置。" {
-		t.Fatalf("reply = %q, want setup reply", reply)
+		t.Fatalf("reply = %q, want bootstrap reply", reply)
 	}
 	if len(rt.newCalls) != 1 {
 		t.Fatalf("newCalls = %+v, want auto-created session", rt.newCalls)
 	}
 	if len(rt.promptCalls) != 1 {
-		t.Fatalf("promptCalls = %+v, want setup prompt only", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want bootstrap context prompt only", rt.promptCalls)
 	}
-	if !strings.Contains(rt.promptCalls[0].Text, "Workspace Setup Required") {
-		t.Fatalf("prompt text = %q, want setup prompt", rt.promptCalls[0].Text)
+	if !strings.Contains(rt.promptCalls[0].Text, "Workspace Bootstrap") {
+		t.Fatalf("prompt text = %q, want bootstrap context", rt.promptCalls[0].Text)
 	}
-	if strings.Contains(rt.promptCalls[0].Text, "你好") {
-		t.Fatalf("setup prompt should not include user prompt before workspace is ready: %q", rt.promptCalls[0].Text)
+	if !strings.Contains(rt.promptCalls[0].Text, "## User Message") || !strings.Contains(rt.promptCalls[0].Text, "你好") {
+		t.Fatalf("prompt text = %q, want user message with bootstrap context", rt.promptCalls[0].Text)
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
-		t.Fatalf("auto-created setup session not persisted")
+		t.Fatalf("auto-created session not persisted")
 	}
-	if session.Status != "setup" {
-		t.Fatalf("session status = %q, want setup", session.Status)
+	if session.Workspace != workspace {
+		t.Fatalf("session workspace = %q, want %q", session.Workspace, workspace)
 	}
 }
 
-func TestHandleFeishuMessageStatusRefreshesReadySetupSession(t *testing.T) {
+func TestHandleFeishuMessageStatusShowsPersistedSessionWithoutReadyState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := NewService(config.Default(), store)
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	if err := store.Upsert(Session{
 		Key:          key,
-		Title:        "setup session",
+		Title:        "test session",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
 		Workspace:    workspace,
-		Status:       "setup",
 	}); err != nil {
-		t.Fatalf("Upsert(setup session) error = %v", err)
+		t.Fatalf("Upsert(session) error = %v", err)
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1773,30 +1822,25 @@ func TestHandleFeishuMessageStatusRefreshesReadySetupSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
 	}
-	if !strings.Contains(reply, "状态：ready") {
-		t.Fatalf("reply = %q, want ready status", reply)
+	if strings.Contains(reply, "状态：") {
+		t.Fatalf("reply = %q, should not show setup/ready state", reply)
 	}
 	session, ok := store.Get(key)
 	if !ok {
 		t.Fatalf("session not found")
 	}
-	if session.Status != "ready" {
-		t.Fatalf("persisted session status = %q, want ready", session.Status)
+	if session.ACPSessionID != "acp-session-1" {
+		t.Fatalf("persisted session id = %q, want unchanged", session.ACPSessionID)
 	}
-	if session.ACPSessionID != "" {
-		t.Fatalf("persisted session id = %q, want cleared setup ACP session", session.ACPSessionID)
-	}
-	if len(rt.closedKeys) != 1 || rt.closedKeys[0] != key {
-		t.Fatalf("closedKeys = %+v, want old setup runtime closed", rt.closedKeys)
+	if len(rt.closedKeys) != 0 {
+		t.Fatalf("closedKeys = %+v, want no runtime close", rt.closedKeys)
 	}
 }
 
-func TestHandleFeishuMessageRecreatesSessionAfterSetupWorkspaceReady(t *testing.T) {
+func TestHandleFeishuMessageKeepsPersistedACPSessionAfterBootstrapDeleted(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte("# SOUL\n\n名字：小助手\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
 	}
@@ -1808,9 +1852,8 @@ func TestHandleFeishuMessageRecreatesSessionAfterSetupWorkspaceReady(t *testing.
 		ACPSessionID: "setup-session",
 		Cwd:          workDir,
 		Workspace:    workspace,
-		Status:       "setup",
 	}); err != nil {
-		t.Fatalf("Upsert(setup session) error = %v", err)
+		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{newSessionID: "ready-session", promptReply: "我是小助手。"}
 	svc := NewService(config.Default(), store)
@@ -1828,38 +1871,33 @@ func TestHandleFeishuMessageRecreatesSessionAfterSetupWorkspaceReady(t *testing.
 		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
 	}
 	if reply != "我是小助手。" {
-		t.Fatalf("reply = %q, want ready prompt reply", reply)
+		t.Fatalf("reply = %q, want ACP reply", reply)
 	}
-	if len(rt.newCalls) != 1 {
-		t.Fatalf("newCalls = %+v, want recreated ready session", rt.newCalls)
-	}
-	if rt.newCalls[0].Cwd != workDir {
-		t.Fatalf("new session cwd = %q, want %q", rt.newCalls[0].Cwd, workDir)
+	if len(rt.newCalls) != 0 {
+		t.Fatalf("newCalls = %+v, want existing ACP session reused", rt.newCalls)
 	}
 	if len(rt.promptCalls) != 1 {
 		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
 	}
-	if rt.promptCalls[0].Session.ACPSessionID != "ready-session" {
-		t.Fatalf("prompt session = %q, want ready-session", rt.promptCalls[0].Session.ACPSessionID)
+	if rt.promptCalls[0].Session.ACPSessionID != "setup-session" {
+		t.Fatalf("prompt session = %q, want existing setup-session", rt.promptCalls[0].Session.ACPSessionID)
 	}
-	if !strings.Contains(rt.promptCalls[0].Text, "## Workspace Knowledge") || !strings.Contains(rt.promptCalls[0].Text, "## User Message") || !strings.Contains(rt.promptCalls[0].Text, "你是谁") {
+	if !strings.Contains(rt.promptCalls[0].Text, "## Workspace Context") || !strings.Contains(rt.promptCalls[0].Text, "## User Message") || !strings.Contains(rt.promptCalls[0].Text, "你是谁") {
 		t.Fatalf("prompt text = %q, want workspace knowledge and user message", rt.promptCalls[0].Text)
 	}
 	session, ok := store.Get(key)
 	if !ok {
 		t.Fatalf("session not found")
 	}
-	if session.Status != "ready" || session.ACPSessionID != "ready-session" {
-		t.Fatalf("session = %+v, want recreated ready session", session)
+	if session.ACPSessionID != "setup-session" {
+		t.Fatalf("session = %+v, want existing ACP session retained", session)
 	}
 }
 
-func TestHandleFeishuMessageRecreatesReadySessionTitleUsesUserText(t *testing.T) {
+func TestHandleFeishuMessageRecreatesMissingACPSessionTitleUsesUserText(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	workDir := t.TempDir()
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	if err := store.Upsert(Session{
@@ -1867,10 +1905,9 @@ func TestHandleFeishuMessageRecreatesReadySessionTitleUsesUserText(t *testing.T)
 		AgentName:    "traex",
 		Cwd:          workDir,
 		Workspace:    workspace,
-		Status:       "ready",
 		ACPSessionID: "",
 	}); err != nil {
-		t.Fatalf("Upsert(ready session) error = %v", err)
+		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{newSessionID: "ready-session", promptReply: "ACP 回复"}
 	svc := NewService(config.Default(), store)
@@ -1906,7 +1943,7 @@ func TestHandleFeishuMessageRecreatesReadySessionTitleUsesUserText(t *testing.T)
 	}
 }
 
-func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
+func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := NewService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
@@ -1921,9 +1958,7 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 		ThreadID:  "omt_thread",
 	}
 
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte("# SOUL\n\n名字：小助手\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
 	}
@@ -1948,14 +1983,10 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
 	if len(rt.promptCalls) != 0 {
-		t.Fatalf("promptCalls = %+v, want /new to defer ready prompt", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want /new to defer workspace context prompt", rt.promptCalls)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
-	if !ok {
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
 		t.Fatalf("session not found")
-	}
-	if session.PendingInitialPrompt != "ready" {
-		t.Fatalf("pending prompt = %q, want ready", session.PendingInitialPrompt)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1973,33 +2004,25 @@ func TestHandleFeishuMessageWorkspaceReadyAllowsNewSession(t *testing.T) {
 		t.Fatalf("reply = %q, want ACP reply", reply)
 	}
 	if len(rt.promptCalls) != 1 {
-		t.Fatalf("promptCalls = %+v, want ready prompt on next message", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want workspace context prompt on next message", rt.promptCalls)
 	}
-	readyPrompt := rt.promptCalls[0].Text
-	for _, want := range []string{"Workspace Knowledge", "SOUL.md", "名字：小助手", "MEMORY.md", "偏好：中文回复", "knowledge/core.md", "repo-workflow", "skills/wiki/SKILL.md"} {
-		if !strings.Contains(readyPrompt, want) {
-			t.Fatalf("ready prompt = %q, want %q", readyPrompt, want)
+	contextPrompt := rt.promptCalls[0].Text
+	for _, want := range []string{"Workspace Context", "SOUL.md", "名字：小助手", "MEMORY.md", "偏好：中文回复", "knowledge/core.md", "repo-workflow", "skills/wiki/SKILL.md"} {
+		if !strings.Contains(contextPrompt, want) {
+			t.Fatalf("workspace context prompt = %q, want %q", contextPrompt, want)
 		}
 	}
-	if !strings.Contains(readyPrompt, "## User Message") || !strings.Contains(readyPrompt, "介绍一下") {
-		t.Fatalf("ready prompt = %q, want user message", readyPrompt)
+	if !strings.Contains(contextPrompt, "## User Message") || !strings.Contains(contextPrompt, "介绍一下") {
+		t.Fatalf("workspace context prompt = %q, want user message", contextPrompt)
 	}
-	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
-	if !ok {
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
 		t.Fatalf("session not found after next prompt")
-	}
-	if session.PendingInitialPrompt != "" {
-		t.Fatalf("pending prompt = %q, want cleared", session.PendingInitialPrompt)
 	}
 }
 
-func TestHandleFeishuMessageClearsPendingPromptWithoutDroppingACPState(t *testing.T) {
+func TestHandleFeishuMessagePreservesACPStateUpdates(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
-	session.PendingInitialPrompt = "ready"
-	if err := store.Upsert(session); err != nil {
-		t.Fatalf("Upsert(session) error = %v", err)
-	}
 	rt := &fakeRuntime{promptReply: "ACP 回复"}
 	rt.afterUpdates = func() {
 		latest, ok := store.Get(session.Key)
@@ -2033,15 +2056,12 @@ func TestHandleFeishuMessageClearsPendingPromptWithoutDroppingACPState(t *testin
 	if !ok {
 		t.Fatalf("session not found after prompt")
 	}
-	if updated.PendingInitialPrompt != "" {
-		t.Fatalf("pending prompt = %q, want cleared", updated.PendingInitialPrompt)
-	}
 	if !sessionHasCommand(updated, "review") {
 		t.Fatalf("available commands = %+v, want review preserved", updated.AvailableCommands)
 	}
 }
 
-func TestHandleFeishuMessageAutoCreatesReadySessionWithKnowledge(t *testing.T) {
+func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -2052,9 +2072,7 @@ func TestHandleFeishuMessageAutoCreatesReadySessionWithKnowledge(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte("# SOUL\n\n名字：小助手\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
 	}
@@ -2083,17 +2101,17 @@ func TestHandleFeishuMessageAutoCreatesReadySessionWithKnowledge(t *testing.T) {
 		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
 	}
 	prompt := rt.promptCalls[0].Text
-	for _, want := range []string{"Workspace Knowledge", "SOUL.md", "名字：小助手", "## User Message", "介绍一下这个仓库"} {
+	for _, want := range []string{"Workspace Context", "SOUL.md", "名字：小助手", "## User Message", "介绍一下这个仓库"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
-		t.Fatalf("auto-created ready session not persisted")
+		t.Fatalf("auto-created session not persisted")
 	}
-	if session.Status != "ready" {
-		t.Fatalf("session status = %q, want ready", session.Status)
+	if session.Workspace != workspace {
+		t.Fatalf("session workspace = %q, want %q", session.Workspace, workspace)
 	}
 }
 
@@ -2138,8 +2156,8 @@ func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 	if session.Cwd != repo {
 		t.Fatalf("Cwd = %q, want expanded cwd", session.Cwd)
 	}
-	if session.ACPSessionID != "acp-session-1" || session.Status != "ready" {
-		t.Fatalf("session = %+v, want ready acp session", session)
+	if session.ACPSessionID != "acp-session-1" {
+		t.Fatalf("session = %+v, want acp session persisted", session)
 	}
 }
 
@@ -2150,9 +2168,7 @@ func TestHandleFeishuMessagePersistsSessionByBotID(t *testing.T) {
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     "bot-a",
@@ -2188,9 +2204,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 			Workspace: workspace,
 		},
 	}
-	if err := markWorkspaceReady(workspace); err != nil {
-		t.Fatalf("markWorkspaceReady() error = %v", err)
-	}
+	markWorkspaceBootstrapped(t, workspace)
 	svc := NewService(cfg, nil)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 
@@ -2394,7 +2408,6 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
-		Status:       "ready",
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
@@ -2446,7 +2459,6 @@ func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 		AgentName:       "traex",
 		ACPSessionID:    "acp-session-1",
 		Cwd:             t.TempDir(),
-		Status:          "ready",
 		WikiIntervalSec: 60,
 	}
 	if err := store.Upsert(session); err != nil {
@@ -2497,7 +2509,6 @@ func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 		AgentName:       "traex",
 		ACPSessionID:    "acp-session-1",
 		Cwd:             t.TempDir(),
-		Status:          "ready",
 		WikiIntervalSec: 60,
 	}
 	if err := store.Upsert(session); err != nil {
@@ -2567,7 +2578,6 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
-		Status:       "ready",
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
@@ -2664,7 +2674,6 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
-		Status:       "ready",
 	}
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
@@ -2736,7 +2745,6 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 		ACPSessionID:    "acp-session-1",
 		Cwd:             t.TempDir(),
 		Workspace:       filepath.Join(t.TempDir(), "workspace"),
-		Status:          "ready",
 		WikiIntervalSec: 1,
 	}
 	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
@@ -2773,7 +2781,6 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 		ACPSessionID:    "acp-session-1",
 		Cwd:             t.TempDir(),
 		Workspace:       filepath.Join(t.TempDir(), "workspace"),
-		Status:          "ready",
 		WikiIntervalSec: 1,
 	}
 	if err := store.Upsert(session); err != nil {

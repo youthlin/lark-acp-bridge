@@ -625,7 +625,7 @@ func (s *Service) listSessions(msg feishu.Message) string {
 		if hasCurrent && item.ACPSessionID == current.ACPSessionID {
 			marker = " *"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s%s\n   标题：%s\n   cwd：%s\n   状态：%s", i+1, item.ACPSessionID, marker, displaySessionTitle(item), item.Cwd, item.Status))
+		lines = append(lines, fmt.Sprintf("%d. %s%s\n   标题：%s\n   cwd：%s", i+1, item.ACPSessionID, marker, displaySessionTitle(item), item.Cwd))
 	}
 	lines = append(lines, "使用 /session resume <index> 恢复指定会话。")
 	return strings.Join(lines, "\n")
@@ -741,41 +741,40 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 }
 
 func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
-	session, _, source, _, errText := s.createSession(ctx, fields, msg)
+	session, _, source, errText := s.createSession(ctx, fields, msg)
 	if errText != "" {
 		return errText
 	}
 	return formatNewSessionReply(session, source)
 }
 
-func (s *Service) createSession(ctx context.Context, fields []string, msg feishu.Message) (Session, config.AgentConfig, string, string, string) {
+func (s *Service) createSession(ctx context.Context, fields []string, msg feishu.Message) (Session, config.AgentConfig, string, string) {
 	slog.InfoContext(ctx, "准备创建ACP会话", "cmd", fields)
 	store := s.storeForMessage(msg)
 	if store == nil {
-		return Session{}, config.AgentConfig{}, "", "", "会话持久化未初始化。"
+		return Session{}, config.AgentConfig{}, "", "会话持久化未初始化。"
 	}
 	req, source, errText := s.resolveNewSessionRequest(fields, msg)
 	if errText != "" {
-		return Session{}, config.AgentConfig{}, "", "", errText
+		return Session{}, config.AgentConfig{}, "", errText
 	}
 	cwd := req.Cwd
 	if !filepath.IsAbs(cwd) {
-		return Session{}, config.AgentConfig{}, "", "", "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
+		return Session{}, config.AgentConfig{}, "", "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
 	}
 	if info, err := os.Stat(cwd); err != nil {
-		return Session{}, config.AgentConfig{}, "", "", "工作目录不可访问：" + err.Error()
+		return Session{}, config.AgentConfig{}, "", "工作目录不可访问：" + err.Error()
 	} else if !info.IsDir() {
-		return Session{}, config.AgentConfig{}, "", "", "工作目录不是目录：" + cwd
+		return Session{}, config.AgentConfig{}, "", "工作目录不是目录：" + cwd
 	}
 	agentName := s.defaultAgentName()
 	agent, ok := s.registry.Get(agentName)
 	if !ok {
-		return Session{}, config.AgentConfig{}, "", "", "未找到默认 agent 配置。"
+		return Session{}, config.AgentConfig{}, "", "未找到默认 agent 配置。"
 	}
-	workspaceStatus, err := ensureWorkspace(msg.Workspace)
-	if err != nil {
+	if _, err := ensureWorkspace(msg.Workspace); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
-		return Session{}, config.AgentConfig{}, "", "", "初始化 workspace 失败：" + err.Error()
+		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
 	}
 	key := sessionKeyFromMessage(msg)
 	s.cancelSessionWork(ctx, key)
@@ -783,38 +782,25 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
 		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
-		return Session{}, config.AgentConfig{}, "", "", "创建 ACP session 失败：" + err.Error()
+		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
 	}
 	session := Session{
-		Key:                  key,
-		Title:                req.Title,
-		AgentName:            agentName,
-		ACPSessionID:         sessionInfo.SessionID,
-		Cwd:                  filepath.Clean(cwd),
-		Workspace:            msg.Workspace,
-		Status:               "ready",
-		PendingInitialPrompt: "ready",
-		AvailableCommands:    sessionInfo.AvailableCommands,
-		ConfigOptions:        sessionInfo.ConfigOptions,
-		Models:               sessionInfo.Models,
-	}
-	initialPrompt := ""
-	if workspaceStatus.Ready {
-		initialPrompt = workspaceReadyPrompt(msg.Workspace)
-	} else {
-		session.Status = "setup"
-		session.PendingInitialPrompt = "setup"
-		initialPrompt = workspaceSetupPrompt(msg.Workspace)
-	}
-	if strings.TrimSpace(initialPrompt) == "" {
-		session.PendingInitialPrompt = ""
+		Key:               key,
+		Title:             req.Title,
+		AgentName:         agentName,
+		ACPSessionID:      sessionInfo.SessionID,
+		Cwd:               filepath.Clean(cwd),
+		Workspace:         msg.Workspace,
+		AvailableCommands: sessionInfo.AvailableCommands,
+		ConfigOptions:     sessionInfo.ConfigOptions,
+		Models:            sessionInfo.Models,
 	}
 	if err := store.Upsert(session); err != nil {
 		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
-		return Session{}, config.AgentConfig{}, "", "", "保存会话映射失败：" + err.Error()
+		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
 	}
-	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd, "ready", workspaceStatus.Ready)
-	return session, agent, source, initialPrompt, ""
+	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd)
+	return session, agent, source, ""
 }
 
 func (s *Service) status(msg feishu.Message) string {
@@ -836,7 +822,6 @@ func (s *Service) status(msg feishu.Message) string {
 			"agent："+session.AgentName,
 			"cwd："+session.Cwd,
 			"session："+session.ACPSessionID,
-			"状态："+session.Status,
 		)
 	} else {
 		lines = append(lines, sessionLabel(msg)+"还没有会话映射；发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。")
@@ -845,80 +830,44 @@ func (s *Service) status(msg feishu.Message) string {
 }
 
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
-	session, agent, promptText, clearInitialPrompt, errText, err := s.preparePrompt(ctx, msg, text)
+	session, agent, promptText, errText, err := s.preparePrompt(ctx, msg, text)
 	if err != nil {
 		return "", err
 	}
 	if errText != "" {
 		return errText, nil
 	}
-	return s.promptSession(ctx, msg, session, agent, promptText, clearInitialPrompt)
+	return s.promptSession(ctx, msg, session, agent, promptText)
 }
 
 func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (
 	// TODO 返回值太多了吧 用结构体包装一下?
-	Session, config.AgentConfig, string, bool, string, error,
+	Session, config.AgentConfig, string, string, error,
 ) {
 	session, ok := s.findSession(msg)
-	clearInitialPrompt := false
 	if !ok {
-		created, agent, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(userText)}, msg)
+		created, agent, _, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(userText)}, msg)
 		if errText != "" {
-			return Session{}, config.AgentConfig{}, "", false, errText, nil
+			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
 		session = created
-		text := promptTextWithReplyContext(msg, userText)
-		if strings.TrimSpace(initialPrompt) != "" {
-			if session.Status == "ready" {
-				text = promptWithUserMessage([]string{
-					initialPrompt,
-					workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg)),
-				}, text)
-			} else {
-				text = initialPrompt
-			}
-			clearInitialPrompt = true
-		} else if session.Status == "ready" {
-			text = promptWithUserMessage([]string{workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg))}, text)
-		}
-		return session, agent, text, clearInitialPrompt, "", nil
+		text := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), promptTextWithReplyContext(msg, userText))
+		return session, agent, text, "", nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
-		return Session{}, config.AgentConfig{}, "", false, "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
+		return Session{}, config.AgentConfig{}, "", "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
 	}
 	text := promptTextWithReplyContext(msg, userText)
-	if session.Status == "setup" && strings.TrimSpace(session.PendingInitialPrompt) == "setup" {
-		text = promptWithUserMessage([]string{workspaceSetupPrompt(sessionWorkspace(session, msg))}, text)
-		clearInitialPrompt = true
-	} else if session.Status == "ready" && strings.TrimSpace(session.ACPSessionID) == "" {
-		created, _, _, initialPrompt, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(userText)}, msg)
+	if strings.TrimSpace(session.ACPSessionID) == "" {
+		created, _, _, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(userText)}, msg)
 		if errText != "" {
-			return Session{}, config.AgentConfig{}, "", false, errText, nil
+			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
 		session = created
-		if strings.TrimSpace(initialPrompt) != "" {
-			text = promptWithUserMessage([]string{
-				initialPrompt,
-				workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg)),
-			}, text)
-			clearInitialPrompt = true
-		} else {
-			text = promptWithUserMessage([]string{workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg))}, text)
-		}
-	} else if session.Status == "ready" && strings.TrimSpace(session.PendingInitialPrompt) == "ready" {
-		workspace := sessionWorkspace(session, msg)
-		text = promptWithUserMessage([]string{
-			workspaceReadyPrompt(workspace),
-			workspaceMemoryPolicyPrompt(workspace),
-		}, text)
-		clearInitialPrompt = true
-	} else if session.Status == "ready" {
-		if memoryPolicy := workspaceMemoryPolicyPrompt(sessionWorkspace(session, msg)); strings.TrimSpace(memoryPolicy) != "" {
-			text = promptWithUserMessage([]string{memoryPolicy}, text)
-		}
 	}
-	return session, agent, text, clearInitialPrompt, "", nil
+	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), text)
+	return session, agent, text, "", nil
 }
 
 func promptTextWithReplyContext(msg feishu.Message, text string) string {
@@ -939,29 +888,6 @@ func promptTextWithReplyContext(msg feishu.Message, text string) string {
 	}, "\n")
 }
 
-func (s *Service) clearPendingInitialPrompt(ctx context.Context, msg feishu.Message, session Session) Session {
-	if strings.TrimSpace(session.PendingInitialPrompt) == "" {
-		return session
-	}
-	store := s.storeForMessage(msg)
-	if store != nil {
-		if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
-			session = latest
-		}
-	}
-	if strings.TrimSpace(session.PendingInitialPrompt) == "" {
-		return session
-	}
-	session.PendingInitialPrompt = ""
-	if store == nil {
-		return session
-	}
-	if err := store.Upsert(session); err != nil {
-		slog.ErrorContext(ctx, "清除待发送初始 prompt 标记失败", "错误", err)
-	}
-	return session
-}
-
 func sessionWorkspace(session Session, msg feishu.Message) string {
 	if strings.TrimSpace(session.Workspace) != "" {
 		return session.Workspace
@@ -969,7 +895,14 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 	return msg.Workspace
 }
 
-func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, clearInitialPrompt bool) (string, error) {
+func promptTextWithWorkspaceContext(workspace string, text string) string {
+	return promptWithUserMessage([]string{
+		workspaceContextPrompt(workspace),
+		workspaceMemoryPolicyPrompt(workspace),
+	}, text)
+}
+
+func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	reply, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
 	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
@@ -991,9 +924,6 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 			return "", nil
 		}
 		return "", err
-	}
-	if clearInitialPrompt {
-		s.clearPendingInitialPrompt(ctx, msg, session)
 	}
 	if strings.TrimSpace(reply) == "" {
 		if sentProgress {
@@ -2070,67 +2000,10 @@ func (s *Service) findSession(msg feishu.Message) (Session, bool) {
 	}
 	for _, key := range sessionKeysFromMessage(msg) {
 		if session, ok := store.Get(key); ok {
-			session = s.refreshReadySession(msg, store, session)
 			return session, true
 		}
 	}
 	return Session{}, false
-}
-
-func (s *Service) refreshReadySession(msg feishu.Message, store *SessionStore, session Session) Session {
-	staleSetupACP := session.Status == "setup" || setupSessionReadyAfterCreated(session)
-	if !staleSetupACP {
-		return session
-	}
-	workspace := strings.TrimSpace(session.Workspace)
-	if workspace == "" {
-		workspace = strings.TrimSpace(msg.Workspace)
-	}
-	if workspace == "" {
-		return session
-	}
-	ready, err := workspaceReady(workspace)
-	if err != nil {
-		slog.Warn("检查 setup session 的 workspace 状态失败", "workspace", workspace, "错误", err)
-		return session
-	}
-	if !ready && staleSetupACP {
-		setup, _, setupErr := loadWorkspaceSetup(workspace)
-		if setupErr != nil {
-			slog.Warn("检查 ACP session 上下文状态失败", "workspace", workspace, "错误", setupErr)
-			return session
-		}
-		ready = setup.Ready
-	}
-	if !ready {
-		return session
-	}
-	session.Workspace = workspace
-	session.Status = "ready"
-	if session.ACPSessionID != "" {
-		if err := s.runtime.CloseSession(session.Key); err != nil {
-			slog.Warn("关闭旧 setup ACP runtime 失败", "session", session.ACPSessionID, "错误", err)
-		}
-	}
-	session.ACPSessionID = ""
-	if err := store.Upsert(session); err != nil {
-		slog.Error("刷新 session ready 状态失败", "workspace", workspace, "session", session.ACPSessionID, "错误", err)
-	}
-	return session
-}
-
-func setupSessionReadyAfterCreated(session Session) bool {
-	if session.Status == "setup" {
-		return true
-	}
-	if session.Status != "ready" || session.ACPSessionID == "" {
-		return false
-	}
-	setup, _, err := loadWorkspaceSetup(session.Workspace)
-	if err != nil || !setup.Ready || setup.Updated.IsZero() || session.CreatedAt.IsZero() {
-		return false
-	}
-	return setup.Updated.After(session.CreatedAt)
 }
 
 func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
@@ -2347,7 +2220,7 @@ func (s *Service) hasWikiTimer(key SessionKey) bool {
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
-	if session.WikiDisabled || session.Status != "ready" || strings.TrimSpace(session.ACPSessionID) == "" {
+	if session.WikiDisabled || strings.TrimSpace(session.ACPSessionID) == "" {
 		s.cancelWikiTimer(session.Key)
 		return
 	}
