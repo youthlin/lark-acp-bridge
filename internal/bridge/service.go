@@ -1416,7 +1416,7 @@ func (s *promptCardStream) updateProcessMessage(text string) {
 	if text == "" {
 		return
 	}
-	s.updateProcess("[思考中] " + text)
+	s.updateProcess(text)
 }
 
 func (s *promptCardStream) updateThoughtStream(text string) {

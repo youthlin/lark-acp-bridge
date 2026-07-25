@@ -1368,9 +1368,9 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		t.Fatalf("textUpdates = %+v, want pre-tool text moved away and final candidate retained", got)
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 3 ||
-		got[0] != "[思考中] 收到。现在开始。" ||
-		got[1] != "[思考中] 收到。现在开始。\n⏳ exec_command" ||
-		got[2] != "[思考中] 收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
+		got[0] != "收到。现在开始。" ||
+		got[1] != "收到。现在开始。\n⏳ exec_command" ||
+		got[2] != "收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
 		t.Fatalf("processUpdates = %+v, want pre-tool agent text and normalized process updates", got)
 	}
 	if !card.isClosed() {
@@ -1463,7 +1463,7 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 		t.Fatalf("processUpdates = %+v, want process updates", processUpdates)
 	}
 	lastProcess := processUpdates[len(processUpdates)-1]
-	for _, want := range []string{"[思考中] 先检查。", "⏳ Read config", "[思考中] 中间说明。", "⏳ Run tests"} {
+	for _, want := range []string{"先检查。", "⏳ Read config", "中间说明。", "⏳ Run tests"} {
 		if !strings.Contains(lastProcess, want) {
 			t.Fatalf("last process update = %q, want %q", lastProcess, want)
 		}
