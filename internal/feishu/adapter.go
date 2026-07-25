@@ -14,6 +14,7 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
@@ -36,6 +37,7 @@ type Adapter struct {
 	deduper         *messageDeduper         // 消息去重
 	reaction        reactionClient          // 消息处理期间添加/移除 reaction
 	messages        messageClient           // 消息读取
+	applications    applicationClient       // 应用信息读取
 	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
 }
 
@@ -47,6 +49,21 @@ type reactionClient interface {
 type messageClient interface {
 	GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error)
 	DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error)
+}
+
+type applicationClient interface {
+	GetApplication(ctx context.Context) (applicationOwnerCandidates, error)
+	GetCollaborators(ctx context.Context) ([]applicationCollaborator, error)
+}
+
+type applicationOwnerCandidates struct {
+	CreatorID string
+	OwnerID   string
+}
+
+type applicationCollaborator struct {
+	Type   string
+	UserID string
 }
 
 // NewAdapter 创建飞书bot处理器
@@ -86,6 +103,10 @@ func (a *Adapter) Start(ctx context.Context) error {
 	if a.messages == nil {
 		a.messages = larkMessageClient{client: a.client}
 	}
+	if a.applications == nil {
+		a.applications = larkApplicationClient{client: a.client}
+	}
+	a.resolveOwnerOpenIDs(ctx)
 
 	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
 		OnP2MessageReceiveV1(a.handleMessage).
@@ -109,6 +130,138 @@ func (a *Adapter) Start(ctx context.Context) error {
 	return nil
 }
 
+func (a *Adapter) resolveOwnerOpenIDs(ctx context.Context) {
+	if len(a.cfg.OwnerOpenIDs) > 0 || a.applications == nil {
+		return
+	}
+	owners, err := a.fetchOwnerOpenIDs(ctx)
+	if err != nil {
+		slog.Warn("获取飞书应用协作者失败，群聊权限卡片需要手动配置 bot owner", "bot", a.cfg.ID, "err", err)
+		return
+	}
+	if len(owners) == 0 {
+		slog.Warn("飞书应用协作者中未解析到 bot owner，群聊权限卡片需要手动配置 bot owner", "bot", a.cfg.ID)
+		return
+	}
+	a.cfg.OwnerOpenIDs = owners
+	slog.Info("已从飞书应用协作者解析 bot owner", "bot", a.cfg.ID, "数量", len(owners))
+}
+
+func (a *Adapter) fetchOwnerOpenIDs(ctx context.Context) ([]string, error) {
+	var ids []string
+	app, appErr := a.applications.GetApplication(ctx)
+	if appErr == nil {
+		ids = append(ids, app.OwnerID, app.CreatorID)
+	} else {
+		slog.Warn("获取飞书应用信息失败，将继续尝试读取应用协作者", "bot", a.cfg.ID, "err", appErr)
+	}
+	collaborators, collabErr := a.applications.GetCollaborators(ctx)
+	if collabErr == nil {
+		for _, item := range collaborators {
+			if applicationCollaboratorCanApprove(item.Type) {
+				ids = append(ids, item.UserID)
+			}
+		}
+	}
+	ids = normalizeOpenIDs(ids)
+	if len(ids) > 0 {
+		return ids, nil
+	}
+	if appErr != nil && collabErr != nil {
+		return nil, fmt.Errorf("获取应用信息: %w; 获取应用协作者: %w", appErr, collabErr)
+	}
+	if collabErr != nil {
+		return nil, fmt.Errorf("获取应用协作者: %w", collabErr)
+	}
+	return nil, nil
+}
+
+func applicationCollaboratorCanApprove(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "owner", "administrator", "developer":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeOpenIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+type larkApplicationClient struct {
+	client *lark.Client
+}
+
+func (c larkApplicationClient) GetApplication(ctx context.Context) (applicationOwnerCandidates, error) {
+	resp, err := c.client.Application.Application.Get(ctx, larkapplication.NewGetApplicationReqBuilder().
+		AppId("me").
+		Lang("zh_cn").
+		UserIdType("open_id").
+		Build())
+	if err != nil {
+		return applicationOwnerCandidates{}, fmt.Errorf("调用飞书获取应用信息接口: %w", err)
+	}
+	if !resp.Success() {
+		return applicationOwnerCandidates{}, fmt.Errorf("飞书获取应用信息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || resp.Data.App == nil {
+		return applicationOwnerCandidates{}, nil
+	}
+	app := resp.Data.App
+	out := applicationOwnerCandidates{CreatorID: value(app.CreatorId)}
+	if app.Owner != nil {
+		out.OwnerID = value(app.Owner.OwnerId)
+	}
+	return out, nil
+}
+
+func (c larkApplicationClient) GetCollaborators(ctx context.Context) ([]applicationCollaborator, error) {
+	resp, err := c.client.Application.ApplicationCollaborators.Get(ctx, larkapplication.NewGetApplicationCollaboratorsReqBuilder().
+		AppId("me").
+		UserIdType("open_id").
+		Build())
+	if err != nil {
+		return nil, fmt.Errorf("调用飞书获取应用协作者接口: %w", err)
+	}
+	if !resp.Success() {
+		return nil, fmt.Errorf("飞书获取应用协作者接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil {
+		return nil, nil
+	}
+	out := make([]applicationCollaborator, 0, len(resp.Data.Collaborators))
+	for _, item := range resp.Data.Collaborators {
+		if item == nil {
+			continue
+		}
+		out = append(out, applicationCollaborator{
+			Type:   value(item.Type),
+			UserID: value(item.UserId),
+		})
+	}
+	return out, nil
+}
+
 func (a *Adapter) Shutdown(ctx context.Context) error {
 	if a.ws != nil {
 		a.ws.Close()
@@ -117,10 +270,13 @@ func (a *Adapter) Shutdown(ctx context.Context) error {
 }
 
 func (a *Adapter) SendText(ctx context.Context, msg Message, text string) error {
+	if strings.TrimSpace(msg.MessageID) != "" {
+		return a.ReplyText(ctx, msg, text)
+	}
 	if msg.IsPrivateChat() {
 		return a.SendChatText(ctx, msg.ChatID, text)
 	}
-	return a.ReplyText(ctx, msg.MessageID, text)
+	return fmt.Errorf("飞书 message_id 为空")
 }
 
 func (a *Adapter) SendChatText(ctx context.Context, chatID string, text string) error {
@@ -153,11 +309,11 @@ func (a *Adapter) SendChatText(ctx context.Context, chatID string, text string) 
 	return nil
 }
 
-func (a *Adapter) ReplyText(ctx context.Context, messageID string, text string) error {
+func (a *Adapter) ReplyText(ctx context.Context, msg Message, text string) error {
 	if a.client == nil {
 		return fmt.Errorf("飞书客户端未初始化")
 	}
-	if messageID == "" {
+	if msg.MessageID == "" {
 		return fmt.Errorf("飞书 message_id 为空")
 	}
 	content, err := json.Marshal(map[string]string{"text": text})
@@ -165,9 +321,9 @@ func (a *Adapter) ReplyText(ctx context.Context, messageID string, text string) 
 		return fmt.Errorf("编码飞书回复内容: %w", err)
 	}
 	msgType := "text"
-	replyInThread := true
+	replyInThread := replyInThreadForMessage(msg)
 	req := larkim.NewReplyMessageReqBuilder().
-		MessageId(messageID).
+		MessageId(msg.MessageID).
 		Body(&larkim.ReplyMessageReqBody{
 			Content:       larkcore.StringPtr(string(content)),
 			MsgType:       larkcore.StringPtr(msgType),
@@ -182,6 +338,10 @@ func (a *Adapter) ReplyText(ctx context.Context, messageID string, text string) 
 		return fmt.Errorf("飞书回复接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func replyInThreadForMessage(msg Message) bool {
+	return msg.IsTopicThread()
 }
 
 // processingReactionEmojis 收到消息时随机选一个表情加在消息上

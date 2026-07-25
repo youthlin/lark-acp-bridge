@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
@@ -28,21 +30,35 @@ type permissionCardRegistry struct {
 }
 
 type permissionCardEntry struct {
-	waiter  *permissionCardWaiter
-	request acp.PermissionRequest
+	waiter       *permissionCardWaiter
+	request      acp.PermissionRequest
+	cardID       string
+	requesterID  string
+	ownerOpenIDs []string
+	groupChat    bool
 }
 
 func newPermissionCardRegistry() *permissionCardRegistry {
 	return &permissionCardRegistry{entries: make(map[string]permissionCardEntry)}
 }
 
-func (r *permissionCardRegistry) add(id string, waiter *permissionCardWaiter, req acp.PermissionRequest) {
-	if r == nil || strings.TrimSpace(id) == "" || waiter == nil {
+func (r *permissionCardRegistry) add(id string, entry permissionCardEntry) {
+	if r == nil || strings.TrimSpace(id) == "" || entry.waiter == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries[id] = permissionCardEntry{waiter: waiter, request: req}
+	r.entries[id] = entry
+}
+
+func (r *permissionCardRegistry) get(id string) (permissionCardEntry, bool) {
+	if r == nil || strings.TrimSpace(id) == "" {
+		return permissionCardEntry{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[id]
+	return entry, ok
 }
 
 func (r *permissionCardRegistry) take(id string) (permissionCardEntry, bool) {
@@ -90,18 +106,60 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 	if cardResp.Data == nil || cardResp.Data.CardId == nil || *cardResp.Data.CardId == "" {
 		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片未返回 card_id")
 	}
+	cardID := *cardResp.Data.CardId
 	waiter := newPermissionCardWaiter()
-	a.permissionCards.add(requestID, waiter, req)
+	a.permissionCards.add(requestID, permissionCardEntry{
+		waiter:       waiter,
+		request:      req,
+		cardID:       cardID,
+		requesterID:  msg.SenderID,
+		ownerOpenIDs: a.cfg.OwnerOpenIDs,
+		groupChat:    !msg.IsPrivateChat(),
+	})
 	defer a.permissionCards.remove(requestID)
-	if err := a.sendInteractiveCard(ctx, msg, *cardResp.Data.CardId); err != nil {
+	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return acp.PermissionOutcome{}, err
 	}
 	select {
 	case <-ctx.Done():
+		if entry, ok := a.permissionCards.take(requestID); ok {
+			a.markPermissionCardCancelled(requestID, entry)
+		}
 		return acp.PermissionOutcome{Outcome: "cancelled"}, nil
 	case outcome := <-waiter.once:
 		return outcome, nil
 	}
+}
+
+func (a *Adapter) markPermissionCardCancelled(requestID string, entry permissionCardEntry) {
+	cardID := strings.TrimSpace(entry.cardID)
+	if a == nil || a.client == nil || cardID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.updatePermissionCard(ctx, cardID, newPermissionCardCancelledJSON(requestID, entry.request)); err != nil {
+		slog.Warn("更新飞书权限卡片取消状态失败", "request_id", requestID, "card_id", cardID, "err", err)
+	}
+}
+
+func (a *Adapter) updatePermissionCard(ctx context.Context, cardID string, data string) error {
+	resp, err := a.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
+		CardId(cardID).
+		Body(larkcardkit.NewUpdateCardReqBodyBuilder().
+			Card(larkcardkit.NewCardBuilder().
+				Type("card_json").
+				Data(data).
+				Build()).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("更新飞书权限卡片: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("更新飞书权限卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -121,7 +179,14 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 	if requestID == "" || optionID == "" {
 		return permissionCardToast("error", "权限选项无效"), nil
 	}
-	entry, ok := a.permissionCards.take(requestID)
+	entry, ok := a.permissionCards.get(requestID)
+	if !ok {
+		return permissionCardToast("warning", "该权限请求已处理或已过期"), nil
+	}
+	if !permissionCardOperatorAllowed(entry, cardOperatorOpenID(event)) {
+		return permissionCardToast("warning", permissionCardUnauthorizedMessage(entry)), nil
+	}
+	entry, ok = a.permissionCards.take(requestID)
 	if !ok {
 		return permissionCardToast("warning", "该权限请求已处理或已过期"), nil
 	}
@@ -140,6 +205,41 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 	}, nil
 }
 
+func permissionCardOperatorAllowed(entry permissionCardEntry, operatorID string) bool {
+	operatorID = strings.TrimSpace(operatorID)
+	if len(entry.ownerOpenIDs) > 0 {
+		return containsOpenID(entry.ownerOpenIDs, operatorID)
+	}
+	return false
+}
+
+func permissionCardUnauthorizedMessage(entry permissionCardEntry) string {
+	if len(entry.ownerOpenIDs) == 0 {
+		return "权限卡片需要先配置 bot owner"
+	}
+	return "只有 bot owner 可以操作该权限卡片"
+}
+
+func containsOpenID(ids []string, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return false
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cardOperatorOpenID(event *callback.CardActionTriggerEvent) string {
+	if event == nil || event.Event == nil || event.Event.Operator == nil {
+		return ""
+	}
+	return strings.TrimSpace(event.Event.Operator.OpenID)
+}
+
 func permissionCardToast(kind, content string) *callback.CardActionTriggerResponse {
 	return &callback.CardActionTriggerResponse{
 		Toast: &callback.Toast{Type: kind, Content: content},
@@ -151,9 +251,25 @@ func newPermissionCardJSON(requestID string, req acp.PermissionRequest, selected
 	return string(data)
 }
 
+func newPermissionCardCancelledJSON(requestID string, req acp.PermissionRequest) string {
+	data, _ := json.Marshal(newPermissionCardDataWithState(requestID, req, permissionCardRenderState{cancelled: true}))
+	return string(data)
+}
+
+type permissionCardRenderState struct {
+	selectedOption string
+	cancelled      bool
+}
+
 func newPermissionCardData(requestID string, req acp.PermissionRequest, selectedOptionID string) cardJSON {
+	return newPermissionCardDataWithState(requestID, req, permissionCardRenderState{selectedOption: selectedOptionID})
+}
+
+func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest, state permissionCardRenderState) cardJSON {
 	title := "需要确认权限"
-	if selectedOptionID != "" {
+	if state.cancelled {
+		title = "权限请求已取消"
+	} else if state.selectedOption != "" {
 		title = "权限请求已处理"
 	}
 	return cardJSON{
@@ -167,20 +283,14 @@ func newPermissionCardData(requestID string, req acp.PermissionRequest, selected
 			"title": cardJSON{"tag": "plain_text", "content": title},
 		},
 		"body": cardJSON{
-			"elements": permissionCardElements(requestID, req, selectedOptionID),
+			"elements": permissionCardElements(requestID, req, state),
 		},
 	}
 }
 
-func permissionCardElements(requestID string, req acp.PermissionRequest, selectedOptionID string) []any {
+func permissionCardElements(requestID string, req acp.PermissionRequest, state permissionCardRenderState) []any {
 	tool := req.ToolCallState
-	title := strings.TrimSpace(req.ToolCall.ToolCallID)
-	if tool != nil && strings.TrimSpace(tool.Title) != "" {
-		title = strings.TrimSpace(tool.Title)
-	}
-	if title == "" {
-		title = "未命名工具调用"
-	}
+	title := permissionToolDisplayName(req)
 	lines := []string{"**工具调用**：" + markdownInline(title)}
 	if req.ToolCall.ToolCallID != "" {
 		lines = append(lines, "**Tool Call ID**：`"+markdownInline(req.ToolCall.ToolCallID)+"`")
@@ -197,9 +307,16 @@ func permissionCardElements(requestID string, req acp.PermissionRequest, selecte
 	elements := []any{
 		cardJSON{"tag": "markdown", "content": strings.Join(lines, "\n")},
 	}
-	if selectedOptionID != "" {
-		elements = append(elements, cardJSON{"tag": "markdown", "content": "**已选择**：" + markdownInline(selectedOptionID)})
+	if state.cancelled {
+		elements = append(elements, cardJSON{"tag": "markdown", "content": "**状态**：已取消或已失效"})
 		return elements
+	}
+	if state.selectedOption != "" {
+		elements = append(elements, cardJSON{"tag": "markdown", "content": "**已选择**：" + markdownInline(state.selectedOption)})
+		return elements
+	}
+	if optionsText := permissionOptionsMarkdown(req.Options); optionsText != "" {
+		elements = append(elements, cardJSON{"tag": "markdown", "content": optionsText})
 	}
 	actions := permissionCardActions(requestID, req.Options)
 	if len(actions) > 0 {
@@ -215,12 +332,13 @@ func permissionCardElements(requestID string, req acp.PermissionRequest, selecte
 
 func permissionCardActions(requestID string, options []acp.PermissionOption) []any {
 	var actions []any
-	for _, kind := range []string{"allow_once", "allow_always", "reject_once", "reject_always"} {
-		option, ok := findPermissionOption(options, kind)
-		if !ok || strings.TrimSpace(option.OptionID) == "" {
+	buttonIndex := 1
+	for _, option := range options {
+		if strings.TrimSpace(option.OptionID) == "" {
 			continue
 		}
-		text, buttonType := permissionButtonStyle(option)
+		text, buttonType := permissionButtonStyle(option, buttonIndex)
+		buttonIndex++
 		actions = append(actions, cardJSON{
 			"tag":   "column",
 			"width": "auto",
@@ -248,39 +366,33 @@ func permissionCardActions(requestID string, options []acp.PermissionOption) []a
 	return actions
 }
 
-func permissionButtonStyle(option acp.PermissionOption) (string, string) {
-	name := strings.TrimSpace(option.Name)
+func permissionButtonStyle(option acp.PermissionOption, index int) (string, string) {
+	text := fmt.Sprintf("选择 %d", index)
 	switch option.Kind {
 	case "allow_once":
-		if name == "" {
-			name = "允许"
-		}
-		return name, "primary"
+		return text, "primary"
 	case "allow_always":
-		if name == "" {
-			name = "本会话总是允许"
-		}
-		return name, "default"
+		return text, "default"
 	case "reject_once", "reject_always":
-		if name == "" {
-			name = "拒绝"
-		}
-		return name, "danger"
-	default:
-		if name == "" {
-			name = option.OptionID
-		}
-		return name, "default"
+		return text, "danger"
 	}
+	return text, "default"
 }
 
-func findPermissionOption(options []acp.PermissionOption, kind string) (acp.PermissionOption, bool) {
+func permissionOptionsMarkdown(options []acp.PermissionOption) string {
+	var lines []string
+	displayIndex := 1
 	for _, option := range options {
-		if option.Kind == kind {
-			return option, true
+		if strings.TrimSpace(option.OptionID) == "" {
+			continue
 		}
+		lines = append(lines, fmt.Sprintf("%d. %s", displayIndex, markdownInline(permissionOptionDisplayName(option.OptionID, option.Name))))
+		displayIndex++
 	}
-	return acp.PermissionOption{}, false
+	if len(lines) == 0 {
+		return ""
+	}
+	return "**选项**：\n" + strings.Join(lines, "\n")
 }
 
 func permissionRequestID(req acp.PermissionRequest) string {
@@ -294,6 +406,21 @@ func permissionRequestID(req acp.PermissionRequest) string {
 		return ""
 	}
 	return sessionID + ":" + toolCallID
+}
+
+func permissionToolDisplayName(req acp.PermissionRequest) string {
+	tool := req.ToolCallState
+	if tool != nil {
+		for _, value := range []string{tool.Title, tool.Kind} {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	if toolCallID := strings.TrimSpace(req.ToolCall.ToolCallID); toolCallID != "" {
+		return "工具调用 " + toolCallID
+	}
+	return "未命名工具调用"
 }
 
 func appendJSONDetail(lines []string, label string, raw json.RawMessage) []string {

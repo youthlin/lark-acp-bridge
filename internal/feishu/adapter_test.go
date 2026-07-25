@@ -2,8 +2,10 @@ package feishu
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +85,119 @@ func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string,
 		return "", f.downloadErr
 	}
 	return filepath.Join(workspace, "cache", imageKey+".png"), nil
+}
+
+type fakeApplicationClient struct {
+	app                  applicationOwnerCandidates
+	appErr               error
+	collaborators        []applicationCollaborator
+	collaboratorsErr     error
+	appCalls             int
+	collaboratorGetCalls int
+}
+
+func (f *fakeApplicationClient) GetApplication(ctx context.Context) (applicationOwnerCandidates, error) {
+	f.appCalls++
+	if f.appErr != nil {
+		return applicationOwnerCandidates{}, f.appErr
+	}
+	return f.app, nil
+}
+
+func (f *fakeApplicationClient) GetCollaborators(ctx context.Context) ([]applicationCollaborator, error) {
+	f.collaboratorGetCalls++
+	if f.collaboratorsErr != nil {
+		return nil, f.collaboratorsErr
+	}
+	return f.collaborators, nil
+}
+
+func TestResolveOwnerOpenIDsSkipsConfiguredOwners(t *testing.T) {
+	applications := &fakeApplicationClient{
+		app: applicationOwnerCandidates{OwnerID: "ou_from_api"},
+	}
+	adapter := NewAdapter(config.BotConfig{
+		ID:           "bot-a",
+		OwnerOpenIDs: []string{"ou_configured"},
+	}, nil)
+	adapter.applications = applications
+
+	adapter.resolveOwnerOpenIDs(context.Background())
+
+	if applications.appCalls != 0 || applications.collaboratorGetCalls != 0 {
+		t.Fatalf("application calls = app:%d collaborators:%d, want no lookup when configured", applications.appCalls, applications.collaboratorGetCalls)
+	}
+	if got, want := adapter.cfg.OwnerOpenIDs, []string{"ou_configured"}; !slices.Equal(got, want) {
+		t.Fatalf("OwnerOpenIDs = %#v, want %#v", got, want)
+	}
+}
+
+func TestFetchOwnerOpenIDsCombinesApplicationOwnersAndCollaborators(t *testing.T) {
+	adapter := &Adapter{
+		cfg: config.BotConfig{ID: "bot-a"},
+		applications: &fakeApplicationClient{
+			app: applicationOwnerCandidates{
+				OwnerID:   " ou_owner ",
+				CreatorID: "ou_creator",
+			},
+			collaborators: []applicationCollaborator{
+				{Type: "administrator", UserID: "ou_admin"},
+				{Type: "developer", UserID: "ou_dev"},
+				{Type: "Developer", UserID: "ou_dev_upper_duplicate"},
+				{Type: "operator", UserID: "ou_operator"},
+				{Type: "owner", UserID: "ou_owner"},
+				{Type: "administrator", UserID: " "},
+			},
+		},
+	}
+
+	got, err := adapter.fetchOwnerOpenIDs(context.Background())
+	if err != nil {
+		t.Fatalf("fetchOwnerOpenIDs() error = %v", err)
+	}
+	want := []string{"ou_owner", "ou_creator", "ou_admin", "ou_dev", "ou_dev_upper_duplicate"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fetchOwnerOpenIDs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestFetchOwnerOpenIDsUsesCollaboratorsWhenApplicationLookupFails(t *testing.T) {
+	adapter := &Adapter{
+		cfg: config.BotConfig{ID: "bot-a"},
+		applications: &fakeApplicationClient{
+			appErr: errors.New("app info denied"),
+			collaborators: []applicationCollaborator{
+				{Type: "administrator", UserID: "ou_admin"},
+			},
+		},
+	}
+
+	got, err := adapter.fetchOwnerOpenIDs(context.Background())
+	if err != nil {
+		t.Fatalf("fetchOwnerOpenIDs() error = %v", err)
+	}
+	want := []string{"ou_admin"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fetchOwnerOpenIDs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveOwnerOpenIDsLeavesEmptyWhenLookupFails(t *testing.T) {
+	applications := &fakeApplicationClient{
+		appErr:           errors.New("app info denied"),
+		collaboratorsErr: errors.New("collaborators denied"),
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, nil)
+	adapter.applications = applications
+
+	adapter.resolveOwnerOpenIDs(context.Background())
+
+	if applications.appCalls != 1 || applications.collaboratorGetCalls != 1 {
+		t.Fatalf("application calls = app:%d collaborators:%d, want both lookups attempted", applications.appCalls, applications.collaboratorGetCalls)
+	}
+	if len(adapter.cfg.OwnerOpenIDs) != 0 {
+		t.Fatalf("OwnerOpenIDs = %#v, want empty after failed lookup", adapter.cfg.OwnerOpenIDs)
+	}
 }
 
 func TestAdapterSkipsDuplicateMessageID(t *testing.T) {

@@ -8,7 +8,7 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 
 - Bot 后端作为 ACP client，而不是让飞书直接连接 ACP server。
 - 第一版优先支持 `traex acp serve`，同时保留接入其他 ACP server 的配置空间。
-- 群聊默认一条飞书话题对应一个 ACP session；私聊默认整个 chat 对应一个 ACP session，除非用户发送 `/new` 重开。
+- 话题群默认一条飞书话题对应一个 ACP session；普通群和私聊默认整个 chat 对应一个 ACP session，除非用户发送 `/new` 重开。
 - 将智能体消息、计划、工具调用和权限请求逐步映射回飞书消息或交互卡片。
 - 能力声明保持保守；当前仅在 bot 配置了 workspace 时声明受限的文本文件读写能力，用于维护 workspace 记忆、知识和技能文件，终端能力暂不声明。
 
@@ -62,13 +62,16 @@ https://open.larkoffice.com/page/launcher
       "id": "default",
       "app_id": "cli_xxx",
       "app_secret": "secret",
-      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+      "workspace": "$HOME/.lark-acp-bridge/bots/default",
+      "owner_open_ids": ["ou_xxx"]
     }
   ]
 }
 ```
 
-`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
+`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
+
+自动读取 owner 需要飞书应用具备查询本应用信息和协作者的权限，例如 `application:application:self_manage` 或等价的应用管理只读权限。也可以直接在 `owner_open_ids` 中手动配置允许审批人的 open_id，配置后启动时不会再查询飞书应用协作者。
 
 第一次和 bot 对话时，如果 workspace 尚未标记为 ready，服务会创建基础知识文件：
 
@@ -93,7 +96,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
 
-普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。群聊按话题区分会话，私聊按整个 chat 复用同一会话。`/new` 只回复会话创建结果，不额外发送 prompt；下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
+普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 只回复会话创建结果，不额外发送 prompt；下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 
@@ -118,7 +121,7 @@ bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁�
 $BOT_WORKSPACE/sessions.json
 ```
 
-第一版使用 JSON 文件保存 `bot_id + chat_id + thread_id -> ACP session` 映射；私聊会话的 `thread_id` 为空，表示整个 chat 共用一个 ACP session。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`sessions.json` 还会保留同一聊天里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`。把 session 放在 workspace 下，可以让每个 bot 的记忆、会话映射和后续缓存一起迁移、备份和清理。服务进程内会为活跃飞书会话维护对应的 `traex acp serve` 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
+第一版使用 JSON 文件保存 `bot_id + chat_id + thread_id -> ACP session` 映射；话题群会话使用当前话题的 `thread_id`，普通群和私聊会话的 `thread_id` 为空，表示整个 chat 共用一个 ACP session。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`sessions.json` 还会保留同一聊天里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`。把 session 放在 workspace 下，可以让每个 bot 的记忆、会话映射和后续缓存一起迁移、备份和清理。服务进程内会为活跃飞书会话维护对应的 `traex acp serve` 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
 
 配置中的路径支持 `~` 和 `$HOME` 展开，例如：
 
@@ -185,7 +188,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/help`：查看命令。
 - `/status`：查看服务和当前会话映射。
 - `/session list`：列出当前聊天里的历史 ACP 会话，序号从 1 开始，`*` 表示当前会话。
-- `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；私聊会话 key 不变，群聊仍恢复到当前话题。
+- `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；普通群和私聊恢复到当前 chat，话题群恢复到当前话题。
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
@@ -194,7 +197,8 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/model`：打开飞书模型选择卡片，通过下拉列表设置当前会话模型。
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。
-- 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。群聊卡片会进入当前话题，私聊卡片直接发送到 chat。
+- 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
+- 权限卡片：权限选项来自 ACP agent，正文完整展示选项内容，按钮使用短编号文本避免截断。只有 bot owner 可以点击权限卡片；owner 优先来自 `bots[].owner_open_ids`，未配置时启动阶段会尝试从飞书应用所有者、创建者和管理员/开发者协作者自动解析。未解析到 owner 时，无论群聊还是私聊，权限卡片都不能被任何人批准。请求被取消时，bridge 会把卡片更新为已取消/已失效状态并移除按钮。
 
 同一会话里新消息优先级最高。用户重新发送要求、查看状态或重新 `/new` 时，bridge 会取消当前会话正在执行的上一轮 ACP prompt 或 wiki 反思任务，再处理新消息。取消是按 ACP session scope 隔离的，不会影响其他群聊、私聊或其他话题。
 

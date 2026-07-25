@@ -844,6 +844,108 @@ func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_1",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			Text:      "你好",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_2",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			Text:      "继续",
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", msg.MessageID, err)
+		}
+		if reply != "ACP 回复" {
+			t.Fatalf("reply = %q, want ACP reply", reply)
+		}
+	}
+	if len(rt.newCalls) != 1 {
+		t.Fatalf("newCalls = %+v, want ordinary group chat to reuse one session", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want two prompts", rt.promptCalls)
+	}
+	if rt.newCalls[0].Key.ThreadID != "" || rt.promptCalls[1].Session.Key.ThreadID != "" {
+		t.Fatalf("session keys = new %+v prompt %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls[1].Session.Key)
+	}
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group"}); !ok {
+		t.Fatalf("ordinary group chat session not persisted by chat id")
+	}
+}
+
+func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}, promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_topic_1",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			ThreadID:  "omt_topic_1",
+			Text:      "topic one",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_topic_2",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			ThreadID:  "omt_topic_2",
+			Text:      "topic two",
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", msg.MessageID, err)
+		}
+		if reply != "ACP 回复" {
+			t.Fatalf("reply = %q, want ACP reply", reply)
+		}
+	}
+	if len(rt.newCalls) != 2 {
+		t.Fatalf("newCalls = %+v, want one session per topic thread", rt.newCalls)
+	}
+	if rt.newCalls[0].Key.ThreadID != "omt_topic_1" || rt.newCalls[1].Key.ThreadID != "omt_topic_2" {
+		t.Fatalf("newCalls = %+v, want distinct thread keys", rt.newCalls)
+	}
+	for _, key := range []SessionKey{
+		{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_topic_1"},
+		{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_topic_2"},
+	} {
+		if _, ok := store.Get(key); !ok {
+			t.Fatalf("topic session %v not persisted", key)
+		}
+	}
+}
+
 func TestHandleFeishuSessionListAndResume(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	firstDir := t.TempDir()

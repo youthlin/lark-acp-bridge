@@ -26,10 +26,11 @@ type AgentConfig struct {
 }
 
 type BotConfig struct {
-	ID        string `json:"id"`
-	AppID     string `json:"app_id"`
-	AppSecret string `json:"app_secret"`
-	Workspace string `json:"workspace"`
+	ID           string   `json:"id"`
+	AppID        string   `json:"app_id"`
+	AppSecret    string   `json:"app_secret"`
+	Workspace    string   `json:"workspace"`
+	OwnerOpenIDs []string `json:"owner_open_ids,omitempty"`
 }
 
 func Default() Config {
@@ -250,6 +251,7 @@ func normalize(cfg *Config) error {
 		} else {
 			return fmt.Errorf("bot %q 的 workspace 不能为空", bot.ID)
 		}
+		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
 		cfg.Bots[i] = bot
 	}
 	if len(cfg.Agents) == 0 {
@@ -266,4 +268,27 @@ func normalize(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+func normalizeOpenIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

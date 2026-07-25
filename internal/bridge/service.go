@@ -2105,6 +2105,12 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 		}
 		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
 	}
+	if !msg.IsTopicThread() {
+		if msg.ChatID == "" {
+			return nil
+		}
+		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
+	}
 	seen := make(map[string]bool)
 	keys := make([]SessionKey, 0, 3)
 	add := func(id string) {
@@ -2128,6 +2134,9 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 func sessionLabel(msg feishu.Message) string {
 	if msg.IsPrivateChat() {
 		return "当前私聊会话"
+	}
+	if !msg.IsTopicThread() {
+		return "当前群聊会话"
 	}
 	return "当前话题会话"
 }

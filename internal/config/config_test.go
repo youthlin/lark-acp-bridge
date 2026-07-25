@@ -96,6 +96,49 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesBotOwnerOpenIDs(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "main",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/main",
+      "owner_open_ids": [" ou_owner ", "", "ou_owner", "ou_backup"]
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got := cfg.Bots[0].OwnerOpenIDs
+	want := []string{"ou_owner", "ou_backup"}
+	if len(got) != len(want) {
+		t.Fatalf("OwnerOpenIDs = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OwnerOpenIDs = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestLoadRejectsDuplicateBotID(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmp, "home"))

@@ -4,7 +4,8 @@
       "id": "default",
       "app_id": "",
       "app_secret": "",
-      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+      "workspace": "$HOME/.lark-acp-bridge/bots/default",
+      "owner_open_ids": []
     }
   ],
   "agents": {

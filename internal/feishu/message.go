@@ -55,6 +55,10 @@ func (m Message) IsPrivateChat() bool {
 	return strings.EqualFold(m.ChatType, "p2p")
 }
 
+func (m Message) IsTopicThread() bool {
+	return !m.IsPrivateChat() && strings.TrimSpace(m.ThreadID) != ""
+}
+
 func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return Message{}, fmt.Errorf("飞书消息事件为空")

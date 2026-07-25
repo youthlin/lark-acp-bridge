@@ -59,6 +59,37 @@ func TestParseMessageTextWithMention(t *testing.T) {
 	}
 }
 
+func TestReplyInThreadForMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{
+			name: "private chat quotes without topic mode",
+			msg:  Message{ChatType: "p2p", MessageID: "om_private"},
+			want: false,
+		},
+		{
+			name: "ordinary group quotes without topic mode",
+			msg:  Message{ChatType: "group", MessageID: "om_group"},
+			want: false,
+		},
+		{
+			name: "topic group replies in topic",
+			msg:  Message{ChatType: "group", MessageID: "om_topic", ThreadID: "omt_topic"},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replyInThreadForMessage(tt.msg); got != tt.want {
+				t.Fatalf("replyInThreadForMessage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseMessagePostWithImage(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{

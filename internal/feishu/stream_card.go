@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -107,7 +108,7 @@ func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID s
 	if err != nil {
 		return fmt.Errorf("编码飞书卡片消息内容: %w", err)
 	}
-	if msg.IsPrivateChat() {
+	if msg.IsPrivateChat() && strings.TrimSpace(msg.MessageID) == "" {
 		if msg.ChatID == "" {
 			return fmt.Errorf("飞书 chat_id 为空")
 		}
@@ -130,7 +131,7 @@ func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID s
 	if msg.MessageID == "" {
 		return fmt.Errorf("飞书 message_id 为空")
 	}
-	replyInThread := true
+	replyInThread := replyInThreadForMessage(msg)
 	resp, err := a.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(msg.MessageID).
 		Body(&larkim.ReplyMessageReqBody{
