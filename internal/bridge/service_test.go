@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1363,14 +1364,112 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
 	card := cards[0]
-	if got := card.textUpdatesSnapshot(); len(got) != 2 || got[0] != "收到。现在开始。" || got[1] != "收到。现在开始。\n工具处理完成。" {
-		t.Fatalf("textUpdates = %+v, want accumulated stream text", got)
+	if got := card.textUpdatesSnapshot(); len(got) != 3 || got[0] != "收到。现在开始。" || got[1] != "" || got[2] != "工具处理完成。" {
+		t.Fatalf("textUpdates = %+v, want pre-tool text moved away and final candidate retained", got)
 	}
-	if got := card.processUpdatesSnapshot(); len(got) != 2 || got[0] != "⏳ exec_command" || got[1] != "⏳ exec_command\nThe user wants an English paragraph." {
-		t.Fatalf("processUpdates = %+v, want normalized process updates", got)
+	if got := card.processUpdatesSnapshot(); len(got) != 3 ||
+		got[0] != "[思考中] 收到。现在开始。" ||
+		got[1] != "[思考中] 收到。现在开始。\n⏳ exec_command" ||
+		got[2] != "[思考中] 收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
+		t.Fatalf("processUpdates = %+v, want pre-tool agent text and normalized process updates", got)
 	}
 	if !card.isClosed() {
 		t.Fatalf("stream card should be closed")
+	}
+}
+
+func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "先检查。\n中间说明。\n最终结论。",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "先检查。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Read config",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "中间说明。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Run tests",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "最终结论。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	textUpdates := cards[0].textUpdatesSnapshot()
+	if len(textUpdates) == 0 || textUpdates[len(textUpdates)-1] != "最终结论。" {
+		t.Fatalf("textUpdates = %+v, want only text after last tool as final candidate", textUpdates)
+	}
+	wantTextUpdates := []string{"先检查。", "", "中间说明。", "", "最终结论。"}
+	if !reflect.DeepEqual(textUpdates, wantTextUpdates) {
+		t.Fatalf("textUpdates = %+v, want stale intermediate candidate cleared as %+v", textUpdates, wantTextUpdates)
+	}
+	processUpdates := cards[0].processUpdatesSnapshot()
+	if len(processUpdates) == 0 {
+		t.Fatalf("processUpdates = %+v, want process updates", processUpdates)
+	}
+	lastProcess := processUpdates[len(processUpdates)-1]
+	for _, want := range []string{"[思考中] 先检查。", "⏳ Read config", "[思考中] 中间说明。", "⏳ Run tests"} {
+		if !strings.Contains(lastProcess, want) {
+			t.Fatalf("last process update = %q, want %q", lastProcess, want)
+		}
+	}
+	if strings.Contains(lastProcess, "最终结论") {
+		t.Fatalf("last process update = %q, should not include final agent text", lastProcess)
 	}
 }
 
@@ -1443,7 +1542,7 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 	if len(got) == 0 || len(got) > 2 {
 		t.Fatalf("processUpdates = %+v, want debounced thought block updates", got)
 	}
-	if got[len(got)-1] != "**Restating the request**\n\nThe user said" {
+	if got[len(got)-1] != "🧠 **Restating the request**\n\nThe user said" {
 		t.Fatalf("last process update = %q, want folded thought chunk stream", got[len(got)-1])
 	}
 	if strings.Contains(got[len(got)-1], "The\nuser\nsaid") {

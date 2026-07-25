@@ -1079,10 +1079,17 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 		OnUpdate: func(update acp.PromptUpdate) {
 			// slog.InfoContext(ctx, "ACP|OnUpdate", "update", update)
 			if chunk, ok := promptUpdateChunk(update); ok {
+				if chunk.ToolBoundary {
+					chunks.markToolBoundary()
+				}
 				chunks.add(chunk)
 				return
 			}
-			flushStreams()
+			if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
+				chunks.markToolBoundary()
+			} else {
+				flushStreams()
+			}
 			stream.updatePromptUpdate(update)
 		},
 		OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
@@ -1100,7 +1107,7 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 	chunks.close()
 	streamedReply := chunks.replyText()
 	if stream.hasStarted() {
-		if finalReply := strings.TrimSpace(reply); finalReply != "" && finalReply != streamedReply {
+		if finalReply := strings.TrimSpace(reply); finalReply != "" && !chunks.hasToolBoundary() && finalReply != streamedReply {
 			stream.updateText(finalReply)
 		}
 		if err != nil {
@@ -1133,14 +1140,17 @@ func defaultPermissionOutcome(req acp.PermissionRequest) acp.PermissionOutcome {
 const (
 	promptChunkFlushRunes = 300
 
-	promptChunkTargetText    = "text"
-	promptChunkTargetProcess = "process"
+	promptChunkTargetText           = "text"
+	promptChunkTargetProcess        = "process"
+	promptChunkTargetProcessMessage = "process_message"
+	promptChunkTargetThought        = "thought"
 )
 
 type promptChunk struct {
-	Target string
-	Key    string
-	Text   string
+	Target       string
+	Key          string
+	Text         string
+	ToolBoundary bool
 }
 
 type promptChunkStream struct {
@@ -1154,6 +1164,7 @@ type promptChunkFlush struct {
 	target string
 	text   string
 	finish bool
+	clear  bool
 }
 
 type promptChunkAccumulator struct {
@@ -1161,6 +1172,9 @@ type promptChunkAccumulator struct {
 	stream          *promptCardStream
 	current         *promptChunkStream
 	reply           strings.Builder
+	finalCandidate  strings.Builder
+	hasTool         bool
+	textVisible     bool
 	timer           *time.Timer
 	timerGeneration int64
 	flushing        sync.WaitGroup
@@ -1186,6 +1200,7 @@ func (a *promptChunkAccumulator) add(chunk promptChunk) {
 	shouldFlush := strings.Contains(chunk.Text, "\n") || len([]rune(current.pending.String())) >= promptChunkFlushRunes
 	if chunk.Target == promptChunkTargetText {
 		a.reply.WriteString(chunk.Text)
+		a.finalCandidate.WriteString(chunk.Text)
 	}
 	if shouldFlush {
 		flushes = append(flushes, a.takeFlushLocked(false))
@@ -1197,6 +1212,34 @@ func (a *promptChunkAccumulator) add(chunk promptChunk) {
 	for _, flush := range flushes {
 		a.applyFlush(flush)
 	}
+}
+
+func (a *promptChunkAccumulator) markToolBoundary() {
+	var flushes []promptChunkFlush
+	a.mu.Lock()
+	flushes = append(flushes, a.takeFlushLocked(true))
+	a.stopTimerLocked()
+	processText := strings.TrimSpace(a.finalCandidate.String())
+	if processText != "" {
+		flushes = append(flushes, promptChunkFlush{target: promptChunkTargetProcessMessage, text: processText, finish: true})
+		a.finalCandidate.Reset()
+	}
+	clearText := a.textVisible && processText != ""
+	a.hasTool = true
+	if clearText {
+		flushes = append(flushes, promptChunkFlush{target: promptChunkTargetText, clear: true, finish: true})
+		a.textVisible = false
+	}
+	a.mu.Unlock()
+	for _, flush := range flushes {
+		a.applyFlush(flush)
+	}
+}
+
+func (a *promptChunkAccumulator) hasToolBoundary() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hasTool
 }
 
 func (a *promptChunkAccumulator) flush() {
@@ -1233,7 +1276,7 @@ func (a *promptChunkAccumulator) takeFlushLocked(finish bool) promptChunkFlush {
 	hasPending := current.pending.Len() > 0
 	text := strings.TrimSpace(current.full.String())
 	if current.target == promptChunkTargetText {
-		text = strings.TrimSpace(a.reply.String())
+		text = strings.TrimSpace(a.finalCandidate.String())
 	}
 	if finish {
 		a.current = nil
@@ -1242,6 +1285,9 @@ func (a *promptChunkAccumulator) takeFlushLocked(finish bool) promptChunkFlush {
 	}
 	if !hasPending {
 		return promptChunkFlush{target: current.target, finish: finish}
+	}
+	if current.target == promptChunkTargetText && text != "" {
+		a.textVisible = true
 	}
 	return promptChunkFlush{target: current.target, text: text, finish: finish}
 }
@@ -1252,8 +1298,21 @@ func (a *promptChunkAccumulator) applyFlush(flush promptChunkFlush) {
 	}
 	switch flush.target {
 	case promptChunkTargetText:
-		if flush.text != "" {
+		if flush.clear {
+			a.stream.updateText("")
+		} else if flush.text != "" {
 			a.stream.updateText(flush.text)
+		}
+	case promptChunkTargetProcessMessage:
+		if flush.text != "" {
+			a.stream.updateProcessMessage(flush.text)
+		}
+	case promptChunkTargetThought:
+		if flush.text != "" {
+			a.stream.updateThoughtStream(flush.text)
+		}
+		if flush.finish {
+			a.stream.finishProcessStream()
 		}
 	case promptChunkTargetProcess:
 		if flush.text != "" {
@@ -1339,9 +1398,6 @@ func (s *promptCardStream) hasStarted() bool {
 
 func (s *promptCardStream) updateText(text string) {
 	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
 	card := s.ensureCard()
 	if card == nil {
 		return
@@ -1353,6 +1409,22 @@ func (s *promptCardStream) updateText(text string) {
 	if err := card.UpdateText(s.ctx, fullText); err != nil {
 		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片文本失败", "session", s.session.ACPSessionID, "错误", err)
 	}
+}
+
+func (s *promptCardStream) updateProcessMessage(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.updateProcess("[思考中] " + text)
+}
+
+func (s *promptCardStream) updateThoughtStream(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.updateProcessStream("🧠 " + text)
 }
 
 func (s *promptCardStream) updateProcess(text string) {
@@ -1712,7 +1784,7 @@ func formatPromptUpdate(update acp.PromptUpdate) string {
 	case "agent_message", "assistant_message", "message":
 		return truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes)
 	case "plan", "thought", "reasoning":
-		return truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes)
+		return formatThoughtProcessText(truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes))
 	case "status", "progress":
 		text := firstNonEmpty(u.Message, u.Status, contentText(u.Content), rawText(u.Raw))
 		return truncateRunes(text, maxPromptUpdateRunes)
@@ -1724,6 +1796,14 @@ func formatPromptUpdate(update acp.PromptUpdate) string {
 	}
 }
 
+func formatThoughtProcessText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return "🧠 " + text
+}
+
 func isToolPromptUpdateKind(kind string) bool {
 	switch kind {
 	case "function_call", "tool_call", "custom_tool_call",
@@ -1733,6 +1813,15 @@ func isToolPromptUpdateKind(kind string) bool {
 		return true
 	default:
 		return (strings.Contains(kind, "tool") || strings.Contains(kind, "function")) && !isPromptChunkKind(kind)
+	}
+}
+
+func isToolBoundaryUpdateKind(kind string) bool {
+	switch kind {
+	case "function_call", "tool_call", "custom_tool_call":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1796,6 +1885,8 @@ func promptUpdateChunk(update acp.PromptUpdate) (promptChunk, bool) {
 	if kind == "agent_message_chunk" {
 		target = promptChunkTargetText
 		key = "agent_message"
+	} else if isThoughtUpdateKind(kind) {
+		target = promptChunkTargetThought
 	} else if streamName := promptChunkStreamName(kind); streamName != "" {
 		key = streamName
 	}
@@ -1809,6 +1900,16 @@ func promptUpdateKind(update acp.PromptUpdate) string {
 
 func isPromptChunkKind(kind string) bool {
 	return kind == "agent_message_chunk" || strings.HasSuffix(kind, "_chunk")
+}
+
+func isThoughtUpdateKind(kind string) bool {
+	switch kind {
+	case "agent_thought_chunk", "thought_chunk", "reasoning_chunk", "plan_chunk",
+		"thought", "reasoning", "plan":
+		return true
+	default:
+		return strings.Contains(kind, "thought") || strings.Contains(kind, "reasoning")
+	}
 }
 
 func promptChunkStreamName(kind string) string {

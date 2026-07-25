@@ -51,7 +51,7 @@ func newStreamCardProcessPanelJSON() string {
 			"element_id":       streamCardProcessPanelID,
 			"background_color": "grey",
 			"header": cardJSON{
-				"title": cardJSON{"tag": "plain_text", "content": "思考与工具调用"},
+				"title": cardJSON{"tag": "plain_text", "content": "执行过程"},
 			},
 			"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
 			"vertical_spacing": "4px",

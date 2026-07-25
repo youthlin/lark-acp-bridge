@@ -39,6 +39,12 @@ func TestNewStreamCardProcessPanelJSONContainsProcessElements(t *testing.T) {
 	if !jsonContainsValue(elements, streamCardProcessElementID) {
 		t.Fatalf("process panel JSON does not contain process element %q", streamCardProcessElementID)
 	}
+	if !jsonContainsValue(elements, "执行过程") {
+		t.Fatalf("process panel JSON does not contain execution process title")
+	}
+	if jsonContainsValue(elements, "思考与工具调用") {
+		t.Fatalf("process panel JSON should not use old title")
+	}
 }
 
 func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
