@@ -25,6 +25,10 @@ type permissionRequester func(context.Context, Message, acp.PermissionRequest) (
 
 type permissionRequesterKey struct{}
 
+type processingReactionStarter func(context.Context, Message) func()
+
+type processingReactionStarterKey struct{}
+
 type ModelOption struct {
 	Value string
 	Name  string
@@ -108,6 +112,25 @@ func RequestPermission(ctx context.Context, msg Message, req acp.PermissionReque
 	}
 	outcome, err := requester(ctx, msg, req)
 	return outcome, true, err
+}
+
+func WithProcessingReactionStarter(ctx context.Context, starter func(context.Context, Message) func()) context.Context {
+	if starter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, processingReactionStarterKey{}, processingReactionStarter(starter))
+}
+
+func StartProcessingReaction(ctx context.Context, msg Message) (func(), bool) {
+	starter, ok := ctx.Value(processingReactionStarterKey{}).(processingReactionStarter)
+	if !ok || starter == nil {
+		return nil, false
+	}
+	cleanup := starter(ctx, msg)
+	if cleanup == nil {
+		cleanup = func() {}
+	}
+	return cleanup, true
 }
 
 func WithModelSelectionCardSender(ctx context.Context, sender func(context.Context, Message, ModelSelectionCard) error) context.Context {

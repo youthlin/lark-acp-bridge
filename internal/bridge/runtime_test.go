@@ -79,6 +79,55 @@ func TestPromptActivityTimeoutTouchExtendsIdlePeriod(t *testing.T) {
 	}
 }
 
+func TestPromptActivityTimeoutPauseIdleKeepsPermissionWaitAlive(t *testing.T) {
+	timeout := newPromptActivityTimeout(context.Background(), 30*time.Millisecond, time.Second)
+	defer timeout.Stop()
+
+	timeout.PauseIdle()
+	time.Sleep(70 * time.Millisecond)
+
+	select {
+	case <-timeout.Context().Done():
+		t.Fatalf("prompt activity timeout expired while idle timer was paused: %v", context.Cause(timeout.Context()))
+	default:
+	}
+
+	timeout.ResumeIdle()
+	select {
+	case <-timeout.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("prompt activity timeout did not expire after idle timer resumed")
+	}
+
+	cause := context.Cause(timeout.Context())
+	if !errors.Is(cause, context.DeadlineExceeded) {
+		t.Fatalf("cause = %v, want context.DeadlineExceeded", cause)
+	}
+	if !strings.Contains(cause.Error(), "未收到活动更新") {
+		t.Fatalf("cause = %v, want idle timeout detail", cause)
+	}
+}
+
+func TestPromptActivityTimeoutPauseIdleKeepsAbsoluteLimit(t *testing.T) {
+	timeout := newPromptActivityTimeout(context.Background(), time.Second, 50*time.Millisecond)
+	defer timeout.Stop()
+
+	timeout.PauseIdle()
+	select {
+	case <-timeout.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("prompt activity timeout did not reach absolute limit while idle timer was paused")
+	}
+
+	cause := context.Cause(timeout.Context())
+	if !errors.Is(cause, context.DeadlineExceeded) {
+		t.Fatalf("cause = %v, want context.DeadlineExceeded", cause)
+	}
+	if !strings.Contains(cause.Error(), "绝对上限") {
+		t.Fatalf("cause = %v, want absolute timeout detail", cause)
+	}
+}
+
 func TestPromptActivityTimeoutKeepsAbsoluteLimit(t *testing.T) {
 	timeout := newPromptActivityTimeout(context.Background(), 80*time.Millisecond, 120*time.Millisecond)
 	defer timeout.Stop()

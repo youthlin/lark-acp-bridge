@@ -279,6 +279,7 @@ func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest,
 		"config": cardJSON{
 			"wide_screen_mode": true,
 			"width_mode":       "fill",
+			"update_multi":     true,
 			"summary":          cardJSON{"content": "ACP 权限请求"},
 		},
 		"header": cardJSON{
@@ -291,21 +292,18 @@ func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest,
 }
 
 func permissionCardElements(requestID string, req acp.PermissionRequest, state permissionCardRenderState) []any {
-	tool := req.ToolCallState
 	title := permissionToolDisplayName(req)
 	lines := []string{"**工具调用**：" + markdownInline(title)}
 	if req.ToolCall.ToolCallID != "" {
 		lines = append(lines, "**Tool Call ID**：`"+markdownInline(req.ToolCall.ToolCallID)+"`")
 	}
-	if tool != nil {
-		if strings.TrimSpace(tool.Kind) != "" {
-			lines = append(lines, "**类型**：`"+markdownInline(tool.Kind)+"`")
-		}
-		if strings.TrimSpace(tool.Status) != "" {
-			lines = append(lines, "**状态**：`"+markdownInline(tool.Status)+"`")
-		}
-		lines = appendJSONDetail(lines, "位置", tool.Locations)
+	if kind := permissionToolKind(req); kind != "" {
+		lines = append(lines, "**类型**：`"+markdownInline(kind)+"`")
 	}
+	if status := permissionToolStatus(req); status != "" {
+		lines = append(lines, "**状态**：`"+markdownInline(status)+"`")
+	}
+	lines = appendJSONDetail(lines, "位置", permissionToolLocations(req))
 	elements := []any{
 		cardJSON{"tag": "markdown", "content": strings.Join(lines, "\n")},
 	}
@@ -413,16 +411,53 @@ func permissionRequestID(req acp.PermissionRequest) string {
 func permissionToolDisplayName(req acp.PermissionRequest) string {
 	tool := req.ToolCallState
 	if tool != nil {
-		for _, value := range []string{tool.Title, tool.Kind} {
+		for _, value := range []string{tool.Title, req.ToolCall.Title, tool.Kind, req.ToolCall.Kind} {
 			if value = strings.TrimSpace(value); value != "" {
 				return value
 			}
+		}
+	} else if value := strings.TrimSpace(req.ToolCall.Title); value != "" {
+		return value
+	}
+	for _, value := range []string{req.ToolCall.Kind} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
 		}
 	}
 	if toolCallID := strings.TrimSpace(req.ToolCall.ToolCallID); toolCallID != "" {
 		return "工具调用 " + toolCallID
 	}
 	return "未命名工具调用"
+}
+
+func permissionToolKind(req acp.PermissionRequest) string {
+	if req.ToolCallState != nil {
+		if value := strings.TrimSpace(req.ToolCallState.Kind); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(req.ToolCall.Kind)
+}
+
+func permissionToolStatus(req acp.PermissionRequest) string {
+	if req.ToolCallState != nil {
+		if value := strings.TrimSpace(req.ToolCallState.Status); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(req.ToolCall.Status)
+}
+
+func permissionToolLocations(req acp.PermissionRequest) json.RawMessage {
+	if req.ToolCallState != nil && jsonDetailPresent(req.ToolCallState.Locations) {
+		return req.ToolCallState.Locations
+	}
+	return req.ToolCall.Locations
+}
+
+func jsonDetailPresent(raw json.RawMessage) bool {
+	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 func appendJSONDetail(lines []string, label string, raw json.RawMessage) []string {

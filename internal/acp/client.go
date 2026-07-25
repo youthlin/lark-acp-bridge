@@ -137,7 +137,13 @@ type PermissionRequest struct {
 }
 
 type PermissionToolCallRef struct {
-	ToolCallID string `json:"toolCallId"`
+	ToolCallID string          `json:"toolCallId"`
+	Title      string          `json:"title,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Status     string          `json:"status,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	Locations  json.RawMessage `json:"locations,omitempty"`
+	RawInput   json.RawMessage `json:"rawInput,omitempty"`
 }
 
 type PermissionOption struct {

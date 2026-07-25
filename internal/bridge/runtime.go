@@ -86,9 +86,9 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 	onPermissionRequest := opts.OnPermissionRequest
 	if onPermissionRequest != nil {
 		opts.OnPermissionRequest = func(ctx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
-			timeout.Touch()
+			timeout.PauseIdle()
+			defer timeout.ResumeIdle()
 			outcome, err := onPermissionRequest(ctx, req)
-			timeout.Touch()
 			return outcome, err
 		}
 	}
@@ -105,14 +105,15 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 }
 
 type promptActivityTimeout struct {
-	ctx       context.Context
-	cancel    context.CancelCauseFunc
-	mu        sync.Mutex
-	idle      time.Duration
-	deadline  time.Time
-	idleTimer *time.Timer
-	maxTimer  *time.Timer
-	stopped   bool
+	ctx        context.Context
+	cancel     context.CancelCauseFunc
+	mu         sync.Mutex
+	idle       time.Duration
+	deadline   time.Time
+	idleTimer  *time.Timer
+	maxTimer   *time.Timer
+	idlePaused bool
+	stopped    bool
 }
 
 func newPromptActivityTimeout(parent context.Context, idleTimeout, maxDuration time.Duration) *promptActivityTimeout {
@@ -143,6 +144,30 @@ func (t *promptActivityTimeout) Touch() {
 		return
 	}
 	t.deadline = time.Now().Add(t.idle)
+	if t.idlePaused {
+		return
+	}
+	t.idleTimer.Reset(t.idle)
+}
+
+func (t *promptActivityTimeout) PauseIdle() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped || t.idlePaused {
+		return
+	}
+	t.idlePaused = true
+	t.idleTimer.Stop()
+}
+
+func (t *promptActivityTimeout) ResumeIdle() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped || !t.idlePaused {
+		return
+	}
+	t.idlePaused = false
+	t.deadline = time.Now().Add(t.idle)
 	t.idleTimer.Reset(t.idle)
 }
 
@@ -162,6 +187,9 @@ func (t *promptActivityTimeout) handleIdleTimeout() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.stopped {
+		return
+	}
+	if t.idlePaused {
 		return
 	}
 	if remaining := time.Until(t.deadline); remaining > 0 {

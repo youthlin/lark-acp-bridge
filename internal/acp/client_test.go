@@ -438,7 +438,7 @@ func TestClientPermissionRequestUsesHandlerAndToolCallState(t *testing.T) {
 			},
 		},
 	})
-	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}`)
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"call-1","title":"Run tests from request","kind":"execute","status":"pending"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}`)
 
 	resp := server.readRequest(t)
 	if resp.Error != nil {
@@ -458,6 +458,9 @@ func TestClientPermissionRequestUsesHandlerAndToolCallState(t *testing.T) {
 		}
 		if req.ToolCall.ToolCallID != "call-1" {
 			t.Fatalf("toolCallID = %q, want call-1", req.ToolCall.ToolCallID)
+		}
+		if req.ToolCall.Title != "Run tests from request" || req.ToolCall.Kind != "execute" || req.ToolCall.Status != "pending" {
+			t.Fatalf("toolCall = %+v, want request tool title/kind/status", req.ToolCall)
 		}
 		if req.ToolCallState == nil || req.ToolCallState.Title != "Run tests" || req.ToolCallState.Kind != "execute" {
 			t.Fatalf("toolCallState = %+v, want Run tests execute", req.ToolCallState)

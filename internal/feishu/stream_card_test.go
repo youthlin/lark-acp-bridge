@@ -10,7 +10,7 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
-func TestNewStreamCardJSONStartsWithoutProcessPanel(t *testing.T) {
+func TestNewStreamCardJSONStartsWithProcessPanel(t *testing.T) {
 	var card any
 	if err := json.Unmarshal([]byte(newStreamCardJSON()), &card); err != nil {
 		t.Fatalf("newStreamCardJSON() is not valid JSON: %v", err)
@@ -19,11 +19,14 @@ func TestNewStreamCardJSONStartsWithoutProcessPanel(t *testing.T) {
 	if !jsonContainsValue(card, streamCardTextElementID) {
 		t.Fatalf("initial stream card does not contain text element %q", streamCardTextElementID)
 	}
-	if jsonContainsValue(card, streamCardProcessPanelID) {
-		t.Fatalf("initial stream card contains process panel %q", streamCardProcessPanelID)
+	if !jsonContainsValue(card, streamCardProcessPanelID) {
+		t.Fatalf("initial stream card does not contain process panel %q", streamCardProcessPanelID)
 	}
-	if jsonContainsValue(card, streamCardProcessElementID) {
-		t.Fatalf("initial stream card contains process element %q", streamCardProcessElementID)
+	if !jsonContainsValue(card, streamCardProcessElementID) {
+		t.Fatalf("initial stream card does not contain process element %q", streamCardProcessElementID)
+	}
+	if !jsonContainsValue(card, "执行过程") {
+		t.Fatalf("initial stream card does not contain execution process title")
 	}
 }
 
@@ -77,6 +80,9 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 			t.Fatalf("permission card does not contain %q: %#v", want, card)
 		}
 	}
+	if !jsonContainsBool(card, "update_multi", true) {
+		t.Fatalf("permission card should enable update_multi: %#v", card)
+	}
 	for _, unwanted := range []string{"go test ./...", "type\":\"diff"} {
 		if jsonContainsSubstring(card, unwanted) {
 			t.Fatalf("permission card contains verbose field %q: %#v", unwanted, card)
@@ -90,6 +96,67 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 	}
 	if !jsonContainsTaggedElement(card, "column_set") || !jsonContainsKey(card, "behaviors") || !jsonContainsValue(card, "callback") {
 		t.Fatalf("permission card does not contain Card 2.0 callback button structure: %#v", card)
+	}
+}
+
+func TestNewPermissionCardJSONUsesToolCallTitleWithoutSnapshot(t *testing.T) {
+	req := acp.PermissionRequest{
+		RequestID: "perm-1",
+		SessionID: "session-1",
+		ToolCall: acp.PermissionToolCallRef{
+			ToolCallID: "call-1",
+			Title:      "git status --short",
+			Kind:       "execute",
+			Status:     "pending",
+			Locations:  json.RawMessage(`[{"path":"internal/bridge/runtime.go"}]`),
+		},
+		Options: []acp.PermissionOption{
+			{OptionID: "allow-once", Kind: "allow_once"},
+		},
+	}
+	var card any
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"git status --short", "execute", "pending", "internal/bridge/runtime.go"} {
+		if !jsonContainsSubstring(card, want) {
+			t.Fatalf("permission card does not contain %q: %#v", want, card)
+		}
+	}
+	if jsonContainsSubstring(card, "工具调用 call-1") {
+		t.Fatalf("permission card should prefer tool title over id fallback: %#v", card)
+	}
+}
+
+func TestNewPermissionCardJSONMergesPartialSnapshotWithRequestToolCall(t *testing.T) {
+	req := acp.PermissionRequest{
+		RequestID: "perm-1",
+		SessionID: "session-1",
+		ToolCall: acp.PermissionToolCallRef{
+			ToolCallID: "call-1",
+			Title:      "git status --short",
+			Kind:       "execute",
+			Status:     "pending",
+			Locations:  json.RawMessage(`[{"path":"internal/feishu/permission_card.go"}]`),
+		},
+		Options: []acp.PermissionOption{
+			{OptionID: "allow-once", Kind: "allow_once"},
+		},
+		ToolCallState: &acp.ToolCallInfo{
+			ToolCallID: "call-1",
+			Kind:       "execute",
+		},
+	}
+	var card any
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"git status --short", "execute", "pending", "internal/feishu/permission_card.go"} {
+		if !jsonContainsSubstring(card, want) {
+			t.Fatalf("permission card does not contain %q: %#v", want, card)
+		}
 	}
 }
 
@@ -791,6 +858,36 @@ func jsonContainsKey(v any, key string) bool {
 	case []any:
 		for _, child := range value {
 			if jsonContainsKey(child, key) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jsonContainsBool(v any, key string, want bool) bool {
+	switch value := v.(type) {
+	case cardJSON:
+		if got, ok := value[key].(bool); ok && got == want {
+			return true
+		}
+		for _, child := range value {
+			if jsonContainsBool(child, key, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		if got, ok := value[key].(bool); ok && got == want {
+			return true
+		}
+		for _, child := range value {
+			if jsonContainsBool(child, key, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if jsonContainsBool(child, key, want) {
 				return true
 			}
 		}

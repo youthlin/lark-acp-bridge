@@ -37,6 +37,16 @@ func (h replyingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (
 	return h.reply, nil
 }
 
+type reactionStartingHandler struct{}
+
+func (h reactionStartingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (string, error) {
+	cleanup, _ := StartProcessingReaction(ctx, msg)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	return "", nil
+}
+
 type fakeReactionClient struct {
 	added   []string
 	deleted []fakeReactionDelete
@@ -262,7 +272,7 @@ func TestAdapterSkipsDuplicateMessageID(t *testing.T) {
 
 func TestAdapterAddsAndDeletesProcessingReaction(t *testing.T) {
 	reactions := &fakeReactionClient{}
-	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, replyingHandler{})
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, reactionStartingHandler{})
 	adapter.reaction = reactions
 	event := textEvent("om_1", "oc_1", "hello")
 
@@ -294,7 +304,7 @@ func TestRandomProcessingReactionEmojiUsesConfiguredSet(t *testing.T) {
 
 func TestAdapterSkipsProcessingReactionForDuplicateMessage(t *testing.T) {
 	reactions := &fakeReactionClient{}
-	handler := &countingHandler{}
+	handler := reactionStartingHandler{}
 	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
 	adapter.reaction = reactions
 	event := textEvent("om_dup", "oc_1", "hello")
@@ -304,9 +314,6 @@ func TestAdapterSkipsProcessingReactionForDuplicateMessage(t *testing.T) {
 	}
 	if err := adapter.handleMessage(context.Background(), event); err != nil {
 		t.Fatalf("handleMessage(second) error = %v", err)
-	}
-	if handler.count != 1 {
-		t.Fatalf("handler count = %d, want 1", handler.count)
 	}
 	if len(reactions.added) != 1 || len(reactions.deleted) != 1 {
 		t.Fatalf("reaction lifecycle = added %+v deleted %+v, want only first message", reactions.added, reactions.deleted)

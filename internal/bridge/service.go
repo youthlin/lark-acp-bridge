@@ -157,6 +157,9 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
 		return "", nil
 	}
+	if cleanup, ok := feishu.StartProcessingReaction(ctx, msg); ok {
+		defer cleanup()
+	}
 
 	_, err := ensureWorkspace(msg.Workspace, msg.BotID)
 	if err != nil {
@@ -1527,9 +1530,9 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				stream.updateProcess("已取消")
+				stream.updateProcessMessage("已取消")
 			} else {
-				stream.updateProcess("执行失败：" + err.Error())
+				stream.updateProcessMessage("执行失败：" + err.Error())
 			}
 		}
 		stream.close()
@@ -1831,7 +1834,7 @@ func (s *promptCardStream) updateProcessMessage(text string) {
 	if text == "" {
 		return
 	}
-	s.updateProcess(text)
+	s.updateProcess(formatProcessMessageText(text))
 }
 
 func (s *promptCardStream) updateThoughtStream(text string) {
@@ -1839,7 +1842,7 @@ func (s *promptCardStream) updateThoughtStream(text string) {
 	if text == "" {
 		return
 	}
-	s.updateProcessStream("🧠 " + text)
+	s.updateProcessStreamText("🧠 "+text, false)
 }
 
 func (s *promptCardStream) updateProcess(text string) {
@@ -1980,9 +1983,16 @@ func (s *promptCardStream) findToolRowLocked(title string) int {
 }
 
 func (s *promptCardStream) updateProcessStream(text string) {
+	s.updateProcessStreamText(text, true)
+}
+
+func (s *promptCardStream) updateProcessStreamText(text string, prefixProcessMessage bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
+	}
+	if prefixProcessMessage {
+		text = formatProcessMessageText(text)
 	}
 	card := s.ensureCard()
 	if card == nil {
@@ -2197,18 +2207,26 @@ func formatPromptUpdate(update acp.PromptUpdate) string {
 	case "agent_message_chunk":
 		return ""
 	case "agent_message", "assistant_message", "message":
-		return truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes)
+		return formatProcessMessageText(truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes))
 	case "plan", "thought", "reasoning":
 		return formatThoughtProcessText(truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes))
 	case "status", "progress":
 		text := firstNonEmpty(u.Message, u.Status, contentText(u.Content), rawText(u.Raw))
-		return truncateRunes(text, maxPromptUpdateRunes)
+		return formatProcessMessageText(truncateRunes(text, maxPromptUpdateRunes))
 	default:
 		if text := firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)); text != "" {
-			return truncateRunes(text, maxPromptUpdateRunes)
+			return formatProcessMessageText(truncateRunes(text, maxPromptUpdateRunes))
 		}
 		return ""
 	}
+}
+
+func formatProcessMessageText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return "💬 " + text
 }
 
 func formatThoughtProcessText(text string) string {

@@ -642,6 +642,16 @@ func (a *Adapter) addProcessingReaction(ctx context.Context, msg Message) string
 	return reactionID
 }
 
+func (a *Adapter) StartProcessingReaction(ctx context.Context, msg Message) func() {
+	reactionID := a.addProcessingReaction(ctx, msg)
+	if strings.TrimSpace(reactionID) == "" {
+		return func() {}
+	}
+	return func() {
+		a.deleteProcessingReaction(ctx, msg, reactionID)
+	}
+}
+
 func (a *Adapter) deleteProcessingReaction(ctx context.Context, msg Message, reactionID string) {
 	if a.reaction == nil || strings.TrimSpace(reactionID) == "" {
 		return

@@ -1190,6 +1190,60 @@ func TestHandleFeishuGroupChatRequiresMentionByDefault(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuGroupChatStartsReactionOnlyWhenMessageIsProcessed(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var started, cleaned int
+	ctx := feishu.WithProcessingReactionStarter(context.Background(), func(context.Context, feishu.Message) func() {
+		started++
+		return func() {
+			cleaned++
+		}
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_ignored",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "没有 at",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore", reply)
+	}
+	if started != 0 || cleaned != 0 {
+		t.Fatalf("reaction lifecycle = started %d cleaned %d, want none for ignored message", started, cleaned)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_processed",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "@智能助手 你好",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if started != 1 || cleaned != 1 {
+		t.Fatalf("reaction lifecycle = started %d cleaned %d, want one processed message", started, cleaned)
+	}
+}
+
 func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
 	msg := feishu.Message{
 		BotOpenID: testBotOpenID,
@@ -1999,9 +2053,9 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		t.Fatalf("textUpdates = %+v, want pre-tool text moved away and final candidate retained", got)
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 3 ||
-		got[0] != "收到。现在开始。" ||
-		got[1] != "收到。现在开始。\n⏳ exec_command" ||
-		got[2] != "收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
+		got[0] != "💬 收到。现在开始。" ||
+		got[1] != "💬 收到。现在开始。\n⏳ exec_command" ||
+		got[2] != "💬 收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
 		t.Fatalf("processUpdates = %+v, want pre-tool agent text and normalized process updates", got)
 	}
 	if !card.isClosed() {
@@ -2094,7 +2148,7 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 		t.Fatalf("processUpdates = %+v, want process updates", processUpdates)
 	}
 	lastProcess := processUpdates[len(processUpdates)-1]
-	for _, want := range []string{"先检查。", "⏳ Read config", "中间说明。", "⏳ Run tests"} {
+	for _, want := range []string{"💬 先检查。", "⏳ Read config", "💬 中间说明。", "⏳ Run tests"} {
 		if !strings.Contains(lastProcess, want) {
 			t.Fatalf("last process update = %q, want %q", lastProcess, want)
 		}
@@ -2250,7 +2304,7 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	if len(got) != 1 {
 		t.Fatalf("processUpdates = %+v, want generic chunk stream to update one process block", got)
 	}
-	if got[0] != "line one line two" {
+	if got[0] != "💬 line one line two" {
 		t.Fatalf("process update = %q, want accumulated generic chunk stream", got[0])
 	}
 }
@@ -2323,6 +2377,55 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	}
 	if got[1] != "✅ Read AGENTS.md" {
 		t.Fatalf("second process update = %q, want completed status replacing tool row", got[1])
+	}
+}
+
+func TestFormatPromptUpdatePrefixesProcessMessageOnly(t *testing.T) {
+	tests := []struct {
+		name   string
+		update acp.PromptUpdate
+		want   string
+	}{
+		{
+			name: "process message",
+			update: acp.PromptUpdate{Update: acp.SessionUpdate{
+				SessionUpdate: "status",
+				Message:       "准备处理",
+			}},
+			want: "💬 准备处理",
+		},
+		{
+			name: "agent message",
+			update: acp.PromptUpdate{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message",
+				Message:       "先说明一下",
+			}},
+			want: "💬 先说明一下",
+		},
+		{
+			name: "thought message",
+			update: acp.PromptUpdate{Update: acp.SessionUpdate{
+				SessionUpdate: "reasoning",
+				Message:       "分析用户需求",
+			}},
+			want: "🧠 分析用户需求",
+		},
+		{
+			name: "agent chunk stays final text candidate",
+			update: acp.PromptUpdate{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "正文"},
+			}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatPromptUpdate(tt.update); got != tt.want {
+				t.Fatalf("formatPromptUpdate() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
