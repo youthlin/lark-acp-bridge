@@ -27,10 +27,15 @@ func (k ChatKey) Valid() bool {
 }
 
 type ChatConfig struct {
-	Key             ChatKey   `json:"key"`
-	MentionOptional bool      `json:"mention_optional,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	Key              ChatKey   `json:"key"`
+	MentionOptional  bool      `json:"mention_optional,omitempty"`
+	HideStepMessages bool      `json:"hide_step_messages,omitempty"`
+	HideThoughts     bool      `json:"hide_thoughts,omitempty"`
+	HideTools        bool      `json:"hide_tools,omitempty"`
+	HideStatusBar    bool      `json:"hide_status_bar,omitempty"`
+	HideUsageDetail  bool      `json:"hide_usage_detail,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type Session struct {

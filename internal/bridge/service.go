@@ -419,13 +419,10 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
-	session, ok := s.findSession(msg)
-	if !ok {
-		return "当前会话还没有 ACP session，发送普通文本或 /new 后再设置展示项。"
-	}
+	chat := s.showConfigForMessage(msg)
 	fields := strings.Fields(text)
 	if len(fields) == 1 || len(fields) == 2 && fields[1] == "status" {
-		return formatShowStatus(session)
+		return formatShowStatus(chat)
 	}
 	if len(fields) != 3 {
 		return "请使用 /show step|thought|tool|status|used on|off。"
@@ -434,11 +431,11 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	if !ok {
 		return "请使用 on 或 off，例如 /show thought off。"
 	}
-	target, ok := setSessionShowOption(&session, fields[1], value)
+	target, ok := setChatShowOption(&chat, fields[1], value)
 	if !ok {
 		return "请使用 /show step|thought|tool|status|used on|off。"
 	}
-	if err := store.Upsert(session); err != nil {
+	if err := store.UpsertChat(chat); err != nil {
 		slog.ErrorContext(ctx, "保存展示配置失败", "错误", err)
 		return "保存展示配置失败：" + err.Error()
 	}
@@ -446,7 +443,7 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	if !value {
 		state = "关闭"
 	}
-	return fmt.Sprintf("已%s%s。\n%s", state, target, formatShowStatus(session))
+	return fmt.Sprintf("已%s%s。\n%s", state, target, formatShowStatus(chat))
 }
 
 func parseShowSwitch(value string) (bool, bool) {
@@ -460,39 +457,92 @@ func parseShowSwitch(value string) (bool, bool) {
 	}
 }
 
-func setSessionShowOption(session *Session, target string, visible bool) (string, bool) {
-	if session == nil {
+func setChatShowOption(chat *ChatConfig, target string, visible bool) (string, bool) {
+	if chat == nil {
 		return "", false
 	}
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "step":
-		session.HideStepMessages = !visible
+		chat.HideStepMessages = !visible
 		return "过程消息展示", true
 	case "thought":
-		session.HideThoughts = !visible
+		chat.HideThoughts = !visible
 		return "思考消息展示", true
 	case "tool":
-		session.HideTools = !visible
+		chat.HideTools = !visible
 		return "工具调用展示", true
 	case "status":
-		session.HideStatusBar = !visible
+		chat.HideStatusBar = !visible
 		return "状态栏展示", true
 	case "used":
-		session.HideUsageDetail = !visible
+		chat.HideUsageDetail = !visible
 		return "用量明细展示", true
 	default:
 		return "", false
 	}
 }
 
-func formatShowStatus(session Session) string {
+func (s *Service) showConfigForMessage(msg feishu.Message) ChatConfig {
+	chat := ChatConfig{Key: chatKeyFromMessage(msg)}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return chat
+	}
+	if existing, ok := store.GetChat(chat.Key); ok {
+		return existing
+	}
+	if session, ok := s.findSession(msg); ok {
+		chat.HideStepMessages = session.HideStepMessages
+		chat.HideThoughts = session.HideThoughts
+		chat.HideTools = session.HideTools
+		chat.HideStatusBar = session.HideStatusBar
+		chat.HideUsageDetail = session.HideUsageDetail
+	}
+	return chat
+}
+
+func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu.Message) {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return
+	}
+	chatKey := chatKeyFromMessage(msg)
+	if _, ok := store.GetChat(chatKey); ok {
+		return
+	}
+	session, ok := s.findSession(msg)
+	if !ok || !sessionHasShowConfig(session) {
+		return
+	}
+	chat := ChatConfig{
+		Key:              chatKey,
+		HideStepMessages: session.HideStepMessages,
+		HideThoughts:     session.HideThoughts,
+		HideTools:        session.HideTools,
+		HideStatusBar:    session.HideStatusBar,
+		HideUsageDetail:  session.HideUsageDetail,
+	}
+	if err := store.UpsertChat(chat); err != nil {
+		slog.ErrorContext(ctx, "迁移会话展示配置到 chat 配置失败", "chat", msg.ChatID, "错误", err)
+	}
+}
+
+func sessionHasShowConfig(session Session) bool {
+	return session.HideStepMessages ||
+		session.HideThoughts ||
+		session.HideTools ||
+		session.HideStatusBar ||
+		session.HideUsageDetail
+}
+
+func formatShowStatus(chat ChatConfig) string {
 	return strings.Join([]string{
 		"当前会话流式卡片展示：",
-		"过程消息：" + showState(!session.HideStepMessages),
-		"思考消息：" + showState(!session.HideThoughts),
-		"工具调用：" + showState(!session.HideTools),
-		"状态栏：" + showState(!session.HideStatusBar),
-		"用量明细：" + showState(!session.HideUsageDetail),
+		"过程消息：" + showState(!chat.HideStepMessages),
+		"思考消息：" + showState(!chat.HideThoughts),
+		"工具调用：" + showState(!chat.HideTools),
+		"状态栏：" + showState(!chat.HideStatusBar),
+		"用量明细：" + showState(!chat.HideUsageDetail),
 	}, "\n")
 }
 
@@ -1400,6 +1450,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
 	}
 	key := sessionKeyFromMessage(msg)
+	s.migrateSessionShowConfigToChat(ctx, msg)
 	s.cancelSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
 	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
@@ -1764,7 +1815,7 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
 	slog.InfoContext(ctx, "准备发送消息给ACP后端")
-	stream := newPromptCardStream(ctx, msg, session)
+	stream := newPromptCardStream(ctx, msg, session, s.showConfigForMessage(msg))
 	chunks := newPromptChunkAccumulator(stream)
 	flushStreams := func() {
 		chunks.finishStream()
@@ -2097,17 +2148,17 @@ type promptToolRow struct {
 	active bool
 }
 
-func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session) *promptCardStream {
+func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session, show ChatConfig) *promptCardStream {
 	return &promptCardStream{
 		ctx:              ctx,
 		msg:              msg,
 		session:          session,
 		available:        true,
-		showStepMessages: !session.HideStepMessages,
-		showThoughts:     !session.HideThoughts,
-		showTools:        !session.HideTools,
-		showStatusBar:    !session.HideStatusBar,
-		showUsageDetail:  !session.HideUsageDetail,
+		showStepMessages: !show.HideStepMessages,
+		showThoughts:     !show.HideThoughts,
+		showTools:        !show.HideTools,
+		showStatusBar:    !show.HideStatusBar,
+		showUsageDetail:  !show.HideUsageDetail,
 		status:           promptStatusBar{state: promptStatusRunning},
 	}
 }
