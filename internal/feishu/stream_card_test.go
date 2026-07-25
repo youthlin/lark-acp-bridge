@@ -30,6 +30,26 @@ func TestNewStreamCardJSONStartsWithProcessPanel(t *testing.T) {
 	}
 }
 
+func TestNewStreamCardJSONCanOmitProcessPanel(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newStreamCardJSONWithProcessPanel(false)), &card); err != nil {
+		t.Fatalf("newStreamCardJSONWithProcessPanel(false) is not valid JSON: %v", err)
+	}
+
+	if !jsonContainsValue(card, streamCardTextElementID) {
+		t.Fatalf("stream card does not contain text element %q", streamCardTextElementID)
+	}
+	if jsonContainsValue(card, streamCardProcessPanelID) {
+		t.Fatalf("stream card should not contain process panel %q", streamCardProcessPanelID)
+	}
+	if jsonContainsValue(card, streamCardProcessElementID) {
+		t.Fatalf("stream card should not contain process element %q", streamCardProcessElementID)
+	}
+	if jsonContainsValue(card, "执行过程") {
+		t.Fatalf("stream card should not contain execution process title")
+	}
+}
+
 func TestNewStreamCardProcessPanelJSONContainsProcessElements(t *testing.T) {
 	var elements any
 	if err := json.Unmarshal([]byte(newStreamCardProcessPanelJSON()), &elements); err != nil {
@@ -83,7 +103,7 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 	if !jsonContainsBool(card, "update_multi", true) {
 		t.Fatalf("permission card should enable update_multi: %#v", card)
 	}
-	for _, unwanted := range []string{"go test ./...", "type\":\"diff"} {
+	for _, unwanted := range []string{"go test ./...", "type\":\"diff", "Tool Call ID", "pending"} {
 		if jsonContainsSubstring(card, unwanted) {
 			t.Fatalf("permission card contains verbose field %q: %#v", unwanted, card)
 		}
@@ -119,9 +139,14 @@ func TestNewPermissionCardJSONUsesToolCallTitleWithoutSnapshot(t *testing.T) {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"git status --short", "execute", "pending", "internal/bridge/runtime.go"} {
+	for _, want := range []string{"git status --short", "execute", "internal/bridge/runtime.go"} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("permission card does not contain %q: %#v", want, card)
+		}
+	}
+	for _, unwanted := range []string{"Tool Call ID", "pending"} {
+		if jsonContainsSubstring(card, unwanted) {
+			t.Fatalf("permission card contains hidden field %q: %#v", unwanted, card)
 		}
 	}
 	if jsonContainsSubstring(card, "工具调用 call-1") {
@@ -153,9 +178,14 @@ func TestNewPermissionCardJSONMergesPartialSnapshotWithRequestToolCall(t *testin
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"git status --short", "execute", "pending", "internal/feishu/permission_card.go"} {
+	for _, want := range []string{"git status --short", "execute", "internal/feishu/permission_card.go"} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("permission card does not contain %q: %#v", want, card)
+		}
+	}
+	for _, unwanted := range []string{"Tool Call ID", "pending"} {
+		if jsonContainsSubstring(card, unwanted) {
+			t.Fatalf("permission card contains hidden field %q: %#v", unwanted, card)
 		}
 	}
 }
@@ -537,10 +567,13 @@ func TestNewPermissionCardCancelledJSONHidesButtons(t *testing.T) {
 	if err := json.Unmarshal([]byte(newPermissionCardCancelledJSON("perm-1", req)), &card); err != nil {
 		t.Fatalf("newPermissionCardCancelledJSON() is not valid JSON: %v", err)
 	}
-	for _, want := range []string{"权限请求已取消", "Run tests", "已取消"} {
+	for _, want := range []string{"权限请求已取消", "Run tests"} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("cancelled permission card does not contain %q: %#v", want, card)
 		}
+	}
+	if jsonContainsSubstring(card, "**状态**") {
+		t.Fatalf("cancelled permission card should not contain status field: %#v", card)
 	}
 	if jsonContainsTaggedElement(card, "button") || jsonContainsValue(card, "选择 1") {
 		t.Fatalf("cancelled permission card should hide buttons: %#v", card)

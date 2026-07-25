@@ -21,6 +21,14 @@ const (
 type cardJSON map[string]any
 
 func newStreamCardJSON() string {
+	return newStreamCardJSONWithProcessPanel(true)
+}
+
+func newStreamCardJSONWithProcessPanel(includeProcessPanel bool) string {
+	elements := []any{cardJSON{"tag": "markdown", "content": "", "element_id": streamCardTextElementID}}
+	if includeProcessPanel {
+		elements = append(elements, streamCardProcessPanel())
+	}
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
 		"config": cardJSON{
@@ -35,48 +43,33 @@ func newStreamCardJSON() string {
 			},
 		},
 		"body": cardJSON{
-			"elements": []any{
-				cardJSON{"tag": "markdown", "content": "", "element_id": streamCardTextElementID},
-				cardJSON{
-					"tag":              "collapsible_panel",
-					"expanded":         false,
-					"element_id":       streamCardProcessPanelID,
-					"background_color": "grey",
-					"header": cardJSON{
-						"title": cardJSON{"tag": "plain_text", "content": "执行过程"},
-					},
-					"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
-					"vertical_spacing": "4px",
-					"padding":          "8px 12px 8px 12px",
-					"elements": []any{
-						cardJSON{"tag": "markdown", "content": "", "element_id": streamCardProcessElementID},
-					},
-				},
-			},
+			"elements": elements,
 		},
 	})
 	return string(data)
 }
 
 func newStreamCardProcessPanelJSON() string {
-	data, _ := json.Marshal([]any{
-		cardJSON{
-			"tag":              "collapsible_panel",
-			"expanded":         false,
-			"element_id":       streamCardProcessPanelID,
-			"background_color": "grey",
-			"header": cardJSON{
-				"title": cardJSON{"tag": "plain_text", "content": "执行过程"},
-			},
-			"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
-			"vertical_spacing": "4px",
-			"padding":          "8px 12px 8px 12px",
-			"elements": []any{
-				cardJSON{"tag": "markdown", "content": "", "element_id": streamCardProcessElementID},
-			},
-		},
-	})
+	data, _ := json.Marshal([]any{streamCardProcessPanel()})
 	return string(data)
+}
+
+func streamCardProcessPanel() cardJSON {
+	return cardJSON{
+		"tag":              "collapsible_panel",
+		"expanded":         false,
+		"element_id":       streamCardProcessPanelID,
+		"background_color": "grey",
+		"header": cardJSON{
+			"title": cardJSON{"tag": "plain_text", "content": "执行过程"},
+		},
+		"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
+		"vertical_spacing": "4px",
+		"padding":          "8px 12px 8px 12px",
+		"elements": []any{
+			cardJSON{"tag": "markdown", "content": "", "element_id": streamCardProcessElementID},
+		},
+	}
 }
 
 type sdkStreamCard struct {
@@ -96,7 +89,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	cardResp, err := a.client.Cardkit.V1.Card.Create(ctx, larkcardkit.NewCreateCardReqBuilder().
 		Body(larkcardkit.NewCreateCardReqBodyBuilder().
 			Type("card_json").
-			Data(newStreamCardJSON()).
+			Data(newStreamCardJSONWithProcessPanel(StreamCardProcessPanelEnabled(ctx))).
 			Build()).
 		Build())
 	if err != nil {
@@ -112,7 +105,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return nil, err
 	}
-	return &sdkStreamCard{adapter: a, cardID: cardID, processCreated: true}, nil
+	return &sdkStreamCard{adapter: a, cardID: cardID, processCreated: StreamCardProcessPanelEnabled(ctx)}, nil
 }
 
 func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID string) error {

@@ -70,7 +70,9 @@ func runForeground(cfg config.Config, configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	svc := bridge.NewService(cfg, nil)
+	svc := bridge.NewService(cfg, nil).
+		WithConfigPath(configPath).
+		WithBuiltinRestart(isDaemonChild())
 	if err := svc.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败, err=%v\n", err)
 		return err

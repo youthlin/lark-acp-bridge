@@ -294,21 +294,14 @@ func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest,
 func permissionCardElements(requestID string, req acp.PermissionRequest, state permissionCardRenderState) []any {
 	title := permissionToolDisplayName(req)
 	lines := []string{"**工具调用**：" + markdownInline(title)}
-	if req.ToolCall.ToolCallID != "" {
-		lines = append(lines, "**Tool Call ID**：`"+markdownInline(req.ToolCall.ToolCallID)+"`")
-	}
 	if kind := permissionToolKind(req); kind != "" {
 		lines = append(lines, "**类型**：`"+markdownInline(kind)+"`")
-	}
-	if status := permissionToolStatus(req); status != "" {
-		lines = append(lines, "**状态**：`"+markdownInline(status)+"`")
 	}
 	lines = appendJSONDetail(lines, "位置", permissionToolLocations(req))
 	elements := []any{
 		cardJSON{"tag": "markdown", "content": strings.Join(lines, "\n")},
 	}
 	if state.cancelled {
-		elements = append(elements, cardJSON{"tag": "markdown", "content": "**状态**：已取消或已失效"})
 		return elements
 	}
 	if state.selectedOption != "" {
@@ -437,15 +430,6 @@ func permissionToolKind(req acp.PermissionRequest) string {
 		}
 	}
 	return strings.TrimSpace(req.ToolCall.Kind)
-}
-
-func permissionToolStatus(req acp.PermissionRequest) string {
-	if req.ToolCallState != nil {
-		if value := strings.TrimSpace(req.ToolCallState.Status); value != "" {
-			return value
-		}
-	}
-	return strings.TrimSpace(req.ToolCall.Status)
 }
 
 func permissionToolLocations(req acp.PermissionRequest) json.RawMessage {

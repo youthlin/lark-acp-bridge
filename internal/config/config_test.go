@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,6 +44,10 @@ func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	agent := result.Config.Agents["traex"]
 	if agent.DefaultCwd != home {
 		t.Fatalf("DefaultCwd = %q, want %q", agent.DefaultCwd, home)
+	}
+	wantArgs := []string{"acp", "serve", "-c", "permission_mode=auto"}
+	if !slices.Equal(agent.Args, wantArgs) {
+		t.Fatalf("Args = %#v, want %#v", agent.Args, wantArgs)
 	}
 
 	data, err := os.ReadFile(wantPath)
@@ -309,6 +316,171 @@ func TestValidateAgentCommandsRejectsEmptyCommand(t *testing.T) {
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "empty" 启动命令为空`) {
 		t.Fatalf("ValidateAgentCommands() error = %v, want empty command", err)
+	}
+}
+
+func TestLoadNormalizesRestartCommand(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+  "restart_command": [" ", " /bin/echo ", " restarted "],
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_a",
+      "app_secret": "secret",
+      "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"]
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	want := []string{"/bin/echo", "restarted"}
+	if !slices.Equal(cfg.RestartCommand, want) {
+		t.Fatalf("RestartCommand = %#v, want %#v", cfg.RestartCommand, want)
+	}
+}
+
+func TestWriteResolvedBotFieldsFillsEmptyFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "bot-a",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": [
+        "acp",
+        "serve"
+      ]
+    }
+  },
+  "custom": true
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	wrote, err := WriteResolvedBotFields(configPath, []BotConfig{{
+		ID:           "bot-a",
+		BotOpenID:    " ou_bot ",
+		OwnerOpenIDs: []string{" ou_owner ", "ou_owner"},
+	}})
+	if err != nil {
+		t.Fatalf("WriteResolvedBotFields() error = %v", err)
+	}
+	if !wrote {
+		t.Fatal("WriteResolvedBotFields() wrote = false, want true")
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var got struct {
+		Bots []struct {
+			ID           string   `json:"id"`
+			AppID        string   `json:"app_id"`
+			AppSecret    string   `json:"app_secret"`
+			Workspace    string   `json:"workspace"`
+			BotOpenID    string   `json:"bot_open_id"`
+			OwnerOpenIDs []string `json:"owner_open_ids"`
+		} `json:"bots"`
+		Custom bool `json:"custom"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal(config) error = %v", err)
+	}
+	if got.Bots[0].BotOpenID != "ou_bot" {
+		t.Fatalf("bot_open_id = %q, want ou_bot", got.Bots[0].BotOpenID)
+	}
+	if want := []string{"ou_owner"}; !reflect.DeepEqual(got.Bots[0].OwnerOpenIDs, want) {
+		t.Fatalf("owner_open_ids = %#v, want %#v", got.Bots[0].OwnerOpenIDs, want)
+	}
+	if got.Bots[0].Workspace != "$HOME/.lark-acp-bridge/bots/default" {
+		t.Fatalf("workspace = %q, want original literal path", got.Bots[0].Workspace)
+	}
+	if !got.Custom {
+		t.Fatal("custom field was not preserved")
+	}
+}
+
+func TestWriteResolvedBotFieldsDoesNotOverwriteConfiguredFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "bot-a",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default",
+      "bot_open_id": "ou_configured_bot",
+      "owner_open_ids": [
+        "ou_configured_owner"
+      ]
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": [
+        "acp",
+        "serve"
+      ]
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	wrote, err := WriteResolvedBotFields(configPath, []BotConfig{{
+		ID:           "bot-a",
+		BotOpenID:    "ou_resolved_bot",
+		OwnerOpenIDs: []string{"ou_resolved_owner"},
+	}})
+	if err != nil {
+		t.Fatalf("WriteResolvedBotFields() error = %v", err)
+	}
+	if wrote {
+		t.Fatal("WriteResolvedBotFields() wrote = true, want false for already configured fields")
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var got struct {
+		Bots []struct {
+			BotOpenID    string   `json:"bot_open_id"`
+			OwnerOpenIDs []string `json:"owner_open_ids"`
+		} `json:"bots"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal(config) error = %v", err)
+	}
+	if got.Bots[0].BotOpenID != "ou_configured_bot" {
+		t.Fatalf("bot_open_id = %q, want configured value", got.Bots[0].BotOpenID)
+	}
+	if want := []string{"ou_configured_owner"}; !reflect.DeepEqual(got.Bots[0].OwnerOpenIDs, want) {
+		t.Fatalf("owner_open_ids = %#v, want %#v", got.Bots[0].OwnerOpenIDs, want)
 	}
 }
 

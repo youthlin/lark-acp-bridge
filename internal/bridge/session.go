@@ -42,6 +42,9 @@ type Session struct {
 	Workspace         string                    `json:"workspace,omitempty"`
 	WikiDisabled      bool                      `json:"wiki_disabled,omitempty"`
 	WikiIntervalSec   int                       `json:"wiki_interval_sec,omitempty"`
+	HideStepMessages  bool                      `json:"hide_step_messages,omitempty"`
+	HideThoughts      bool                      `json:"hide_thoughts,omitempty"`
+	HideTools         bool                      `json:"hide_tools,omitempty"`
 	AvailableCommands []acp.AvailableCommand    `json:"available_commands,omitempty"`
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`

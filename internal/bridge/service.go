@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,11 +22,14 @@ import (
 
 // Service 本项目核心服务
 type Service struct {
-	cfg      config.Config            // 配置文件
-	registry *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
-	feishu   []*feishu.Adapter        // Bots 实例
-	stores   map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
-	runtime  acpRuntime               // acp client 运行时
+	cfg            config.Config            // 配置文件
+	configPath     string                   // 配置文件路径，用于内置后台重启
+	registry       *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
+	feishu         []*feishu.Adapter        // Bots 实例
+	stores         map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
+	runtime        acpRuntime               // acp client 运行时
+	restartCommand func(context.Context) error
+	builtinRestart bool // 是否允许使用内置后台 restart
 
 	taskMu          sync.Mutex
 	tasks           map[SessionKey]*runningTask
@@ -94,11 +98,25 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 	return s
 }
 
+func (s *Service) WithConfigPath(path string) *Service {
+	s.configPath = strings.TrimSpace(path)
+	return s
+}
+
+func (s *Service) WithBuiltinRestart(enabled bool) *Service {
+	s.builtinRestart = enabled
+	return s
+}
+
 // setRuntime 用于单元测试设置 fakeRuntime
 func (s *Service) setRuntime(runtime acpRuntime) {
 	if runtime != nil {
 		s.runtime = runtime
 	}
+}
+
+func (s *Service) setRestartCommand(command func(context.Context) error) {
+	s.restartCommand = command
 }
 
 // Start 启动服务
@@ -119,12 +137,56 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	slog.Info("启动 ACP 桥接服务", "agent列表", s.registry.Names(), "bot数量", len(s.feishu))
-	for _, adapter := range s.feishu {
+	configChanged := false
+	for i, adapter := range s.feishu {
 		if err := adapter.Start(ctx); err != nil {
 			return err
 		}
+		if i < len(s.cfg.Bots) {
+			if s.syncResolvedBotConfig(i, adapter) {
+				configChanged = true
+			}
+			s.consumeRestartAckAsync(ctx, adapter, s.cfg.Bots[i])
+		}
+	}
+	if configChanged {
+		s.persistResolvedConfig(ctx)
 	}
 	return nil
+}
+
+func (s *Service) syncResolvedBotConfig(i int, adapter *feishu.Adapter) bool {
+	if adapter == nil || i < 0 || i >= len(s.cfg.Bots) {
+		return false
+	}
+	changed := false
+	if strings.TrimSpace(s.cfg.Bots[i].BotOpenID) == "" {
+		if botOpenID := adapter.BotOpenID(); botOpenID != "" {
+			s.cfg.Bots[i].BotOpenID = botOpenID
+			changed = true
+		}
+	}
+	if len(s.cfg.Bots[i].OwnerOpenIDs) == 0 {
+		if ownerOpenIDs := adapter.OwnerOpenIDs(); len(ownerOpenIDs) > 0 {
+			s.cfg.Bots[i].OwnerOpenIDs = ownerOpenIDs
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (s *Service) persistResolvedConfig(ctx context.Context) {
+	if strings.TrimSpace(s.configPath) == "" {
+		return
+	}
+	wrote, err := config.WriteResolvedBotFields(s.configPath, s.cfg.Bots)
+	if err != nil {
+		slog.WarnContext(ctx, "写回自动解析的飞书配置失败", "错误", err)
+		return
+	}
+	if wrote {
+		slog.InfoContext(ctx, "已写回自动解析的飞书配置")
+	}
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -136,6 +198,61 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	return s.runtime.Shutdown(ctx)
 }
+
+func (s *Service) consumeRestartAckAsync(ctx context.Context, adapter restartAckSender, bot config.BotConfig) {
+	if adapter == nil {
+		return
+	}
+	if strings.TrimSpace(bot.Workspace) == "" {
+		return
+	}
+	go func() {
+		ackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := consumeRestartAck(ackCtx, bot.Workspace, adapter, bot.ID); err != nil {
+			slog.WarnContext(ctx, "消费重启确认消息失败", "bot", displayBotID(bot.ID), "错误", err)
+		}
+	}()
+}
+
+func (s *Service) runRestartCommand(ctx context.Context, workspace string) {
+	if err := s.executeRestartCommand(ctx); err != nil {
+		removeRestartAck(workspace)
+		slog.ErrorContext(ctx, "执行 bridge 重启命令失败", "错误", err)
+	}
+}
+
+func (s *Service) executeRestartCommand(ctx context.Context) error {
+	if s.restartCommand != nil {
+		return s.restartCommand(ctx)
+	}
+	command := s.cfg.RestartCommand
+	if len(command) == 0 {
+		if !s.builtinRestart {
+			return errBuiltinRestartUnavailable
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("获取当前可执行文件路径: %w", err)
+		}
+		command = []string{exe, "restart"}
+		if strings.TrimSpace(s.configPath) != "" {
+			command = []string{exe, "-config", s.configPath, "restart"}
+		}
+	}
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动重启命令: %w", err)
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("释放重启命令进程: %w", err)
+	}
+	return nil
+}
+
+var errBuiltinRestartUnavailable = errors.New("当前进程不是内置后台 daemon，未配置 restart_command，不能通过飞书重启；请配置 restart_command 交给 systemd 或进程管理器重启")
 
 var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
@@ -203,7 +320,9 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/model <model> - 设置当前会话模型",
 			"/mode - 打开模式选择卡片",
 			"/mode <mode> - 设置当前会话模式",
+			"/show step|thought|tool on|off - 设置当前会话过程区域展示项",
 			"/at status|on|off - 查看或设置当前群聊是否需要 at 才响应",
+			"/restart - 重启 bridge 服务，重启完成后自动回复确认",
 			"/status - 查看服务状态",
 			"",
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
@@ -220,13 +339,158 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleModelCommand(ctx, text, msg)
 	case "/mode":
 		return s.handleModeCommand(ctx, text, msg)
+	case "/show":
+		return s.handleShowCommand(ctx, msg, text)
 	case "/at":
 		return s.handleAtCommand(ctx, msg, text)
+	case "/restart":
+		return s.handleRestartCommand(ctx, msg)
 	case "/status":
 		return s.status(msg)
 	default:
 		return "暂不支持这个命令。发送 /help 查看当前支持的命令。"
 	}
+}
+
+func (s *Service) handleRestartCommand(ctx context.Context, msg feishu.Message) string {
+	if !s.restartAllowed(msg) {
+		if len(s.ownerOpenIDs(msg.BotID)) == 0 {
+			return "未配置 bot owner，不能通过飞书重启 bridge 服务。"
+		}
+		return "只有 bot owner 可以重启 bridge 服务。"
+	}
+	workspace := strings.TrimSpace(msg.Workspace)
+	if workspace == "" {
+		return "当前 bot workspace 为空，无法记录重启确认消息。"
+	}
+	if err := s.validateRestartCommand(); err != nil {
+		return err.Error()
+	}
+	if err := writeRestartAck(workspace, newRestartAck(msg)); err != nil {
+		slog.ErrorContext(ctx, "记录重启确认消息失败", "错误", err)
+		return "记录重启确认消息失败：" + err.Error()
+	}
+	if ok, err := feishu.SendIntermediateReply(ctx, msg, "收到，准备重启 bridge 服务。"); err != nil {
+		removeRestartAck(workspace)
+		slog.ErrorContext(ctx, "发送重启准备消息失败", "错误", err)
+		return "发送重启准备消息失败：" + err.Error()
+	} else if !ok {
+		removeRestartAck(workspace)
+		return "当前上下文不支持主动发送重启准备消息。"
+	}
+	go s.runRestartCommand(context.Background(), workspace)
+	return ""
+}
+
+func (s *Service) validateRestartCommand() error {
+	if s.restartCommand != nil || len(s.cfg.RestartCommand) > 0 || s.builtinRestart {
+		return nil
+	}
+	return errBuiltinRestartUnavailable
+}
+
+func (s *Service) restartAllowed(msg feishu.Message) bool {
+	senderID := strings.TrimSpace(msg.SenderID)
+	if senderID == "" {
+		return false
+	}
+	for _, ownerID := range s.ownerOpenIDs(msg.BotID) {
+		if strings.TrimSpace(ownerID) == senderID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) ownerOpenIDs(botID string) []string {
+	botID = strings.TrimSpace(botID)
+	for _, bot := range s.cfg.Bots {
+		if strings.TrimSpace(bot.ID) == botID {
+			return bot.OwnerOpenIDs
+		}
+	}
+	return nil
+}
+
+func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, text string) string {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "会话持久化未初始化。"
+	}
+	session, ok := s.findSession(msg)
+	if !ok {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再设置展示项。"
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 1 || len(fields) == 2 && fields[1] == "status" {
+		return formatShowStatus(session)
+	}
+	if len(fields) != 3 {
+		return "请使用 /show step|thought|tool on|off。"
+	}
+	value, ok := parseShowSwitch(fields[2])
+	if !ok {
+		return "请使用 on 或 off，例如 /show thought off。"
+	}
+	target, ok := setSessionShowOption(&session, fields[1], value)
+	if !ok {
+		return "请使用 /show step|thought|tool on|off。"
+	}
+	if err := store.Upsert(session); err != nil {
+		slog.ErrorContext(ctx, "保存展示配置失败", "错误", err)
+		return "保存展示配置失败：" + err.Error()
+	}
+	state := "开启"
+	if !value {
+		state = "关闭"
+	}
+	return fmt.Sprintf("已%s%s。\n%s", state, target, formatShowStatus(session))
+}
+
+func parseShowSwitch(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on":
+		return true, true
+	case "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func setSessionShowOption(session *Session, target string, visible bool) (string, bool) {
+	if session == nil {
+		return "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "step":
+		session.HideStepMessages = !visible
+		return "过程消息展示", true
+	case "thought":
+		session.HideThoughts = !visible
+		return "思考消息展示", true
+	case "tool":
+		session.HideTools = !visible
+		return "工具调用展示", true
+	default:
+		return "", false
+	}
+}
+
+func formatShowStatus(session Session) string {
+	return strings.Join([]string{
+		"当前会话过程区域展示：",
+		"过程消息：" + showState(!session.HideStepMessages),
+		"思考消息：" + showState(!session.HideThoughts),
+		"工具调用：" + showState(!session.HideTools),
+	}, "\n")
+}
+
+func showState(visible bool) string {
+	if visible {
+		return "开启"
+	}
+	return "关闭"
 }
 
 func (s *Service) shouldIgnoreMessage(msg feishu.Message, text string) bool {
@@ -1562,6 +1826,7 @@ const (
 	promptChunkTargetProcess        = "process"
 	promptChunkTargetProcessMessage = "process_message"
 	promptChunkTargetThought        = "thought"
+	promptChunkTargetTool           = "tool"
 )
 
 type promptChunk struct {
@@ -1732,6 +1997,13 @@ func (a *promptChunkAccumulator) applyFlush(flush promptChunkFlush) {
 		if flush.finish {
 			a.stream.finishProcessStream()
 		}
+	case promptChunkTargetTool:
+		if flush.text != "" {
+			a.stream.updateToolStream(flush.text)
+		}
+		if flush.finish {
+			a.stream.finishProcessStream()
+		}
 	case promptChunkTargetProcess:
 		if flush.text != "" {
 			a.stream.updateProcessStream(flush.text)
@@ -1781,16 +2053,20 @@ type promptCardStream struct {
 	msg     feishu.Message
 	session Session
 
-	mu        sync.Mutex
-	card      feishu.StreamCard
-	available bool
-	creating  bool
-	ready     chan struct{}
-	started   bool
-	text      string
-	process   []string
-	streaming bool
-	tools     []promptToolRow
+	mu                sync.Mutex
+	card              feishu.StreamCard
+	available         bool
+	creating          bool
+	ready             chan struct{}
+	started           bool
+	showStepMessages  bool
+	showThoughts      bool
+	showTools         bool
+	text              string
+	process           []string
+	streaming         bool
+	activeStreamClass promptProcessClass
+	tools             []promptToolRow
 }
 
 type promptToolRow struct {
@@ -1801,10 +2077,13 @@ type promptToolRow struct {
 
 func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session) *promptCardStream {
 	return &promptCardStream{
-		ctx:       ctx,
-		msg:       msg,
-		session:   session,
-		available: true,
+		ctx:              ctx,
+		msg:              msg,
+		session:          session,
+		available:        true,
+		showStepMessages: !session.HideStepMessages,
+		showThoughts:     !session.HideThoughts,
+		showTools:        !session.HideTools,
 	}
 }
 
@@ -1830,6 +2109,9 @@ func (s *promptCardStream) updateText(text string) {
 }
 
 func (s *promptCardStream) updateProcessMessage(text string) {
+	if !s.showStepMessages {
+		return
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -1838,11 +2120,21 @@ func (s *promptCardStream) updateProcessMessage(text string) {
 }
 
 func (s *promptCardStream) updateThoughtStream(text string) {
+	if !s.showThoughts {
+		return
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
-	s.updateProcessStreamText("🧠 "+text, false)
+	s.updateProcessStreamText(promptProcessThought, "🧠 "+text, false)
+}
+
+func (s *promptCardStream) updateToolStream(text string) {
+	if !s.showTools {
+		return
+	}
+	s.updateProcessStreamText(promptProcessTool, text, false)
 }
 
 func (s *promptCardStream) updateProcess(text string) {
@@ -1867,6 +2159,14 @@ func (s *promptCardStream) updatePromptUpdate(update acp.PromptUpdate) {
 	if s.updateToolProcess(update) {
 		return
 	}
+	kind := promptUpdateKind(update)
+	if isThoughtUpdateKind(kind) {
+		if !s.showThoughts {
+			return
+		}
+	} else if !s.showStepMessages {
+		return
+	}
 	progressText := formatPromptUpdate(update)
 	if progressText == "" {
 		return
@@ -1879,6 +2179,9 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 	kind := promptUpdateKind(update)
 	if !isToolPromptUpdateKind(kind) {
 		return false
+	}
+	if !s.showTools {
+		return true
 	}
 	status := toolStatusFromUpdate(kind, u.Status)
 	title := toolDisplayName(u)
@@ -1983,10 +2286,22 @@ func (s *promptCardStream) findToolRowLocked(title string) int {
 }
 
 func (s *promptCardStream) updateProcessStream(text string) {
-	s.updateProcessStreamText(text, true)
+	if !s.showStepMessages {
+		return
+	}
+	s.updateProcessStreamText(promptProcessStep, text, true)
 }
 
-func (s *promptCardStream) updateProcessStreamText(text string, prefixProcessMessage bool) {
+type promptProcessClass string
+
+const (
+	promptProcessNone    promptProcessClass = ""
+	promptProcessStep    promptProcessClass = "step"
+	promptProcessThought promptProcessClass = "thought"
+	promptProcessTool    promptProcessClass = "tool"
+)
+
+func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, text string, prefixProcessMessage bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -2000,11 +2315,12 @@ func (s *promptCardStream) updateProcessStreamText(text string, prefixProcessMes
 	}
 	s.mu.Lock()
 	normalized := normalizeStreamMarkdown(text)
-	if s.streaming && len(s.process) > 0 {
+	if s.streaming && s.activeStreamClass == class && len(s.process) > 0 {
 		s.process[len(s.process)-1] = normalized
 	} else {
 		s.process = append(s.process, normalized)
 		s.streaming = true
+		s.activeStreamClass = class
 	}
 	processText := truncateProcessText(strings.Join(s.process, "\n"))
 	s.mu.Unlock()
@@ -2016,6 +2332,7 @@ func (s *promptCardStream) updateProcessStreamText(text string, prefixProcessMes
 func (s *promptCardStream) finishProcessStream() {
 	s.mu.Lock()
 	s.streaming = false
+	s.activeStreamClass = promptProcessNone
 	s.mu.Unlock()
 }
 
@@ -2065,7 +2382,8 @@ func (s *promptCardStream) ensureCard() feishu.StreamCard {
 	s.ready = ready
 	s.mu.Unlock()
 
-	card, ok, err := feishu.StartStreamCard(s.ctx, s.msg)
+	cardCtx := feishu.WithStreamCardProcessPanel(s.ctx, s.showStepMessages || s.showThoughts || s.showTools)
+	card, ok, err := feishu.StartStreamCard(cardCtx, s.msg)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.creating = false
@@ -2318,6 +2636,8 @@ func promptUpdateChunk(update acp.PromptUpdate) (promptChunk, bool) {
 	if kind == "agent_message_chunk" {
 		target = promptChunkTargetText
 		key = "agent_message"
+	} else if isToolChunkUpdateKind(kind) {
+		target = promptChunkTargetTool
 	} else if isThoughtUpdateKind(kind) {
 		target = promptChunkTargetThought
 	} else if streamName := promptChunkStreamName(kind); streamName != "" {
@@ -2333,6 +2653,13 @@ func promptUpdateKind(update acp.PromptUpdate) string {
 
 func isPromptChunkKind(kind string) bool {
 	return kind == "agent_message_chunk" || strings.HasSuffix(kind, "_chunk")
+}
+
+func isToolChunkUpdateKind(kind string) bool {
+	if !isPromptChunkKind(kind) {
+		return false
+	}
+	return strings.Contains(kind, "tool") || strings.Contains(kind, "function")
 }
 
 func isThoughtUpdateKind(kind string) bool {

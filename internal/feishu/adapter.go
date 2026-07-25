@@ -85,6 +85,36 @@ func NewAdapter(cfg config.BotConfig, handler Handler) *Adapter {
 	}
 }
 
+func (a *Adapter) BotOpenID() string {
+	if a == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.cfg.BotOpenID)
+}
+
+func (a *Adapter) OwnerOpenIDs() []string {
+	if a == nil || len(a.cfg.OwnerOpenIDs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(a.cfg.OwnerOpenIDs))
+	seen := make(map[string]struct{}, len(a.cfg.OwnerOpenIDs))
+	for _, id := range a.cfg.OwnerOpenIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // Start 启动Bot监听
 func (a *Adapter) Start(ctx context.Context) error {
 	if a.cfg.AppID == "" || a.cfg.AppSecret == "" {

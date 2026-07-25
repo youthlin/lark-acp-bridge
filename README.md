@@ -70,9 +70,19 @@ https://open.larkoffice.com/page/launcher
 }
 ```
 
-`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
+`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片和执行 `/restart`。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准，也不能通过飞书命令重启服务。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
 自动读取 owner 需要飞书应用具备查询本应用信息和协作者的权限，例如 `application:application:self_manage` 或等价的应用管理只读权限。也可以直接在 `owner_open_ids` 中手动配置允许审批人的 open_id，配置后启动时不会再查询飞书应用协作者。
+
+可选配置 `restart_command` 用于覆盖 `/restart` 的实际重启方式，格式是字符串数组，第一项是命令，后续项是参数，例如：
+
+```json
+{
+  "restart_command": ["systemctl", "--user", "restart", "lark-acp-bridge"]
+}
+```
+
+如果当前 bridge 是内置后台 daemon 子进程，未配置时会使用当前可执行文件按内置后台 `restart` 模式重启；通过 `--config` 启动时会把当前配置路径传给新进程。如果使用 `run` 前台模式、systemd 或其他进程管理器运行，必须配置 `restart_command`，避免额外拉起一个后台实例。
 
 第一次和 bot 对话时，如果 workspace 尚未标记为 ready，服务会创建基础知识文件：
 
@@ -120,9 +130,12 @@ bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁�
 
 ```text
 $BOT_WORKSPACE/sessions.json
+$BOT_WORKSPACE/restart_ack.json
 ```
 
 第一版使用 JSON 文件保存 `bot_id + chat_id + thread_id -> ACP session` 映射；话题群会话使用当前话题的 `thread_id`，普通群和私聊会话的 `thread_id` 为空，表示整个 chat 共用一个 ACP session。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`sessions.json` 还会保留同一聊天里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`。把 session 放在 workspace 下，可以让每个 bot 的记忆、会话映射和后续缓存一起迁移、备份和清理。服务进程内会为活跃飞书会话维护对应的 `traex acp serve` 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
+
+`restart_ack.json` 是一次性重启回执文件。用户通过 `/restart` 触发重启时，旧进程先记录原消息位置并发送“准备重启”，新进程启动后读取该文件，向原消息回复“已重启”，发送成功后删除文件。
 
 配置中的路径支持 `~` 和 `$HOME` 展开，例如：
 
@@ -199,7 +212,9 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/mode`：打开飞书模式选择卡片，通过下拉列表设置当前会话模式。
 - `/mode <mode>`：通过 ACP `session/set_config_option` 设置当前会话模式。
+- `/show step|thought|tool on|off`：设置当前会话流式卡片的过程区域展示项。默认三项都开启；`step` 控制 `💬` 过程消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出。三项都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
 - `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
+- `/restart`：仅 bot owner 可用。旧进程会先回复“准备重启”并写入 `$BOT_WORKSPACE/restart_ack.json`，然后执行 `restart_command`；内置后台 daemon 子进程也可在未配置 `restart_command` 时使用内置后台 restart。新进程启动后会向原消息回复“已重启”并删除回执文件。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。
 - 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
 - 权限卡片：权限选项来自 ACP agent，正文完整展示选项内容，按钮使用短编号文本避免截断。只有 bot owner 可以点击权限卡片；owner 优先来自 `bots[].owner_open_ids`，未配置时启动阶段会尝试从飞书应用所有者、创建者和管理员/开发者协作者自动解析。未解析到 owner 时，无论群聊还是私聊，权限卡片都不能被任何人批准。请求被取消时，bridge 会把卡片更新为已取消/已失效状态并移除按钮。

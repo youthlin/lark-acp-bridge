@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -579,6 +580,69 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 	}
 	if len(got.Options) != 2 || got.Options[1].Value != "plan" || got.Options[1].Name != "Plan" {
 		t.Fatalf("card options = %+v, want available modes", got.Options)
+	}
+}
+
+func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	svc := NewService(config.Default(), store)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show thought off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show thought off) error = %v", err)
+	}
+	for _, want := range []string{"已关闭思考消息展示", "过程消息：开启", "思考消息：关闭", "工具调用：开启"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if !updated.HideThoughts || updated.HideStepMessages || updated.HideTools {
+		t.Fatalf("session display flags = step:%v thought:%v tool:%v, want only thoughts hidden", updated.HideStepMessages, updated.HideThoughts, updated.HideTools)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show thought on",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show thought on) error = %v", err)
+	}
+	if !strings.Contains(reply, "已开启思考消息展示") || !strings.Contains(reply, "思考消息：开启") {
+		t.Fatalf("reply = %q, want thought display enabled", reply)
+	}
+	updated, _ = store.Get(session.Key)
+	if updated.HideThoughts {
+		t.Fatalf("HideThoughts = true, want false after /show thought on")
+	}
+}
+
+func TestHandleFeishuMessageShowCommandRequiresSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Default(), store)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		Text:     "/show step off",
+		ChatType: "p2p",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show step off) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话还没有 ACP session") {
+		t.Fatalf("reply = %q, want missing session guidance", reply)
 	}
 }
 
@@ -2304,7 +2368,7 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	if len(got) != 1 {
 		t.Fatalf("processUpdates = %+v, want generic chunk stream to update one process block", got)
 	}
-	if got[0] != "💬 line one line two" {
+	if got[0] != "line one line two" {
 		t.Fatalf("process update = %q, want accumulated generic chunk stream", got[0])
 	}
 }
@@ -2377,6 +2441,186 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	}
 	if got[1] != "✅ Read AGENTS.md" {
 		t.Fatalf("second process update = %q, want completed status replacing tool row", got[1])
+	}
+}
+
+func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*Session)
+		want     []string
+		unwanted []string
+	}{
+		{
+			name: "hide step",
+			mutate: func(session *Session) {
+				session.HideStepMessages = true
+			},
+			want:     []string{"⏳ Run tests", "🧠 Thinking"},
+			unwanted: []string{"💬 准备处理", "step chunk"},
+		},
+		{
+			name: "hide thought",
+			mutate: func(session *Session) {
+				session.HideThoughts = true
+			},
+			want:     []string{"💬 准备处理", "⏳ Run tests", "💬 step chunk"},
+			unwanted: []string{"🧠 Thinking"},
+		},
+		{
+			name: "hide tool",
+			mutate: func(session *Session) {
+				session.HideTools = true
+			},
+			want:     []string{"💬 准备处理", "🧠 Thinking", "💬 step chunk"},
+			unwanted: []string{"Run tests", "tool output"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+			session := testReadySession(t, store)
+			tt.mutate(&session)
+			if err := store.Upsert(session); err != nil {
+				t.Fatalf("Upsert(session) error = %v", err)
+			}
+			rt := &fakeRuntime{
+				promptReply: "完成。",
+				promptUpdates: []acp.PromptUpdate{
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "status",
+						Message:       "准备处理",
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "reasoning",
+						Message:       "Thinking",
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "tool_call",
+						Title:         "Run tests",
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "tool_call_output_chunk",
+						Content:       &acp.ContentBlock{Type: "text", Text: "tool output"},
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "progress_chunk",
+						Content:       &acp.ContentBlock{Type: "text", Text: "step chunk"},
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "agent_message_chunk",
+						Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+					}},
+				},
+			}
+			svc := NewService(config.Default(), store)
+			svc.setRuntime(rt)
+			var cards []*fakeStreamCard
+			ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+				card := &fakeStreamCard{}
+				cards = append(cards, card)
+				return card, nil
+			})
+
+			reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+				BotID:     session.Key.BotID,
+				MessageID: "om_msg",
+				ChatID:    session.Key.ChatID,
+				ThreadID:  session.Key.ThreadID,
+				ChatType:  "group",
+				Text:      "run",
+				Mentions:  []feishu.Mention{testBotMention("智能助手")},
+			})
+			if err != nil {
+				t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+			}
+			if reply != "" {
+				t.Fatalf("reply = %q, want streamed reply", reply)
+			}
+			if len(cards) != 1 {
+				t.Fatalf("cards = %+v, want one stream card", cards)
+			}
+			process := strings.Join(cards[0].processUpdatesSnapshot(), "\n")
+			for _, want := range tt.want {
+				if !strings.Contains(process, want) {
+					t.Fatalf("process updates = %q, want %q", process, want)
+				}
+			}
+			for _, unwanted := range tt.unwanted {
+				if strings.Contains(process, unwanted) {
+					t.Fatalf("process updates = %q, should not contain %q", process, unwanted)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.HideStepMessages = true
+	session.HideThoughts = true
+	session.HideTools = true
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptReply: "完成。",
+		promptUpdates: []acp.PromptUpdate{
+			{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+				SessionUpdate: "status",
+				Message:       "准备处理",
+			}},
+			{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+				SessionUpdate: "reasoning",
+				Message:       "Thinking",
+			}},
+			{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Run tests",
+			}},
+			{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+			}},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	var processPanelEnabled *bool
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		enabled := feishu.StreamCardProcessPanelEnabled(ctx)
+		processPanelEnabled = &enabled
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     session.Key.BotID,
+		MessageID: "om_msg",
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		ChatType:  "group",
+		Text:      "run",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if processPanelEnabled == nil || *processPanelEnabled {
+		t.Fatalf("processPanelEnabled = %v, want false when all process classes are hidden", processPanelEnabled)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card for final text", cards)
+	}
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("processUpdates = %+v, want none", got)
 	}
 }
 
@@ -3731,6 +3975,251 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 	}
 }
 
+func TestHandleRestartCommandWritesAckSendsPreparingReplyAndRunsCommand(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_owner"}
+	svc := NewService(cfg, store)
+	restartCalled := make(chan struct{}, 1)
+	svc.setRestartCommand(func(ctx context.Context) error {
+		restartCalled <- struct{}{}
+		return nil
+	})
+	var intermediate []string
+	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+		intermediate = append(intermediate, text)
+		return nil
+	})
+	workspace := t.TempDir()
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		SenderID:  "ou_owner",
+		Text:      "/restart",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/restart) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after intermediate preparing reply", reply)
+	}
+	if got, want := intermediate, []string{"收到，准备重启 bridge 服务。"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("intermediate replies = %#v, want %#v", got, want)
+	}
+	select {
+	case <-restartCalled:
+	case <-time.After(time.Second):
+		t.Fatal("restart command was not called")
+	}
+	data, err := os.ReadFile(restartAckPath(workspace))
+	if err != nil {
+		t.Fatalf("ReadFile(restart ack) error = %v", err)
+	}
+	var ack restartAck
+	if err := json.Unmarshal(data, &ack); err != nil {
+		t.Fatalf("Unmarshal(restart ack) error = %v", err)
+	}
+	if ack.BotID != "bot-a" || ack.Message.MessageID != "om_restart" || ack.Message.ChatID != "oc_chat" || ack.RequestedBy != "ou_owner" {
+		t.Fatalf("restart ack = %+v, want original message target and requester", ack)
+	}
+}
+
+func TestHandleRestartCommandRequiresOwner(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_owner"}
+	svc := NewService(cfg, store)
+	svc.setRestartCommand(func(ctx context.Context) error {
+		t.Fatal("restart command should not run for non-owner")
+		return nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		SenderID:  "ou_other",
+		Text:      "/restart",
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/restart) error = %v", err)
+	}
+	if reply != "只有 bot owner 可以重启 bridge 服务。" {
+		t.Fatalf("reply = %q, want owner warning", reply)
+	}
+}
+
+func TestHandleRestartCommandRejectsDefaultRestartOutsideDaemon(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_owner"}
+	svc := NewService(cfg, store)
+	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+		t.Fatal("intermediate reply should not be sent when restart command is unavailable")
+		return nil
+	})
+	workspace := t.TempDir()
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		SenderID:  "ou_owner",
+		Text:      "/restart",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/restart) error = %v", err)
+	}
+	if !strings.Contains(reply, "未配置 restart_command") || !strings.Contains(reply, "systemd") {
+		t.Fatalf("reply = %q, want restart_command guidance", reply)
+	}
+	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart ack file err = %v, want no ack when restart is rejected", err)
+	}
+}
+
+func TestExecuteRestartCommandAllowsConfiguredCommandOutsideDaemon(t *testing.T) {
+	cfg := config.Default()
+	cfg.RestartCommand = []string{"/bin/echo", "restart-ok"}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+
+	if err := svc.executeRestartCommand(context.Background()); err != nil {
+		t.Fatalf("executeRestartCommand() error = %v", err)
+	}
+}
+
+func TestRestartCommandAllowsAdapterResolvedOwner(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	svc := NewService(cfg, store)
+	adapter := feishu.NewAdapter(config.BotConfig{
+		ID:           "bot-a",
+		BotOpenID:    " ou_bot_resolved ",
+		OwnerOpenIDs: []string{" ou_owner ", "ou_owner"},
+	}, svc)
+	if !svc.syncResolvedBotConfig(0, adapter) {
+		t.Fatal("syncResolvedBotConfig() = false, want resolved fields copied")
+	}
+	if got, want := svc.botOpenID("bot-a"), "ou_bot_resolved"; got != want {
+		t.Fatalf("botOpenID() = %q, want %q", got, want)
+	}
+	if got, want := svc.ownerOpenIDs("bot-a"), []string{"ou_owner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ownerOpenIDs() = %#v, want %#v", got, want)
+	}
+
+	restartCalled := make(chan struct{}, 1)
+	svc.setRestartCommand(func(ctx context.Context) error {
+		restartCalled <- struct{}{}
+		return nil
+	})
+	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+		return nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		SenderID:  "ou_owner",
+		Text:      "/restart",
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/restart) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after accepted restart command", reply)
+	}
+	select {
+	case <-restartCalled:
+	case <-time.After(time.Second):
+		t.Fatal("restart command was not called for adapter-resolved owner")
+	}
+}
+
+func TestRunRestartCommandRemovesAckOnFailure(t *testing.T) {
+	cfg := config.Default()
+	svc := NewService(cfg, NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+	svc.setRestartCommand(func(ctx context.Context) error {
+		return fmt.Errorf("restart failed")
+	})
+	workspace := t.TempDir()
+	if err := writeRestartAck(workspace, newRestartAck(feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+	})); err != nil {
+		t.Fatalf("writeRestartAck() error = %v", err)
+	}
+
+	svc.runRestartCommand(context.Background(), workspace)
+
+	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart ack file err = %v, want removed after restart command failure", err)
+	}
+}
+
+func TestConsumeRestartAckSendsConfirmationAndRemovesFile(t *testing.T) {
+	workspace := t.TempDir()
+	ack := newRestartAck(feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "group",
+		ThreadID:  "omt_thread",
+		SenderID:  "ou_owner",
+	})
+	if err := writeRestartAck(workspace, ack); err != nil {
+		t.Fatalf("writeRestartAck() error = %v", err)
+	}
+	sender := &fakeRestartAckSender{}
+
+	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
+		t.Fatalf("consumeRestartAck() error = %v", err)
+	}
+	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart ack file err = %v, want removed", err)
+	}
+	if got := sender.messages; len(got) != 1 || got[0].MessageID != "om_restart" || got[0].ThreadID != "omt_thread" || sender.texts[0] != restartAckText() {
+		t.Fatalf("sent messages = %+v texts = %+v, want restart confirmation to original message", sender.messages, sender.texts)
+	}
+}
+
+func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
+	workspace := t.TempDir()
+	if err := writeRestartAck(workspace, newRestartAck(feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+	})); err != nil {
+		t.Fatalf("writeRestartAck() error = %v", err)
+	}
+	sender := &fakeRestartAckSender{err: fmt.Errorf("send failed")}
+
+	err := consumeRestartAck(context.Background(), workspace, sender, "bot-a")
+	if err == nil || !strings.Contains(err.Error(), "发送重启确认消息") {
+		t.Fatalf("consumeRestartAck() error = %v, want send error", err)
+	}
+	if _, statErr := os.Stat(restartAckPath(workspace)); statErr != nil {
+		t.Fatalf("restart ack file should remain after send failure, stat err = %v", statErr)
+	}
+}
+
 func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptReply: "NoReply"}
@@ -4079,6 +4568,21 @@ type fakeStreamCard struct {
 	textUpdates    []string
 	processUpdates []string
 	closed         bool
+}
+
+type fakeRestartAckSender struct {
+	messages []feishu.Message
+	texts    []string
+	err      error
+}
+
+func (f *fakeRestartAckSender) SendText(ctx context.Context, msg feishu.Message, text string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.messages = append(f.messages, msg)
+	f.texts = append(f.texts, text)
+	return nil
 }
 
 func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {

@@ -21,6 +21,8 @@ type streamCardStarter func(context.Context, Message) (StreamCard, error)
 
 type streamCardStarterKey struct{}
 
+type streamCardProcessPanelKey struct{}
+
 type permissionRequester func(context.Context, Message, acp.PermissionRequest) (acp.PermissionOutcome, error)
 
 type permissionRequesterKey struct{}
@@ -87,6 +89,18 @@ func WithStreamCardStarter(ctx context.Context, starter func(context.Context, Me
 		return ctx
 	}
 	return context.WithValue(ctx, streamCardStarterKey{}, streamCardStarter(starter))
+}
+
+func WithStreamCardProcessPanel(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, streamCardProcessPanelKey{}, enabled)
+}
+
+func StreamCardProcessPanelEnabled(ctx context.Context) bool {
+	enabled, ok := ctx.Value(streamCardProcessPanelKey{}).(bool)
+	if !ok {
+		return true
+	}
+	return enabled
 }
 
 func StartStreamCard(ctx context.Context, msg Message) (StreamCard, bool, error) {
