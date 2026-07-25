@@ -28,6 +28,8 @@ type Session struct {
 	AvailableCommands []acp.AvailableCommand    `json:"available_commands,omitempty"`
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`
+	Modes             *acp.SessionModeState     `json:"modes,omitempty"`
+	Mode              any                       `json:"mode,omitempty"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	UpdatedAt         time.Time                 `json:"updated_at"`
 }

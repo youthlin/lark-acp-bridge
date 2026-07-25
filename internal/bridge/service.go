@@ -44,6 +44,7 @@ const (
 	taskKindWiki taskKind = "wiki"
 
 	defaultWikiInterval = 5 * time.Minute
+	newSessionStateWait = 600 * time.Millisecond
 )
 
 type runningTask struct {
@@ -358,17 +359,42 @@ func formatModelStatus(session Session) string {
 	return strings.Join(lines, "\n")
 }
 
+func currentModeDisplay(session Session) string {
+	if modeOpt, ok := findModeConfigOption(session); ok {
+		current := configOptionValueString(modeOpt.CurrentValue)
+		if current != "" {
+			return current
+		}
+	}
+	if current := configOptionValueString(session.Mode); current != "" {
+		return current
+	}
+	if session.Modes != nil {
+		return strings.TrimSpace(session.Modes.CurrentModeID)
+	}
+	return ""
+}
+
 func currentModelDisplay(session Session) string {
 	if modelOpt, ok := findModelConfigOption(session); ok {
-		current := modelValueString(modelOpt.CurrentValue)
+		current := configOptionValueString(modelOpt.CurrentValue)
 		if current != "" {
 			return current
 		}
 	}
 	if session.Models != nil {
-		return session.Models.CurrentModelID
+		return strings.TrimSpace(session.Models.CurrentModelID)
 	}
 	return ""
+}
+
+func findModeConfigOption(session Session) (acp.SessionConfigOption, bool) {
+	for _, opt := range session.ConfigOptions {
+		if opt.ID == "mode" || opt.Category == "mode" {
+			return opt, true
+		}
+	}
+	return acp.SessionConfigOption{}, false
 }
 
 func findModelConfigOption(session Session) (acp.SessionConfigOption, bool) {
@@ -397,6 +423,10 @@ func resolveModelValue(opt acp.SessionConfigOption, target string) (string, bool
 }
 
 func modelValueString(value any) string {
+	return configOptionValueString(value)
+}
+
+func configOptionValueString(value any) string {
 	if value == nil {
 		return ""
 	}
@@ -720,7 +750,7 @@ func isACPStateUpdate(update acp.SessionUpdate) bool {
 	case "available_commands_update", "config_option_update":
 		return true
 	default:
-		return false
+		return update.Models != nil || update.Modes != nil || update.Mode != nil
 	}
 }
 
@@ -728,16 +758,32 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 	if session == nil {
 		return false
 	}
+	changed := false
 	switch update.SessionUpdate {
 	case "available_commands_update":
 		session.AvailableCommands = append([]acp.AvailableCommand(nil), update.AvailableCommands...)
-		return true
+		changed = true
 	case "config_option_update":
 		session.ConfigOptions = append([]acp.SessionConfigOption(nil), update.ConfigOptions...)
-		return true
-	default:
-		return false
+		changed = true
 	}
+	if update.Models != nil {
+		models := *update.Models
+		models.AvailableModels = append([]acp.SessionModel(nil), update.Models.AvailableModels...)
+		session.Models = &models
+		changed = true
+	}
+	if update.Modes != nil {
+		modes := *update.Modes
+		modes.AvailableModes = append([]acp.SessionMode(nil), update.Modes.AvailableModes...)
+		session.Modes = &modes
+		changed = true
+	}
+	if update.Mode != nil {
+		session.Mode = update.Mode
+		changed = true
+	}
+	return changed
 }
 
 func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
@@ -745,6 +791,7 @@ func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Me
 	if errText != "" {
 		return errText
 	}
+	session = s.waitForNewSessionState(ctx, msg, session.Key, session)
 	return formatNewSessionReply(session, source)
 }
 
@@ -757,6 +804,9 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	req, source, errText := s.resolveNewSessionRequest(fields, msg)
 	if errText != "" {
 		return Session{}, config.AgentConfig{}, "", errText
+	}
+	if req.Title == "" {
+		req.Title = s.nextDefaultSessionTitle(store, msg)
 	}
 	cwd := req.Cwd
 	if !filepath.IsAbs(cwd) {
@@ -794,6 +844,8 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		AvailableCommands: sessionInfo.AvailableCommands,
 		ConfigOptions:     sessionInfo.ConfigOptions,
 		Models:            sessionInfo.Models,
+		Modes:             sessionInfo.Modes,
+		Mode:              sessionInfo.Mode,
 	}
 	if err := store.Upsert(session); err != nil {
 		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
@@ -801,6 +853,50 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	}
 	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd)
 	return session, agent, source, ""
+}
+
+func (s *Service) waitForNewSessionState(ctx context.Context, msg feishu.Message, key SessionKey, session Session) Session {
+	store := s.storeForMessage(msg)
+	session = latestSessionForKey(store, key, session)
+	if currentModeDisplay(session) != "" || currentModelDisplay(session) != "" {
+		return session
+	}
+	timer := time.NewTimer(newSessionStateWait)
+	defer timer.Stop()
+	updated := make(chan struct{}, 1)
+	unsub := s.runtime.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
+		if sessionID != session.ACPSessionID || !isACPStateUpdate(update) {
+			return
+		}
+		select {
+		case updated <- struct{}{}:
+		default:
+		}
+	})
+	defer unsub()
+	for {
+		select {
+		case <-ctx.Done():
+			return latestSessionForKey(store, key, session)
+		case <-timer.C:
+			return latestSessionForKey(store, key, session)
+		case <-updated:
+			current := latestSessionForKey(store, key, session)
+			if currentModeDisplay(current) != "" || currentModelDisplay(current) != "" {
+				return current
+			}
+		}
+	}
+}
+
+func latestSessionForKey(store *SessionStore, key SessionKey, fallback Session) Session {
+	if store == nil {
+		return fallback
+	}
+	if session, ok := store.Get(key); ok {
+		return session
+	}
+	return fallback
 }
 
 func (s *Service) status(msg feishu.Message) string {
@@ -2076,8 +2172,16 @@ func truncateRunes(text string, limit int) string {
 }
 
 func formatNewSessionReply(session Session, source string) string {
-	return fmt.Sprintf("已为当前会话创建 ACP 会话。\n标题：%s\nagent：%s\ncwd：%s\ncwd 来源：%s\nsession：%s",
-		displaySessionTitle(session), session.AgentName, session.Cwd, source, session.ACPSessionID)
+	mode := currentModeDisplay(session)
+	if mode == "" {
+		mode = "未知"
+	}
+	model := currentModelDisplay(session)
+	if model == "" {
+		model = "未知"
+	}
+	return fmt.Sprintf("已为当前会话创建 ACP 会话。\n标题：%s\nmode：%s\nmodel：%s\nagent：%s\ncwd：%s\ncwd 来源：%s\nsession：%s",
+		displaySessionTitle(session), mode, model, session.AgentName, session.Cwd, source, session.ACPSessionID)
 }
 
 func promptWithUserMessage(prefixes []string, text string) string {
@@ -2133,6 +2237,17 @@ func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) 
 	}
 	req.Cwd = agent.DefaultCwd
 	return req, "默认配置", ""
+}
+
+func (s *Service) nextDefaultSessionTitle(store *SessionStore, msg feishu.Message) string {
+	next := 1
+	if store != nil {
+		next = len(store.ListByChat(msg.BotID, msg.ChatID)) + 1
+	}
+	if next < 1 {
+		next = 1
+	}
+	return fmt.Sprintf("session#%d", next)
 }
 
 const maxSessionTitleRunes = 40

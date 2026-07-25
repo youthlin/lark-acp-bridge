@@ -198,6 +198,33 @@ func TestApplyACPStateUpdateAllowsEmptyLists(t *testing.T) {
 	}
 }
 
+func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
+	session := Session{}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_state_update",
+		Models: &acp.SessionModelState{
+			CurrentModelID: "gpt-5.5",
+			AvailableModels: []acp.SessionModel{
+				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
+			},
+		},
+		Modes: &acp.SessionModeState{
+			CurrentModeID: "agent",
+			AvailableModes: []acp.SessionMode{
+				{ModeID: "agent", Name: "Agent"},
+			},
+		},
+	}) {
+		t.Fatal("session_state_update should update mode/model state")
+	}
+	if got := currentModelDisplay(session); got != "gpt-5.5" {
+		t.Fatalf("currentModelDisplay = %q, want gpt-5.5", got)
+	}
+	if got := currentModeDisplay(session); got != "agent" {
+		t.Fatalf("currentModeDisplay = %q, want agent", got)
+	}
+}
+
 func TestHandleFeishuMessageStatus(t *testing.T) {
 	svc := NewService(config.Default(), nil)
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1108,6 +1135,91 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	}
 	if !strings.Contains(reply, "标题：只指定标题") || !strings.Contains(reply, "标题：新标题") {
 		t.Fatalf("reply = %q, want titles in list", reply)
+	}
+}
+
+func TestHandleFeishuNewSessionUsesDefaultTitleAndDisplaysModeModel(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_private",
+		ChatType: "p2p",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		MessageID: "om_new_1",
+		Text:      "/new " + workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new first) error = %v", err)
+	}
+	for _, want := range []string{"标题：session#1", "mode：未知", "model：gpt-5.5"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		MessageID: "om_new_2",
+		Text:      "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new second) error = %v", err)
+	}
+	if !strings.Contains(reply, "标题：session#2") || !strings.Contains(reply, "cwd 来源：当前会话已有会话") {
+		t.Fatalf("reply = %q, want second default title and reused cwd", reply)
+	}
+}
+
+func TestHandleFeishuNewSessionWaitsForSessionStateUpdate(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{
+		newSessionID:   "acp-session-1",
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-session-1"},
+		noDefaultState: true,
+	}
+	rt.afterNewSession = func(key SessionKey, sessionID string) {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			rt.dispatchUpdate(key, sessionID, acp.SessionUpdate{
+				SessionUpdate: "session_state_update",
+				Models: &acp.SessionModelState{
+					CurrentModelID: "gpt-5.6",
+				},
+				Modes: &acp.SessionModeState{
+					CurrentModeID: "plan",
+				},
+			})
+		}()
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new " + workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	for _, want := range []string{"标题：session#1", "mode：plan", "model：gpt-5.6"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
 	}
 }
 
@@ -3160,6 +3272,8 @@ type fakeRuntime struct {
 	newSessionID      string
 	newSessionIDs     []string
 	newSessionInfo    acp.SessionInfo
+	noDefaultState    bool
+	afterNewSession   func(key SessionKey, sessionID string)
 	promptReply       string
 	promptErrors      []error
 	promptUpdates     []acp.PromptUpdate
@@ -3202,20 +3316,26 @@ type fakeConfigCall struct {
 
 func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
 	info := f.newSessionInfo
+	afterNewSession := f.afterNewSession
 	if len(f.newSessionIDs) > 0 {
 		info.SessionID = f.newSessionIDs[0]
 		f.newSessionIDs = f.newSessionIDs[1:]
-		return info, nil
-	}
-	if f.newSessionID != "" {
+	} else if f.newSessionID != "" {
 		info.SessionID = f.newSessionID
-		return info, nil
 	}
 	if info.SessionID == "" {
 		info.SessionID = "acp-session"
+	}
+	if !f.noDefaultState && len(info.ConfigOptions) == 0 && info.Models == nil && info.Modes == nil && info.Mode == nil {
+		info.ConfigOptions = []acp.SessionConfigOption{
+			{ID: "model", Name: "Model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+		}
+	}
+	f.mu.Unlock()
+	if afterNewSession != nil {
+		afterNewSession(key, info.SessionID)
 	}
 	return info, nil
 }
@@ -3298,6 +3418,15 @@ func (f *fakeRuntime) SubscribeUpdates(key SessionKey, handler acp.UpdateHandler
 	f.updateHandlers[key] = append(f.updateHandlers[key], handler)
 	f.mu.Unlock()
 	return func() {}
+}
+
+func (f *fakeRuntime) dispatchUpdate(key SessionKey, sessionID string, update acp.SessionUpdate) {
+	f.mu.Lock()
+	handlers := append([]acp.UpdateHandler(nil), f.updateHandlers[key]...)
+	f.mu.Unlock()
+	for _, handler := range handlers {
+		handler(sessionID, update)
+	}
 }
 
 func (f *fakeRuntime) CloseSession(key SessionKey) error {

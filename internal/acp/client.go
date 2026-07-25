@@ -86,6 +86,9 @@ type SessionUpdate struct {
 	StopReason        string                `json:"stopReason,omitempty"`
 	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
+	Models            *SessionModelState    `json:"models,omitempty"`
+	Modes             *SessionModeState     `json:"modes,omitempty"`
+	Mode              any                   `json:"mode,omitempty"`
 	Raw               json.RawMessage       `json:"-"`
 }
 

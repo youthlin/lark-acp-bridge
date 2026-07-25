@@ -5,6 +5,8 @@ type SessionInfo struct {
 	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
+	Modes             *SessionModeState     `json:"modes,omitempty"`
+	Mode              any                   `json:"mode,omitempty"`
 }
 
 type AvailableCommand struct {
@@ -40,6 +42,17 @@ type SessionModelState struct {
 
 type SessionModel struct {
 	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type SessionModeState struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []SessionMode `json:"availableModes,omitempty"`
+}
+
+type SessionMode struct {
+	ModeID      string `json:"modeId"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 }
