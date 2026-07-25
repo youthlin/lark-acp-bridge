@@ -15,19 +15,29 @@ import (
 const (
 	streamCardProcessPanelID   = "panel_process"
 	streamCardProcessElementID = "md_process"
+	streamCardUsagePanelID     = "panel_usage_detail"
+	streamCardUsageDetailID    = "md_usage_detail"
+	streamCardStatusElementID  = "md_status"
 	streamCardTextElementID    = "md_stream"
 )
 
 type cardJSON map[string]any
 
 func newStreamCardJSON() string {
-	return newStreamCardJSONWithProcessPanel(true)
+	return newStreamCardJSONWithPanels(true, true)
 }
 
 func newStreamCardJSONWithProcessPanel(includeProcessPanel bool) string {
+	return newStreamCardJSONWithPanels(includeProcessPanel, true)
+}
+
+func newStreamCardJSONWithPanels(includeProcessPanel, includeStatusBar bool) string {
 	elements := []any{cardJSON{"tag": "markdown", "content": "", "element_id": streamCardTextElementID}}
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanel())
+	}
+	if includeStatusBar {
+		elements = append(elements, streamCardStatusMarkdown("执行中"))
 	}
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
@@ -54,6 +64,11 @@ func newStreamCardProcessPanelJSON() string {
 	return string(data)
 }
 
+func newStreamCardUsagePanelJSON(content string) string {
+	data, _ := json.Marshal([]any{streamCardUsagePanel(content)})
+	return string(data)
+}
+
 func streamCardProcessPanel() cardJSON {
 	return cardJSON{
 		"tag":              "collapsible_panel",
@@ -72,6 +87,37 @@ func streamCardProcessPanel() cardJSON {
 	}
 }
 
+func streamCardStatusMarkdown(status string) cardJSON {
+	return cardJSON{
+		"tag":              "markdown",
+		"content":          status,
+		"element_id":       streamCardStatusElementID,
+		"text_size":        "notation",
+		"text_align":       "right",
+		"text_color":       "grey",
+		"margin":           "8px 0 0 0",
+		"vertical_spacing": "4px",
+	}
+}
+
+func streamCardUsagePanel(content string) cardJSON {
+	return cardJSON{
+		"tag":              "collapsible_panel",
+		"expanded":         false,
+		"element_id":       streamCardUsagePanelID,
+		"background_color": "grey",
+		"header": cardJSON{
+			"title": cardJSON{"tag": "plain_text", "content": "用量明细"},
+		},
+		"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
+		"vertical_spacing": "4px",
+		"padding":          "8px 12px 8px 12px",
+		"elements": []any{
+			cardJSON{"tag": "markdown", "content": content, "element_id": streamCardUsageDetailID},
+		},
+	}
+}
+
 type sdkStreamCard struct {
 	adapter *Adapter
 	cardID  string
@@ -80,16 +126,20 @@ type sdkStreamCard struct {
 	sequence       int
 	closed         bool
 	processCreated bool
+	usageCreated   bool
+	usageTargetID  string
 }
 
 func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("飞书客户端未初始化")
 	}
+	processPanelEnabled := StreamCardProcessPanelEnabled(ctx)
+	statusBarEnabled := StreamCardStatusBarEnabled(ctx)
 	cardResp, err := a.client.Cardkit.V1.Card.Create(ctx, larkcardkit.NewCreateCardReqBuilder().
 		Body(larkcardkit.NewCreateCardReqBodyBuilder().
 			Type("card_json").
-			Data(newStreamCardJSONWithProcessPanel(StreamCardProcessPanelEnabled(ctx))).
+			Data(newStreamCardJSONWithPanels(processPanelEnabled, statusBarEnabled)).
 			Build()).
 		Build())
 	if err != nil {
@@ -105,7 +155,22 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return nil, err
 	}
-	return &sdkStreamCard{adapter: a, cardID: cardID, processCreated: StreamCardProcessPanelEnabled(ctx)}, nil
+	return &sdkStreamCard{
+		adapter:        a,
+		cardID:         cardID,
+		processCreated: processPanelEnabled,
+		usageTargetID:  streamCardUsageTargetID(processPanelEnabled, statusBarEnabled),
+	}, nil
+}
+
+func streamCardUsageTargetID(processPanelEnabled, statusBarEnabled bool) string {
+	if statusBarEnabled {
+		return streamCardStatusElementID
+	}
+	if processPanelEnabled {
+		return streamCardProcessPanelID
+	}
+	return streamCardTextElementID
 }
 
 func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID string) error {
@@ -172,6 +237,31 @@ func (c *sdkStreamCard) UpdateProcess(ctx context.Context, text string) error {
 	return c.updateElementLocked(ctx, streamCardProcessElementID, text)
 }
 
+func (c *sdkStreamCard) UpdateStatus(ctx context.Context, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	return c.updateElementLocked(ctx, streamCardStatusElementID, text)
+}
+
+func (c *sdkStreamCard) UpdateUsageDetail(ctx context.Context, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	if !c.usageCreated {
+		if err := c.createUsagePanelLocked(ctx, text); err != nil {
+			return err
+		}
+		c.usageCreated = true
+		return nil
+	}
+	return c.updateElementLocked(ctx, streamCardUsageDetailID, text)
+}
+
 func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -198,6 +288,27 @@ func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("创建飞书流式卡片过程组件返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (c *sdkStreamCard) createUsagePanelLocked(ctx context.Context, text string) error {
+	c.sequence++
+	seq := c.sequence
+	resp, err := c.adapter.client.Cardkit.V1.CardElement.Create(ctx, larkcardkit.NewCreateCardElementReqBuilder().
+		CardId(c.cardID).
+		Body(larkcardkit.NewCreateCardElementReqBodyBuilder().
+			Type(larkcardkit.TypeInsertAfter).
+			TargetElementId(c.usageTargetID).
+			Elements(newStreamCardUsagePanelJSON(text)).
+			Sequence(seq).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("创建飞书流式卡片用量明细组件: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("创建飞书流式卡片用量明细组件返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }

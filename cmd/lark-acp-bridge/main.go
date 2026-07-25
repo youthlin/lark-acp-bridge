@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strings"
 	"syscall"
 
 	"github.com/youthlin/lark-acp-bridge/internal/bridge"
@@ -15,7 +17,7 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
-var version = "dev"
+var version string
 
 func main() {
 	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, nil))))
@@ -32,7 +34,7 @@ func run() error {
 	flag.Parse()
 
 	if showVersion {
-		fmt.Println(version)
+		fmt.Println(appVersion())
 		return nil
 	}
 
@@ -64,6 +66,78 @@ func run() error {
 		return runDaemon(mode, loaded.Path)
 	}
 	return runForeground(loaded.Config, loaded.Path)
+}
+
+func appVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	return appVersionFromBuildInfo(version, info, ok)
+}
+
+func appVersionFromBuildInfo(injected string, info *debug.BuildInfo, ok bool) string {
+	if injected = strings.TrimSpace(injected); injected != "" {
+		return injected
+	}
+	if ok && info != nil {
+		moduleVersion := strings.TrimSpace(info.Main.Version)
+		revision, modified := vcsVersion(info.Settings)
+		if moduleVersion != "" && moduleVersion != "(devel)" && !isPseudoVersion(moduleVersion) {
+			return moduleVersion
+		}
+		if revision != "" {
+			if len(revision) > 7 {
+				revision = revision[:7]
+			}
+			if modified {
+				revision += "-dirty"
+			}
+			return revision
+		}
+		if moduleVersion != "" && moduleVersion != "(devel)" {
+			return moduleVersion
+		}
+	}
+	return "dev"
+}
+
+func isPseudoVersion(version string) bool {
+	parts := strings.Split(strings.TrimSpace(version), "-")
+	if len(parts) < 3 {
+		return false
+	}
+	rev := parts[len(parts)-1]
+	if i := strings.IndexByte(rev, '+'); i >= 0 {
+		rev = rev[:i]
+	}
+	if len(rev) < 12 {
+		return false
+	}
+	ts := parts[len(parts)-2]
+	if i := strings.LastIndexByte(ts, '.'); i >= 0 {
+		ts = ts[i+1:]
+	}
+	if len(ts) != 14 {
+		return false
+	}
+	for _, ch := range ts {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func vcsVersion(settings []debug.BuildSetting) (string, bool) {
+	var revision string
+	var modified bool
+	for _, setting := range settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = strings.TrimSpace(setting.Value)
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	return revision, modified
 }
 
 func runForeground(cfg config.Config, configPath string) error {

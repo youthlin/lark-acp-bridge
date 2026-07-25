@@ -45,6 +45,8 @@ type Session struct {
 	HideStepMessages  bool                      `json:"hide_step_messages,omitempty"`
 	HideThoughts      bool                      `json:"hide_thoughts,omitempty"`
 	HideTools         bool                      `json:"hide_tools,omitempty"`
+	HideStatusBar     bool                      `json:"hide_status_bar,omitempty"`
+	HideUsageDetail   bool                      `json:"hide_usage_detail,omitempty"`
 	AvailableCommands []acp.AvailableCommand    `json:"available_commands,omitempty"`
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`

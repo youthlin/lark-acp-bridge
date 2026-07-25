@@ -21,7 +21,7 @@ var errACPSessionUnavailable = errors.New("acp session unavailable")
 
 type acpRuntime interface {
 	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error)
-	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error)
+	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error
 	SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error)
 	SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func()
@@ -69,10 +69,10 @@ func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentNa
 	return sessionInfo, nil
 }
 
-func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error) {
+func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	client, err := r.clientForSession(ctx, session, agent)
 	if err != nil {
-		return "", err
+		return acp.PromptResult{}, err
 	}
 	timeout := newPromptActivityTimeout(ctx, acpPromptIdleTimeout, acpPromptMaxDuration)
 	defer timeout.Stop()
@@ -92,16 +92,16 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 			return outcome, err
 		}
 	}
-	output, err := client.PromptWithOptions(timeout.Context(), session.ACPSessionID, text, opts)
+	result, err := client.PromptWithOptions(timeout.Context(), session.ACPSessionID, text, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if cause := context.Cause(timeout.Context()); errors.Is(cause, context.DeadlineExceeded) {
 				err = cause
 			}
 		}
-		return output, fmt.Errorf("session/prompt: %w", err)
+		return result, fmt.Errorf("session/prompt: %w", err)
 	}
-	return output, nil
+	return result, nil
 }
 
 type promptActivityTimeout struct {

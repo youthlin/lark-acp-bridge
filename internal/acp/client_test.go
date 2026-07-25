@@ -776,7 +776,7 @@ func TestClientPromptWithOptionsReportsSessionUpdates(t *testing.T) {
 	}()
 
 	var updates []PromptUpdate
-	reply, err := client.PromptWithOptions(context.Background(), "session-1", "你好", PromptOptions{
+	result, err := client.PromptWithOptions(context.Background(), "session-1", "你好", PromptOptions{
 		OnUpdate: func(update PromptUpdate) {
 			updates = append(updates, update)
 		},
@@ -784,8 +784,8 @@ func TestClientPromptWithOptionsReportsSessionUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PromptWithOptions() error = %v", err)
 	}
-	if reply != "最终回复" {
-		t.Fatalf("reply = %q, want collected chunks", reply)
+	if result.Text != "最终回复" {
+		t.Fatalf("reply = %q, want collected chunks", result.Text)
 	}
 	if len(updates) != 3 {
 		t.Fatalf("updates = %+v, want three updates for current session", updates)
@@ -801,6 +801,75 @@ func TestClientPromptWithOptionsReportsSessionUpdates(t *testing.T) {
 	}
 	if updates[2].Update.SessionUpdate != "agent_message_chunk" {
 		t.Fatalf("third update = %+v, want agent message chunk", updates[2])
+	}
+	<-done
+}
+
+func TestClientPromptWithOptionsParsesResultUsage(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		server.writeNotification(t, "session/update", map[string]any{
+			"sessionId": "session-1",
+			"update": map[string]any{
+				"sessionUpdate": "usage_update",
+				"used":          53000,
+				"size":          200000,
+			},
+		})
+		server.writeResponse(t, req.ID, map[string]any{
+			"stopReason": "end_turn",
+			"usage": map[string]any{
+				"inputTokens":      1200,
+				"outputTokens":     345,
+				"totalTokens":      1545,
+				"cachedReadTokens": 1000,
+			},
+			"_meta": map[string]any{
+				"_trae/tokenUsage": map[string]any{
+					"turnDisplay": map[string]any{
+						"inputTokens":  987,
+						"outputTokens": 654,
+					},
+					"contextWindow": map[string]any{
+						"used": 53000,
+						"size": 200000,
+					},
+				},
+			},
+		})
+	}()
+
+	var updates []PromptUpdate
+	result, err := client.PromptWithOptions(context.Background(), "session-1", "你好", PromptOptions{
+		OnUpdate: func(update PromptUpdate) {
+			updates = append(updates, update)
+		},
+	})
+	if err != nil {
+		t.Fatalf("PromptWithOptions() error = %v", err)
+	}
+	if result.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", result.StopReason)
+	}
+	if result.Usage.InputTokens != 1200 || result.Usage.OutputTokens != 345 || result.Usage.CachedReadTokens != 1000 {
+		t.Fatalf("Usage = %+v, want prompt usage", result.Usage)
+	}
+	if result.Meta.TraeTokenUsage == nil {
+		t.Fatal("TraeTokenUsage = nil, want parsed metadata")
+	}
+	if result.Meta.TraeTokenUsage.TurnDisplay.InputTokens != 987 || result.Meta.TraeTokenUsage.TurnDisplay.OutputTokens != 654 {
+		t.Fatalf("TurnDisplay = %+v, want parsed turn display usage", result.Meta.TraeTokenUsage.TurnDisplay)
+	}
+	if result.Meta.TraeTokenUsage.ContextWindow.Used != 53000 || result.Meta.TraeTokenUsage.ContextWindow.Size != 200000 {
+		t.Fatalf("ContextWindow = %+v, want parsed context window", result.Meta.TraeTokenUsage.ContextWindow)
+	}
+	if len(updates) != 1 || updates[0].Update.SessionUpdate != "usage_update" || updates[0].Update.Used != 53000 || updates[0].Update.Size != 200000 {
+		t.Fatalf("updates = %+v, want parsed usage_update", updates)
 	}
 	<-done
 }

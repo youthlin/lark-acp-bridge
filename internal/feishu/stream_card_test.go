@@ -19,6 +19,21 @@ func TestNewStreamCardJSONStartsWithProcessPanel(t *testing.T) {
 	if !jsonContainsValue(card, streamCardTextElementID) {
 		t.Fatalf("initial stream card does not contain text element %q", streamCardTextElementID)
 	}
+	if !jsonContainsValue(card, streamCardStatusElementID) {
+		t.Fatalf("initial stream card does not contain status element %q", streamCardStatusElementID)
+	}
+	if jsonContainsValue(card, streamCardUsagePanelID) {
+		t.Fatalf("initial stream card should not contain usage detail panel %q", streamCardUsagePanelID)
+	}
+	if jsonContainsValue(card, streamCardUsageDetailID) {
+		t.Fatalf("initial stream card should not contain usage detail element %q", streamCardUsageDetailID)
+	}
+	if jsonContainsValue(card, "结果明细") {
+		t.Fatalf("initial stream card should not contain separate result title")
+	}
+	if !jsonContainsValue(card, "执行中") {
+		t.Fatalf("initial stream card does not contain running status")
+	}
 	if !jsonContainsValue(card, streamCardProcessPanelID) {
 		t.Fatalf("initial stream card does not contain process panel %q", streamCardProcessPanelID)
 	}
@@ -39,14 +54,101 @@ func TestNewStreamCardJSONCanOmitProcessPanel(t *testing.T) {
 	if !jsonContainsValue(card, streamCardTextElementID) {
 		t.Fatalf("stream card does not contain text element %q", streamCardTextElementID)
 	}
+	if !jsonContainsValue(card, streamCardStatusElementID) {
+		t.Fatalf("stream card does not contain status element %q", streamCardStatusElementID)
+	}
+	if jsonContainsValue(card, streamCardUsagePanelID) {
+		t.Fatalf("stream card should not contain usage detail panel %q before prompt result", streamCardUsagePanelID)
+	}
+	if jsonContainsValue(card, streamCardUsageDetailID) {
+		t.Fatalf("stream card should not contain usage detail element %q before prompt result", streamCardUsageDetailID)
+	}
 	if jsonContainsValue(card, streamCardProcessPanelID) {
 		t.Fatalf("stream card should not contain process panel %q", streamCardProcessPanelID)
 	}
 	if jsonContainsValue(card, streamCardProcessElementID) {
 		t.Fatalf("stream card should not contain process element %q", streamCardProcessElementID)
 	}
+	if jsonContainsValue(card, "结果明细") {
+		t.Fatalf("stream card should not contain separate result title")
+	}
 	if jsonContainsValue(card, "执行过程") {
 		t.Fatalf("stream card should not contain execution process title")
+	}
+}
+
+func TestNewStreamCardJSONCanOmitStatusBar(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newStreamCardJSONWithPanels(true, false)), &card); err != nil {
+		t.Fatalf("newStreamCardJSONWithPanels(true, false) is not valid JSON: %v", err)
+	}
+
+	if !jsonContainsValue(card, streamCardTextElementID) {
+		t.Fatalf("stream card does not contain text element %q", streamCardTextElementID)
+	}
+	if !jsonContainsValue(card, streamCardProcessPanelID) {
+		t.Fatalf("stream card does not contain process panel %q", streamCardProcessPanelID)
+	}
+	if jsonContainsValue(card, streamCardStatusElementID) {
+		t.Fatalf("stream card should not contain status element %q", streamCardStatusElementID)
+	}
+	if jsonContainsValue(card, "执行中") {
+		t.Fatalf("stream card should not contain running status")
+	}
+}
+
+func TestNewStreamCardUsagePanelJSONContainsUsageDetail(t *testing.T) {
+	var elements any
+	if err := json.Unmarshal([]byte(newStreamCardUsagePanelJSON("```json\n{}\n```")), &elements); err != nil {
+		t.Fatalf("newStreamCardUsagePanelJSON() is not valid JSON: %v", err)
+	}
+
+	if !jsonContainsValue(elements, streamCardUsagePanelID) {
+		t.Fatalf("usage panel JSON does not contain panel %q", streamCardUsagePanelID)
+	}
+	if !jsonContainsValue(elements, streamCardUsageDetailID) {
+		t.Fatalf("usage panel JSON does not contain detail element %q", streamCardUsageDetailID)
+	}
+	if !jsonContainsValue(elements, "用量明细") {
+		t.Fatalf("usage panel JSON does not contain usage detail title")
+	}
+	if jsonContainsValue(elements, "结果明细") {
+		t.Fatalf("usage panel JSON should not contain separate result title")
+	}
+	if !jsonContainsSubstring(elements, "```json") {
+		t.Fatalf("usage panel JSON does not contain detail content")
+	}
+}
+
+func TestStreamCardUsageTargetID(t *testing.T) {
+	tests := []struct {
+		name                string
+		processPanelEnabled bool
+		statusBarEnabled    bool
+		want                string
+	}{
+		{
+			name:                "after status bar",
+			processPanelEnabled: true,
+			statusBarEnabled:    true,
+			want:                streamCardStatusElementID,
+		},
+		{
+			name:                "after process panel without status bar",
+			processPanelEnabled: true,
+			want:                streamCardProcessPanelID,
+		},
+		{
+			name: "after text only",
+			want: streamCardTextElementID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := streamCardUsageTargetID(tt.processPanelEnabled, tt.statusBarEnabled); got != tt.want {
+				t.Fatalf("streamCardUsageTargetID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

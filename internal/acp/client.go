@@ -74,6 +74,39 @@ type PromptUpdate struct {
 	Update    SessionUpdate
 }
 
+type PromptResult struct {
+	Text       string           `json:"-"`
+	StopReason string           `json:"stopReason,omitempty"`
+	Usage      TokenUsage       `json:"usage,omitempty"`
+	Meta       PromptResultMeta `json:"_meta,omitempty"`
+	Raw        json.RawMessage  `json:"-"`
+}
+
+type PromptResultMeta struct {
+	TraeTokenUsage *TraeTokenUsage `json:"_trae/tokenUsage,omitempty"`
+}
+
+type TraeTokenUsage struct {
+	TurnDisplay    TokenUsage         `json:"turnDisplay,omitempty"`
+	SessionDisplay TokenUsage         `json:"sessionDisplay,omitempty"`
+	ContextWindow  ContextWindowUsage `json:"contextWindow,omitempty"`
+}
+
+type TokenUsage struct {
+	TotalTokens       int64 `json:"totalTokens,omitempty"`
+	InputTokens       int64 `json:"inputTokens,omitempty"`
+	OutputTokens      int64 `json:"outputTokens,omitempty"`
+	ThoughtTokens     int64 `json:"thoughtTokens,omitempty"`
+	CachedReadTokens  int64 `json:"cachedReadTokens,omitempty"`
+	CachedWriteTokens int64 `json:"cachedWriteTokens,omitempty"`
+}
+
+type ContextWindowUsage struct {
+	Used                  int64 `json:"used,omitempty"`
+	Size                  int64 `json:"size,omitempty"`
+	AutoCompactTokenLimit int64 `json:"autoCompactTokenLimit,omitempty"`
+}
+
 type SessionUpdate struct {
 	SessionUpdate     string                `json:"sessionUpdate"`
 	Content           *ContentBlock         `json:"content,omitempty"`
@@ -88,6 +121,8 @@ type SessionUpdate struct {
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
 	Mode              *SessionModeState     `json:"mode,omitempty"`
+	Used              int64                 `json:"used,omitempty"`
+	Size              int64                 `json:"size,omitempty"`
 	Raw               json.RawMessage       `json:"-"`
 }
 
@@ -387,14 +422,15 @@ func (c *Client) SetConfigOption(ctx context.Context, sessionID, configID string
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
-	return c.PromptWithOptions(ctx, sessionID, text, PromptOptions{})
+	result, err := c.PromptWithOptions(ctx, sessionID, text, PromptOptions{})
+	return result.Text, err
 }
 
-func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
+func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (PromptResult, error) {
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return PromptResult{}, err
 	}
 
 	var output strings.Builder
@@ -419,7 +455,7 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	})
 	defer unsubscribe()
 
-	_, err := c.callWithAfterWriteAndCancelWait(ctx, "session/prompt", map[string]any{
+	rawResult, err := c.callWithAfterWriteAndCancelWait(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
@@ -430,11 +466,21 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	if err != nil {
 		outputMu.Lock()
 		defer outputMu.Unlock()
-		return output.String(), err
+		return PromptResult{Text: output.String()}, err
 	}
 	outputMu.Lock()
-	defer outputMu.Unlock()
-	return output.String(), nil
+	textOutput := output.String()
+	outputMu.Unlock()
+	result := PromptResult{Text: textOutput, Raw: append(json.RawMessage(nil), rawResult...)}
+	if len(rawResult) > 0 && string(rawResult) != "null" {
+		if err := json.Unmarshal(rawResult, &result); err != nil {
+			result.Text = textOutput
+			return result, fmt.Errorf("解析 session/prompt 响应: %w", err)
+		}
+		result.Text = textOutput
+		result.Raw = append(json.RawMessage(nil), rawResult...)
+	}
+	return result, nil
 }
 
 func (c *Client) SubscribeUpdates(handler UpdateHandler) func() {

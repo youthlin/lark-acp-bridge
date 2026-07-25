@@ -13,6 +13,8 @@ type intermediateReplySenderKey struct{}
 // StreamCard 表示一张可流式更新的飞书卡片。
 type StreamCard interface {
 	UpdateProcess(context.Context, string) error
+	UpdateStatus(context.Context, string) error
+	UpdateUsageDetail(context.Context, string) error
 	UpdateText(context.Context, string) error
 	Close(context.Context) error
 }
@@ -22,6 +24,8 @@ type streamCardStarter func(context.Context, Message) (StreamCard, error)
 type streamCardStarterKey struct{}
 
 type streamCardProcessPanelKey struct{}
+
+type streamCardStatusBarKey struct{}
 
 type permissionRequester func(context.Context, Message, acp.PermissionRequest) (acp.PermissionOutcome, error)
 
@@ -97,6 +101,18 @@ func WithStreamCardProcessPanel(ctx context.Context, enabled bool) context.Conte
 
 func StreamCardProcessPanelEnabled(ctx context.Context) bool {
 	enabled, ok := ctx.Value(streamCardProcessPanelKey{}).(bool)
+	if !ok {
+		return true
+	}
+	return enabled
+}
+
+func WithStreamCardStatusBar(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, streamCardStatusBarKey{}, enabled)
+}
+
+func StreamCardStatusBarEnabled(ctx context.Context) bool {
+	enabled, ok := ctx.Value(streamCardStatusBarKey{}).(bool)
 	if !ok {
 		return true
 	}

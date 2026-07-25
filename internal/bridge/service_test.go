@@ -597,7 +597,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/show thought off) error = %v", err)
 	}
-	for _, want := range []string{"已关闭思考消息展示", "过程消息：开启", "思考消息：关闭", "工具调用：开启"} {
+	for _, want := range []string{"已关闭思考消息展示", "过程消息：开启", "思考消息：关闭", "工具调用：开启", "状态栏：开启", "用量明细：开启"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
@@ -625,6 +625,40 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	updated, _ = store.Get(session.Key)
 	if updated.HideThoughts {
 		t.Fatalf("HideThoughts = true, want false after /show thought on")
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show status off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show status off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭状态栏展示") || !strings.Contains(reply, "状态栏：关闭") {
+		t.Fatalf("reply = %q, want status bar disabled", reply)
+	}
+	updated, _ = store.Get(session.Key)
+	if !updated.HideStatusBar {
+		t.Fatalf("HideStatusBar = false, want true after /show status off")
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show used off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show used off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭用量明细展示") || !strings.Contains(reply, "用量明细：关闭") {
+		t.Fatalf("reply = %q, want usage detail disabled", reply)
+	}
+	updated, _ = store.Get(session.Key)
+	if !updated.HideUsageDetail {
+		t.Fatalf("HideUsageDetail = false, want true after /show used off")
 	}
 }
 
@@ -2219,6 +2253,488 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 	}
 	if strings.Contains(lastProcess, "最终结论") {
 		t.Fatalf("last process update = %q, should not include final agent text", lastProcess)
+	}
+}
+
+func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+			Raw:        json.RawMessage(`{"stopReason":"end_turn","usage":{"inputTokens":511800,"outputTokens":27600,"cachedReadTokens":496446},"_meta":{"trace":"abc"}}`),
+			Usage: acp.TokenUsage{
+				InputTokens:      511800,
+				OutputTokens:     27600,
+				CachedReadTokens: 496446,
+			},
+			Meta: acp.PromptResultMeta{
+				TraeTokenUsage: &acp.TraeTokenUsage{
+					TurnDisplay: acp.TokenUsage{
+						InputTokens:  987,
+						OutputTokens: 654,
+					},
+					ContextWindow: acp.ContextWindowUsage{
+						Used: 69200,
+						Size: 258400,
+					},
+				},
+			},
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "usage_update",
+					Used:          69200,
+					Size:          258400,
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	got := cards[0].statusUpdatesSnapshot()
+	want := []string{
+		"执行中 | 69K/258K",
+		"执行中 | 511.8K(97%), 27.6K | 69K/258K",
+		"已完成 | 511.8K(97%), 27.6K | 69K/258K",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("statusUpdates = %+v, want %+v", got, want)
+	}
+	usageDetails := cards[0].usageDetailsSnapshot()
+	if len(usageDetails) != 1 {
+		t.Fatalf("usageDetails = %+v, want one usage detail update", usageDetails)
+	}
+	for _, want := range []string{"```json", `"stopReason": "end_turn"`, `"cachedReadTokens": 496446`, `"_meta": {`, `"trace": "abc"`} {
+		if !strings.Contains(usageDetails[0], want) {
+			t.Fatalf("usage detail = %q, want %q", usageDetails[0], want)
+		}
+	}
+}
+
+func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.HideStatusBar = true
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+			Usage: acp.TokenUsage{
+				InputTokens:  1200,
+				OutputTokens: 345,
+			},
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: session.ACPSessionID,
+				Update: acp.SessionUpdate{
+					SessionUpdate: "usage_update",
+					Used:          53000,
+					Size:          200000,
+				},
+			},
+			{
+				SessionID: session.ACPSessionID,
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	var statusBarEnabled *bool
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		enabled := feishu.StreamCardStatusBarEnabled(ctx)
+		statusBarEnabled = &enabled
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     session.Key.BotID,
+		MessageID: "om_msg",
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		ChatType:  "group",
+		Text:      "run",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if statusBarEnabled == nil || *statusBarEnabled {
+		t.Fatalf("statusBarEnabled = %v, want false", statusBarEnabled)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].statusUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("statusUpdates = %+v, want none when status bar is hidden", got)
+	}
+}
+
+func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.HideUsageDetail = true
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+			Raw:        json.RawMessage(`{"stopReason":"end_turn","usage":{"inputTokens":1200,"outputTokens":345},"_meta":{"trace":"abc"}}`),
+			Usage: acp.TokenUsage{
+				InputTokens:  1200,
+				OutputTokens: 345,
+			},
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: session.ACPSessionID,
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     session.Key.BotID,
+		MessageID: "om_msg",
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		ChatType:  "group",
+		Text:      "run",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].usageDetailsSnapshot(); len(got) != 0 {
+		t.Fatalf("usageDetails = %+v, want none when usage detail is hidden", got)
+	}
+}
+
+func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+			Raw:        json.RawMessage(`{"stopReason":"end_turn"}`),
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: session.ACPSessionID,
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     session.Key.BotID,
+		MessageID: "om_msg",
+		ChatID:    session.Key.ChatID,
+		ThreadID:  session.Key.ThreadID,
+		ChatType:  "group",
+		Text:      "run",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].usageDetailsSnapshot(); len(got) != 0 {
+		t.Fatalf("usageDetails = %+v, want none without usage info", got)
+	}
+}
+
+func TestPromptResultHasUsageDetail(t *testing.T) {
+	tests := []struct {
+		name   string
+		result acp.PromptResult
+		want   bool
+	}{
+		{
+			name: "structured usage",
+			result: acp.PromptResult{Usage: acp.TokenUsage{
+				InputTokens: 1,
+			}},
+			want: true,
+		},
+		{
+			name: "trae meta",
+			result: acp.PromptResult{Meta: acp.PromptResultMeta{
+				TraeTokenUsage: &acp.TraeTokenUsage{},
+			}},
+			want: true,
+		},
+		{
+			name:   "raw usage",
+			result: acp.PromptResult{Raw: json.RawMessage(`{"usage":{"inputTokens":1}}`)},
+			want:   true,
+		},
+		{
+			name:   "raw meta",
+			result: acp.PromptResult{Raw: json.RawMessage(`{"_meta":{"trace":"abc"}}`)},
+			want:   true,
+		},
+		{
+			name:   "no usage",
+			result: acp.PromptResult{Raw: json.RawMessage(`{"stopReason":"end_turn"}`)},
+			want:   false,
+		},
+		{
+			name:   "empty usage object",
+			result: acp.PromptResult{Raw: json.RawMessage(`{"usage":{}}`)},
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := promptResultHasUsageDetail(tt.result); got != tt.want {
+				t.Fatalf("promptResultHasUsageDetail() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
+	status := promptStatusBar{state: promptStatusRunning}
+	status.Context = acp.ContextWindowUsage{Used: 69200, Size: 258400}
+	status.applyPromptResult(acp.PromptResult{
+		Usage: acp.TokenUsage{
+			InputTokens:      511800,
+			CachedReadTokens: 496446,
+		},
+		Meta: acp.PromptResultMeta{
+			TraeTokenUsage: &acp.TraeTokenUsage{
+				TurnDisplay: acp.TokenUsage{
+					InputTokens:  987,
+					OutputTokens: 356,
+				},
+				ContextWindow: acp.ContextWindowUsage{Used: 99000, Size: 300000},
+			},
+		},
+	})
+
+	got := status.text()
+	want := "执行中 | 511.8K(97%), 356 | 69K/258K"
+	if got != want {
+		t.Fatalf("status text = %q, want %q", got, want)
+	}
+}
+
+func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
+	status := promptStatusBar{
+		state:       promptStatusCompleted,
+		input:       2_908_700,
+		cachedInput: 2_763_265,
+		output:      1_200_000,
+		Context:     acp.ContextWindowUsage{Used: 2_908_700, Size: 4_096_000},
+	}
+
+	got := status.text()
+	want := "已完成 | 2.9M(95%), 1.2M | 2M/4M"
+	if got != want {
+		t.Fatalf("status text = %q, want %q", got, want)
+	}
+}
+
+func TestPromptStatusBarOmitsMissingTokenUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		bar  promptStatusBar
+		want string
+	}{
+		{
+			name: "output only",
+			bar:  promptStatusBar{state: promptStatusCompleted, output: 1000},
+			want: "已完成 | 1K",
+		},
+		{
+			name: "input only without cache rate",
+			bar:  promptStatusBar{state: promptStatusCompleted, input: 1000},
+			want: "已完成 | 1K",
+		},
+		{
+			name: "no usage",
+			bar:  promptStatusBar{state: promptStatusCompleted},
+			want: "已完成",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.bar.text(); got != tt.want {
+				t.Fatalf("status text = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptStatusBarCancelledStopReason(t *testing.T) {
+	status := promptStatusBar{state: promptStatusRunning}
+	status.applyPromptResult(acp.PromptResult{
+		StopReason: "cancelled",
+		Usage: acp.TokenUsage{
+			InputTokens:  1200,
+			OutputTokens: 345,
+		},
+	})
+	status.state = promptStatusFromStopReason("cancelled")
+	status.stopReason = "cancelled"
+	if got, want := status.text(), "已取消 | 1.2K, 345"; got != want {
+		t.Fatalf("status text = %q, want %q", got, want)
+	}
+}
+
+func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptResult: acp.PromptResult{
+			Text:       "已取消。",
+			StopReason: "cancelled",
+			Usage: acp.TokenUsage{
+				InputTokens: 1200,
+			},
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "已取消。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	got := cards[0].statusUpdatesSnapshot()
+	if len(got) == 0 || got[len(got)-1] != "已取消 | 1.2K" {
+		t.Fatalf("statusUpdates = %+v, want final cancelled status", got)
+	}
+}
+
+func TestFormatPromptResultDetailEscapesCodeFence(t *testing.T) {
+	got := formatPromptResultDetail(acp.PromptResult{
+		Raw: json.RawMessage("{\"message\":\"contains ``` fence\"}"),
+	})
+	if !strings.HasPrefix(got, "````json\n") || !strings.HasSuffix(got, "\n````") {
+		t.Fatalf("detail = %q, want four-backtick fence", got)
+	}
+	if !strings.Contains(got, "contains ``` fence") {
+		t.Fatalf("detail = %q, want raw content", got)
 	}
 }
 
@@ -3895,6 +4411,16 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	if !cancelled {
 		t.Fatalf("process updates = %+v, want cancellation marker", cards[0].processUpdatesSnapshot())
 	}
+	statusCancelled := false
+	for _, update := range cards[0].statusUpdatesSnapshot() {
+		if strings.Contains(update, "已取消") {
+			statusCancelled = true
+			break
+		}
+	}
+	if !statusCancelled {
+		t.Fatalf("status updates = %+v, want cancelled status", cards[0].statusUpdatesSnapshot())
+	}
 	if !cards[0].isClosed() {
 		t.Fatal("cancelled old card should be closed")
 	}
@@ -4393,6 +4919,7 @@ type fakeRuntime struct {
 	permissionOutcome acp.PermissionOutcome
 	blockPrompt       chan struct{}
 	blockPromptAt     int
+	promptResult      acp.PromptResult
 	configOptions     []acp.SessionConfigOption
 	configCalls       []fakeConfigCall
 	newCalls          []fakeNewCall
@@ -4451,7 +4978,7 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 	return info, nil
 }
 
-func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (string, error) {
+func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	f.mu.Lock()
 	f.promptCalls = append(f.promptCalls, fakePromptCall{Session: session, Text: text})
 	callNumber := len(f.promptCalls)
@@ -4459,7 +4986,10 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 	afterUpdates := f.afterUpdates
 	blockPrompt := f.blockPrompt
 	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
-	reply := f.promptReply
+	result := f.promptResult
+	if result.Text == "" {
+		result.Text = f.promptReply
+	}
 	var promptErr error
 	if len(f.promptErrors) > 0 {
 		promptErr = f.promptErrors[0]
@@ -4483,14 +5013,14 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 	if blockThisPrompt {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return acp.PromptResult{}, ctx.Err()
 		case <-blockPrompt:
 		}
 	}
 	if promptErr != nil {
-		return "", promptErr
+		return acp.PromptResult{}, promptErr
 	}
-	return reply, nil
+	return result, nil
 }
 
 func (f *fakeRuntime) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {
@@ -4567,6 +5097,8 @@ type fakeStreamCard struct {
 	mu             sync.Mutex
 	textUpdates    []string
 	processUpdates []string
+	statusUpdates  []string
+	usageDetails   []string
 	closed         bool
 }
 
@@ -4599,6 +5131,20 @@ func (f *fakeStreamCard) UpdateProcess(ctx context.Context, text string) error {
 	return nil
 }
 
+func (f *fakeStreamCard) UpdateStatus(ctx context.Context, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusUpdates = append(f.statusUpdates, text)
+	return nil
+}
+
+func (f *fakeStreamCard) UpdateUsageDetail(ctx context.Context, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.usageDetails = append(f.usageDetails, text)
+	return nil
+}
+
 func (f *fakeStreamCard) Close(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -4616,6 +5162,18 @@ func (f *fakeStreamCard) processUpdatesSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.processUpdates...)
+}
+
+func (f *fakeStreamCard) usageDetailsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.usageDetails...)
+}
+
+func (f *fakeStreamCard) statusUpdatesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.statusUpdates...)
 }
 
 func (f *fakeStreamCard) isClosed() bool {
