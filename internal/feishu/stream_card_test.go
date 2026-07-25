@@ -552,6 +552,78 @@ func TestModelSelectionCardActionSetsModelAndReplacesDropdown(t *testing.T) {
 	}
 }
 
+func TestNewModeSelectionCardJSONContainsDropdownAndCallbackContext(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newModeSelectionCardJSON(ModeSelectionCard{
+		BotID:        "default",
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_thread",
+		ACPSessionID: "session-1",
+		RequesterID:  "ou_requester",
+		CurrentMode:  "default",
+		Options: []ModeOption{
+			{Value: "default", Name: "Default"},
+			{Value: "plan", Name: "Plan"},
+		},
+	})), &card); err != nil {
+		t.Fatalf("newModeSelectionCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{
+		"select_static",
+		"default",
+		"Plan（plan）",
+		modeSelectionCardAction,
+		"session-1",
+		"ou_requester",
+	} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("mode card does not contain %q: %#v", want, card)
+		}
+	}
+}
+
+func TestModeSelectionCardActionSetsModeAndReplacesDropdown(t *testing.T) {
+	handler := &fakeModeSelectionHandler{display: "Plan（plan）"}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_requester"},
+			Action: &callback.CallBackAction{
+				Tag:    "select_static",
+				Option: "plan",
+				Value: map[string]interface{}{
+					"action":         modeSelectionCardAction,
+					"bot_id":         "default",
+					"chat_id":        "oc_chat",
+					"thread_id":      "omt_thread",
+					"acp_session_id": "session-1",
+					"requester_id":   "ou_requester",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "success" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success card replacement", resp)
+	}
+	if handler.selection.Mode != "plan" || handler.selection.OperatorID != "ou_requester" {
+		t.Fatalf("selection = %+v, want selected mode and operator", handler.selection)
+	}
+	if jsonContainsValue(resp.Card.Data, "select_static") {
+		t.Fatalf("completed card still contains dropdown: %#v", resp.Card.Data)
+	}
+	completedData, err := json.Marshal(resp.Card.Data)
+	if err != nil {
+		t.Fatalf("marshal completed card: %v", err)
+	}
+	if !strings.Contains(string(completedData), "已设置为 Plan（plan）") {
+		t.Fatalf("completed card = %s, want selected mode", completedData)
+	}
+}
+
 type fakeModelSelectionHandler struct {
 	selection ModelSelection
 	display   string
@@ -563,6 +635,21 @@ func (f *fakeModelSelectionHandler) HandleFeishuMessage(context.Context, Message
 }
 
 func (f *fakeModelSelectionHandler) HandleModelSelection(ctx context.Context, selection ModelSelection) (string, error) {
+	f.selection = selection
+	return f.display, f.err
+}
+
+type fakeModeSelectionHandler struct {
+	selection ModeSelection
+	display   string
+	err       error
+}
+
+func (f *fakeModeSelectionHandler) HandleFeishuMessage(context.Context, Message) (string, error) {
+	return "", nil
+}
+
+func (f *fakeModeSelectionHandler) HandleModeSelection(ctx context.Context, selection ModeSelection) (string, error) {
 	f.selection = selection
 	return f.display, f.err
 }

@@ -25,6 +25,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		return nil
 	}
 	msg.BotID = a.cfg.ID
+	msg.BotOpenID = a.cfg.BotOpenID
 	msg.Workspace = a.cfg.Workspace
 	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
 	if a.deduper != nil {
@@ -47,6 +48,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
 	ctx = WithPermissionRequester(ctx, a.RequestPermission)
 	ctx = WithModelSelectionCardSender(ctx, a.SendModelSelectionCard)
+	ctx = WithModeSelectionCardSender(ctx, a.SendModeSelectionCard)
 	// 添加删除表情回应
 	reactionID := a.addProcessingReaction(ctx, msg)
 	defer a.deleteProcessingReaction(ctx, msg, reactionID)

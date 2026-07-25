@@ -30,6 +30,11 @@ type ModelOption struct {
 	Name  string
 }
 
+type ModeOption struct {
+	Value string
+	Name  string
+}
+
 type ModelSelectionCard struct {
 	BotID        string
 	ChatID       string
@@ -40,9 +45,23 @@ type ModelSelectionCard struct {
 	Options      []ModelOption
 }
 
+type ModeSelectionCard struct {
+	BotID        string
+	ChatID       string
+	ThreadID     string
+	ACPSessionID string
+	RequesterID  string
+	CurrentMode  string
+	Options      []ModeOption
+}
+
 type modelSelectionCardSender func(context.Context, Message, ModelSelectionCard) error
 
 type modelSelectionCardSenderKey struct{}
+
+type modeSelectionCardSender func(context.Context, Message, ModeSelectionCard) error
+
+type modeSelectionCardSenderKey struct{}
 
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
@@ -100,6 +119,21 @@ func WithModelSelectionCardSender(ctx context.Context, sender func(context.Conte
 
 func SendModelSelectionCard(ctx context.Context, msg Message, card ModelSelectionCard) (bool, error) {
 	sender, ok := ctx.Value(modelSelectionCardSenderKey{}).(modelSelectionCardSender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender(ctx, msg, card)
+}
+
+func WithModeSelectionCardSender(ctx context.Context, sender func(context.Context, Message, ModeSelectionCard) error) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, modeSelectionCardSenderKey{}, modeSelectionCardSender(sender))
+}
+
+func SendModeSelectionCard(ctx context.Context, msg Message, card ModeSelectionCard) (bool, error) {
+	sender, ok := ctx.Value(modeSelectionCardSenderKey{}).(modeSelectionCardSender)
 	if !ok || sender == nil {
 		return false, nil
 	}

@@ -30,6 +30,7 @@ type BotConfig struct {
 	AppID        string   `json:"app_id"`
 	AppSecret    string   `json:"app_secret"`
 	Workspace    string   `json:"workspace"`
+	BotOpenID    string   `json:"bot_open_id,omitempty"`
 	OwnerOpenIDs []string `json:"owner_open_ids,omitempty"`
 }
 
@@ -251,6 +252,7 @@ func normalize(cfg *Config) error {
 		} else {
 			return fmt.Errorf("bot %q 的 workspace 不能为空", bot.ID)
 		}
+		bot.BotOpenID = strings.TrimSpace(bot.BotOpenID)
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
 		cfg.Bots[i] = bot
 	}

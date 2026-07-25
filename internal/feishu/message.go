@@ -10,6 +10,7 @@ import (
 
 type Message struct {
 	BotID      string
+	BotOpenID  string
 	Workspace  string
 	MessageID  string
 	ChatID     string

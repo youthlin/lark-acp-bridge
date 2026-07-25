@@ -139,6 +139,42 @@ func TestLoadNormalizesBotOwnerOpenIDs(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesBotOpenID(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "main",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/main",
+      "bot_open_id": " ou_bot "
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := cfg.Bots[0].BotOpenID, "ou_bot"; got != want {
+		t.Fatalf("BotOpenID = %q, want %q", got, want)
+	}
+}
+
 func TestLoadRejectsDuplicateBotID(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", filepath.Join(tmp, "home"))

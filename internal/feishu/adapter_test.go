@@ -92,8 +92,11 @@ type fakeApplicationClient struct {
 	appErr               error
 	collaborators        []applicationCollaborator
 	collaboratorsErr     error
+	botOpenID            string
+	botOpenIDErr         error
 	appCalls             int
 	collaboratorGetCalls int
+	botOpenIDCalls       int
 }
 
 func (f *fakeApplicationClient) GetApplication(ctx context.Context) (applicationOwnerCandidates, error) {
@@ -110,6 +113,47 @@ func (f *fakeApplicationClient) GetCollaborators(ctx context.Context) ([]applica
 		return nil, f.collaboratorsErr
 	}
 	return f.collaborators, nil
+}
+
+func (f *fakeApplicationClient) GetBotOpenID(ctx context.Context) (string, error) {
+	f.botOpenIDCalls++
+	if f.botOpenIDErr != nil {
+		return "", f.botOpenIDErr
+	}
+	return f.botOpenID, nil
+}
+
+func TestResolveBotOpenIDSkipsConfiguredValue(t *testing.T) {
+	applications := &fakeApplicationClient{botOpenID: "ou_from_api"}
+	adapter := NewAdapter(config.BotConfig{
+		ID:        "bot-a",
+		BotOpenID: " ou_configured ",
+	}, nil)
+	adapter.applications = applications
+
+	adapter.resolveBotOpenID(context.Background())
+
+	if applications.botOpenIDCalls != 0 {
+		t.Fatalf("bot open_id calls = %d, want no lookup when configured", applications.botOpenIDCalls)
+	}
+	if got, want := adapter.cfg.BotOpenID, "ou_configured"; got != want {
+		t.Fatalf("BotOpenID = %q, want %q", got, want)
+	}
+}
+
+func TestResolveBotOpenIDUsesApplicationAPI(t *testing.T) {
+	applications := &fakeApplicationClient{botOpenID: " ou_bot "}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, nil)
+	adapter.applications = applications
+
+	adapter.resolveBotOpenID(context.Background())
+
+	if applications.botOpenIDCalls != 1 {
+		t.Fatalf("bot open_id calls = %d, want 1", applications.botOpenIDCalls)
+	}
+	if got, want := adapter.cfg.BotOpenID, "ou_bot"; got != want {
+		t.Fatalf("BotOpenID = %q, want %q", got, want)
+	}
 }
 
 func TestResolveOwnerOpenIDsSkipsConfiguredOwners(t *testing.T) {

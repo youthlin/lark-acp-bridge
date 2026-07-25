@@ -29,6 +29,10 @@ type ModelSelectionHandler interface {
 	HandleModelSelection(context.Context, ModelSelection) (string, error)
 }
 
+type ModeSelectionHandler interface {
+	HandleModeSelection(context.Context, ModeSelection) (string, error)
+}
+
 type Adapter struct {
 	cfg             config.BotConfig        // Bot配置
 	handler         Handler                 // 消息处理
@@ -54,6 +58,7 @@ type messageClient interface {
 type applicationClient interface {
 	GetApplication(ctx context.Context) (applicationOwnerCandidates, error)
 	GetCollaborators(ctx context.Context) ([]applicationCollaborator, error)
+	GetBotOpenID(ctx context.Context) (string, error)
 }
 
 type applicationOwnerCandidates struct {
@@ -106,6 +111,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	if a.applications == nil {
 		a.applications = larkApplicationClient{client: a.client}
 	}
+	a.resolveBotOpenID(ctx)
 	a.resolveOwnerOpenIDs(ctx)
 
 	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
@@ -128,6 +134,25 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}()
 	slog.Info("启动飞书 WebSocket 监听")
 	return nil
+}
+
+func (a *Adapter) resolveBotOpenID(ctx context.Context) {
+	if strings.TrimSpace(a.cfg.BotOpenID) != "" || a.applications == nil {
+		a.cfg.BotOpenID = strings.TrimSpace(a.cfg.BotOpenID)
+		return
+	}
+	openID, err := a.applications.GetBotOpenID(ctx)
+	if err != nil {
+		slog.Warn("获取飞书机器人 open_id 失败，群聊 at 过滤需要手动配置 bot_open_id", "bot", a.cfg.ID, "err", err)
+		return
+	}
+	openID = strings.TrimSpace(openID)
+	if openID == "" {
+		slog.Warn("飞书机器人 open_id 为空，群聊 at 过滤需要手动配置 bot_open_id", "bot", a.cfg.ID)
+		return
+	}
+	a.cfg.BotOpenID = openID
+	slog.Info("已解析飞书机器人 open_id", "bot", a.cfg.ID)
 }
 
 func (a *Adapter) resolveOwnerOpenIDs(ctx context.Context) {
@@ -260,6 +285,33 @@ func (c larkApplicationClient) GetCollaborators(ctx context.Context) ([]applicat
 		})
 	}
 	return out, nil
+}
+
+func (c larkApplicationClient) GetBotOpenID(ctx context.Context) (string, error) {
+	resp, err := c.client.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		return "", fmt.Errorf("调用飞书获取机器人信息接口: %w", err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("飞书获取机器人信息接口返回为空")
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("飞书获取机器人信息接口 HTTP 状态异常: %d", resp.StatusCode)
+	}
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
+		return "", fmt.Errorf("解析飞书机器人信息接口响应: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("飞书获取机器人信息接口返回错误: code=%d msg=%s", result.Code, result.Msg)
+	}
+	return strings.TrimSpace(result.Bot.OpenID), nil
 }
 
 func (a *Adapter) Shutdown(ctx context.Context) error {

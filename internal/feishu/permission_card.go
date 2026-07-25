@@ -170,6 +170,8 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 	switch stringValue(value, "action") {
 	case modelSelectionCardAction:
 		return a.handleModelSelectionAction(ctx, event)
+	case modeSelectionCardAction:
+		return a.handleModeSelectionAction(ctx, event)
 	case permissionCardAction:
 	default:
 		return permissionCardToast("error", "未知的卡片操作"), nil

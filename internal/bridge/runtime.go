@@ -357,11 +357,10 @@ func (r *runtimeManager) dispatchSessionInfo(key SessionKey, sessionID string, i
 			ConfigOptions: info.ConfigOptions,
 		})
 	}
-	if info.Models != nil || info.Modes != nil || info.Mode != nil {
+	if info.Models != nil || info.Mode != nil {
 		r.dispatchUpdate(key, sessionID, acp.SessionUpdate{
 			SessionUpdate: "session_state_update",
 			Models:        info.Models,
-			Modes:         info.Modes,
 			Mode:          info.Mode,
 		})
 	}

@@ -43,8 +43,9 @@ const (
 	taskKindUser taskKind = "user"
 	taskKindWiki taskKind = "wiki"
 
-	defaultWikiInterval = 5 * time.Minute
-	newSessionStateWait = 600 * time.Millisecond
+	defaultWikiInterval        = 5 * time.Minute
+	newSessionStateWait        = 600 * time.Millisecond
+	newSessionPartialStateWait = 120 * time.Millisecond
 )
 
 type runningTask struct {
@@ -138,15 +139,24 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
+var _ feishu.ModeSelectionHandler = (*Service)(nil)
 
 // HandleFeishuMessage 消息处理
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
+	if strings.TrimSpace(msg.BotOpenID) == "" {
+		msg.BotOpenID = s.botOpenID(msg.BotID)
+	}
 	text := strings.TrimSpace(msg.Text)
 	text = stripMentionNames(text, msg.Mentions)
 	msg.Text = text
 	promptText := strings.TrimSpace(msg.PromptText())
 	slog.InfoContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
+
+	if s.shouldIgnoreMessage(msg, text) {
+		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
+		return "", nil
+	}
 
 	_, err := ensureWorkspace(msg.Workspace, msg.BotID)
 	if err != nil {
@@ -188,6 +198,9 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"//command [args] - 透传执行 ACP slash command 的简写",
 			"/model - 打开模型选择卡片",
 			"/model <model> - 设置当前会话模型",
+			"/mode - 打开模式选择卡片",
+			"/mode <mode> - 设置当前会话模式",
+			"/at status|on|off - 查看或设置当前群聊是否需要 at 才响应",
 			"/status - 查看服务状态",
 			"",
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
@@ -202,11 +215,111 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleCommandsCommand(ctx, text, msg)
 	case "/model":
 		return s.handleModelCommand(ctx, text, msg)
+	case "/mode":
+		return s.handleModeCommand(ctx, text, msg)
+	case "/at":
+		return s.handleAtCommand(ctx, msg, text)
 	case "/status":
 		return s.status(msg)
 	default:
 		return "暂不支持这个命令。发送 /help 查看当前支持的命令。"
 	}
+}
+
+func (s *Service) shouldIgnoreMessage(msg feishu.Message, text string) bool {
+	if !messageIsGroupChat(msg) || !s.chatRequiresMention(msg) {
+		return false
+	}
+	return !messageMentionsBot(msg)
+}
+
+func (s *Service) chatRequiresMention(msg feishu.Message) bool {
+	if !messageIsGroupChat(msg) {
+		return false
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return true
+	}
+	chat, ok := store.GetChat(chatKeyFromMessage(msg))
+	if !ok {
+		return true
+	}
+	return !chat.MentionOptional
+}
+
+func messageMentionsBot(msg feishu.Message) bool {
+	botOpenID := strings.TrimSpace(msg.BotOpenID)
+	if botOpenID == "" {
+		return false
+	}
+	for _, mention := range msg.Mentions {
+		if strings.TrimSpace(mention.ID) == botOpenID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) botOpenID(botID string) string {
+	botID = strings.TrimSpace(botID)
+	for _, bot := range s.cfg.Bots {
+		if strings.TrimSpace(bot.ID) == botID {
+			return strings.TrimSpace(bot.BotOpenID)
+		}
+	}
+	return ""
+}
+
+func messageIsGroupChat(msg feishu.Message) bool {
+	return strings.EqualFold(msg.ChatType, "group")
+}
+
+func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text string) string {
+	if msg.IsPrivateChat() {
+		return "私聊不支持 /at 配置；私聊消息始终响应。"
+	}
+	if !messageIsGroupChat(msg) {
+		return "当前会话类型不支持 /at 配置。"
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "会话持久化未初始化。"
+	}
+	fields := strings.Fields(text)
+	if len(fields) < 2 || fields[1] == "status" {
+		return s.formatAtStatus(msg)
+	}
+	chat := ChatConfig{Key: chatKeyFromMessage(msg)}
+	switch fields[1] {
+	case "on":
+		chat.MentionOptional = false
+	case "off":
+		chat.MentionOptional = true
+	default:
+		return "请使用 /at status、/at on 或 /at off。"
+	}
+	if err := store.UpsertChat(chat); err != nil {
+		slog.ErrorContext(ctx, "保存群聊 at 配置失败", "chat", msg.ChatID, "错误", err)
+		return "保存群聊 at 配置失败：" + err.Error()
+	}
+	if chat.MentionOptional {
+		return "已设置当前群聊：无需 at 也会响应。"
+	}
+	return "已设置当前群聊：需要 at 才响应。"
+}
+
+func (s *Service) formatAtStatus(msg feishu.Message) string {
+	if msg.IsPrivateChat() {
+		return "私聊不支持 /at 配置；私聊消息始终响应。"
+	}
+	if !messageIsGroupChat(msg) {
+		return "当前会话类型不支持 /at 配置。"
+	}
+	if s.chatRequiresMention(msg) {
+		return "当前群聊：需要 at 才响应。\n使用 /at off 可改为免 at。"
+	}
+	return "当前群聊：无需 at 也会响应。\n使用 /at on 可恢复为需要 at。"
 }
 
 func (s *Service) handleSessionCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -359,6 +472,53 @@ func formatModelStatus(session Session) string {
 	return strings.Join(lines, "\n")
 }
 
+func formatModeStatus(session Session) string {
+	lines := []string{"当前会话模式："}
+	current := currentModeDisplay(session)
+	if current == "" {
+		current = "未知"
+	}
+	lines = append(lines, current)
+	modeOpt, hasModeOpt := findModeConfigOption(session)
+	if hasModeOpt && len(modeOpt.Options) > 0 {
+		lines = append(lines, "", "可用模式：")
+		for _, opt := range modeOpt.Options {
+			if strings.TrimSpace(opt.Value) == "" {
+				continue
+			}
+			marker := ""
+			if opt.Value == configOptionValueString(modeOpt.CurrentValue) {
+				marker = " *"
+			}
+			label := opt.Value
+			if strings.TrimSpace(opt.Name) != "" && opt.Name != opt.Value {
+				label += " - " + strings.TrimSpace(opt.Name)
+			}
+			lines = append(lines, marker+" "+label)
+		}
+	} else if session.Mode != nil && len(session.Mode.AvailableModes) > 0 {
+		lines = append(lines, "", "可用模式：")
+		for _, mode := range session.Mode.AvailableModes {
+			if strings.TrimSpace(mode.ModeID) == "" {
+				continue
+			}
+			marker := ""
+			if mode.ModeID == session.Mode.CurrentModeID {
+				marker = " *"
+			}
+			label := mode.ModeID
+			if strings.TrimSpace(mode.Name) != "" && mode.Name != mode.ModeID {
+				label += " - " + strings.TrimSpace(mode.Name)
+			}
+			lines = append(lines, marker+" "+label)
+		}
+	} else {
+		lines = append(lines, "", "当前 ACP server 还没有上报可用模式。")
+	}
+	lines = append(lines, "", "设置模式：/mode <mode>")
+	return strings.Join(lines, "\n")
+}
+
 func currentModeDisplay(session Session) string {
 	if modeOpt, ok := findModeConfigOption(session); ok {
 		current := configOptionValueString(modeOpt.CurrentValue)
@@ -366,11 +526,8 @@ func currentModeDisplay(session Session) string {
 			return current
 		}
 	}
-	if current := configOptionValueString(session.Mode); current != "" {
-		return current
-	}
-	if session.Modes != nil {
-		return strings.TrimSpace(session.Modes.CurrentModeID)
+	if session.Mode != nil {
+		return strings.TrimSpace(session.Mode.CurrentModeID)
 	}
 	return ""
 }
@@ -406,7 +563,7 @@ func findModelConfigOption(session Session) (acp.SessionConfigOption, bool) {
 	return acp.SessionConfigOption{}, false
 }
 
-func resolveModelValue(opt acp.SessionConfigOption, target string) (string, bool) {
+func resolveConfigOptionValue(opt acp.SessionConfigOption, target string) (string, bool) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return "", false
@@ -420,6 +577,14 @@ func resolveModelValue(opt acp.SessionConfigOption, target string) (string, bool
 		}
 	}
 	return "", false
+}
+
+func resolveModelValue(opt acp.SessionConfigOption, target string) (string, bool) {
+	return resolveConfigOptionValue(opt, target)
+}
+
+func resolveModeValue(opt acp.SessionConfigOption, target string) (string, bool) {
+	return resolveConfigOptionValue(opt, target)
 }
 
 func modelValueString(value any) string {
@@ -517,6 +682,136 @@ func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []
 	return options
 }
 
+func (s *Service) handleModeCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再查看或设置模式。"
+	}
+	if len(fields) == 1 {
+		return s.sendModeSelectionCard(ctx, msg, session)
+	}
+	target := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+	if target == "" {
+		return "请使用 /mode <mode> 设置当前会话模式。"
+	}
+	value, _, err := s.setSessionMode(ctx, msg, session, target)
+	if err != nil {
+		if errors.Is(err, errUnknownMode) {
+			return "未知模式：" + target + "\n\n" + formatModeStatus(session)
+		}
+		return err.Error()
+	}
+	if value == "" {
+		return "未知模式：" + target + "\n\n" + formatModeStatus(session)
+	}
+	return "已设置当前会话模式：" + value
+}
+
+var errUnknownMode = errors.New("未知模式")
+
+func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message, session Session) string {
+	modeOpt, ok := findModeConfigOption(session)
+	if !ok {
+		return "当前 ACP server 没有上报 mode 配置项，无法通过 /mode 设置。"
+	}
+	options := modeSelectionOptions(session, modeOpt)
+	if len(options) == 0 {
+		return "当前 ACP server 没有上报可选模式，请使用 /mode <mode> 设置。"
+	}
+	sent, err := feishu.SendModeSelectionCard(ctx, msg, feishu.ModeSelectionCard{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		RequesterID:  msg.SenderID,
+		CurrentMode:  currentModeDisplay(session),
+		Options:      options,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "发送模式选择卡片失败", "错误", err)
+		return "发送模式选择卡片失败：" + err.Error()
+	}
+	if !sent {
+		return formatModeStatus(session)
+	}
+	return ""
+}
+
+func modeSelectionOptions(session Session, modeOpt acp.SessionConfigOption) []feishu.ModeOption {
+	options := make([]feishu.ModeOption, 0, len(modeOpt.Options))
+	for _, option := range modeOpt.Options {
+		if strings.TrimSpace(option.Value) == "" {
+			continue
+		}
+		options = append(options, feishu.ModeOption{Value: option.Value, Name: option.Name})
+	}
+	if len(options) > 0 || session.Mode == nil {
+		return options
+	}
+	options = make([]feishu.ModeOption, 0, len(session.Mode.AvailableModes))
+	for _, mode := range session.Mode.AvailableModes {
+		if strings.TrimSpace(mode.ModeID) == "" {
+			continue
+		}
+		options = append(options, feishu.ModeOption{Value: mode.ModeID, Name: mode.Name})
+	}
+	return options
+}
+
+func (s *Service) HandleModeSelection(ctx context.Context, selection feishu.ModeSelection) (string, error) {
+	if selection.RequesterID != "" && selection.OperatorID != "" && selection.RequesterID != selection.OperatorID {
+		return "", fmt.Errorf("只有发起该命令的用户可以设置模式")
+	}
+	msg := feishu.Message{
+		BotID:    selection.BotID,
+		ChatID:   selection.ChatID,
+		ThreadID: selection.ThreadID,
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "", fmt.Errorf("会话持久化未初始化")
+	}
+	key := SessionKey{BotID: selection.BotID, ChatID: selection.ChatID, ThreadID: selection.ThreadID}
+	session, ok := store.Get(key)
+	if !ok || session.ACPSessionID != selection.ACPSessionID {
+		return "", fmt.Errorf("该模式选择卡片已过期，请重新发送 /mode")
+	}
+	_, display, err := s.setSessionMode(ctx, msg, session, selection.Mode)
+	if err != nil {
+		return "", err
+	}
+	return display, nil
+}
+
+func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, session Session, target string) (string, string, error) {
+	modeOpt, ok := findModeConfigOption(session)
+	if !ok {
+		return "", "", fmt.Errorf("当前 ACP server 没有上报 mode 配置项，无法设置模式")
+	}
+	value, ok := resolveModeValue(modeOpt, target)
+	if !ok {
+		return "", "", fmt.Errorf("%w：%s", errUnknownMode, target)
+	}
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return "", "", fmt.Errorf("未找到 agent 配置：%s", session.AgentName)
+	}
+	options, err := s.runtime.SetConfigOption(ctx, session, agent, modeOpt.ID, value)
+	if err != nil {
+		slog.ErrorContext(ctx, "设置 ACP mode 失败", "mode", value, "错误", err)
+		return "", "", fmt.Errorf("设置模式失败：%w", err)
+	}
+	session.ConfigOptions = options
+	if modeOpt, ok := findModeConfigOption(session); ok {
+		if configOptionValueString(modeOpt.CurrentValue) == value && session.Mode != nil {
+			session.Mode.CurrentModeID = value
+		}
+	}
+	s.saveSessionState(ctx, msg, session)
+	return value, configOptionDisplayName(modeOpt, value), nil
+}
+
 func (s *Service) HandleModelSelection(ctx context.Context, selection feishu.ModelSelection) (string, error) {
 	if selection.RequesterID != "" && selection.OperatorID != "" && selection.RequesterID != selection.OperatorID {
 		return "", fmt.Errorf("只有发起该命令的用户可以设置模型")
@@ -571,6 +866,10 @@ func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, sessi
 }
 
 func modelOptionName(opt acp.SessionConfigOption, value string) string {
+	return configOptionDisplayName(opt, value)
+}
+
+func configOptionDisplayName(opt acp.SessionConfigOption, value string) string {
 	for _, option := range opt.Options {
 		if option.Value != value {
 			continue
@@ -750,7 +1049,7 @@ func isACPStateUpdate(update acp.SessionUpdate) bool {
 	case "available_commands_update", "config_option_update":
 		return true
 	default:
-		return update.Models != nil || update.Modes != nil || update.Mode != nil
+		return update.Models != nil || update.Mode != nil
 	}
 }
 
@@ -773,14 +1072,10 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 		session.Models = &models
 		changed = true
 	}
-	if update.Modes != nil {
-		modes := *update.Modes
-		modes.AvailableModes = append([]acp.SessionMode(nil), update.Modes.AvailableModes...)
-		session.Modes = &modes
-		changed = true
-	}
 	if update.Mode != nil {
-		session.Mode = update.Mode
+		mode := *update.Mode
+		mode.AvailableModes = append([]acp.SessionMode(nil), update.Mode.AvailableModes...)
+		session.Mode = &mode
 		changed = true
 	}
 	return changed
@@ -844,7 +1139,6 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		AvailableCommands: sessionInfo.AvailableCommands,
 		ConfigOptions:     sessionInfo.ConfigOptions,
 		Models:            sessionInfo.Models,
-		Modes:             sessionInfo.Modes,
 		Mode:              sessionInfo.Mode,
 	}
 	if err := store.Upsert(session); err != nil {
@@ -858,11 +1152,22 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 func (s *Service) waitForNewSessionState(ctx context.Context, msg feishu.Message, key SessionKey, session Session) Session {
 	store := s.storeForMessage(msg)
 	session = latestSessionForKey(store, key, session)
-	if currentModeDisplay(session) != "" || currentModelDisplay(session) != "" {
+	if newSessionStateReady(session) {
 		return session
 	}
 	timer := time.NewTimer(newSessionStateWait)
 	defer timer.Stop()
+	var partialTimer *time.Timer
+	var partialTimerC <-chan time.Time
+	defer func() {
+		if partialTimer != nil {
+			partialTimer.Stop()
+		}
+	}()
+	if newSessionStatePartial(session) {
+		partialTimer = time.NewTimer(newSessionPartialStateWait)
+		partialTimerC = partialTimer.C
+	}
 	updated := make(chan struct{}, 1)
 	unsub := s.runtime.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
 		if sessionID != session.ACPSessionID || !isACPStateUpdate(update) {
@@ -880,13 +1185,27 @@ func (s *Service) waitForNewSessionState(ctx context.Context, msg feishu.Message
 			return latestSessionForKey(store, key, session)
 		case <-timer.C:
 			return latestSessionForKey(store, key, session)
+		case <-partialTimerC:
+			return latestSessionForKey(store, key, session)
 		case <-updated:
 			current := latestSessionForKey(store, key, session)
-			if currentModeDisplay(current) != "" || currentModelDisplay(current) != "" {
+			if newSessionStateReady(current) {
 				return current
+			}
+			if newSessionStatePartial(current) && partialTimer == nil {
+				partialTimer = time.NewTimer(newSessionPartialStateWait)
+				partialTimerC = partialTimer.C
 			}
 		}
 	}
+}
+
+func newSessionStateReady(session Session) bool {
+	return currentModeDisplay(session) != "" && currentModelDisplay(session) != ""
+}
+
+func newSessionStatePartial(session Session) bool {
+	return currentModeDisplay(session) != "" || currentModelDisplay(session) != ""
 }
 
 func latestSessionForKey(store *SessionStore, key SessionKey, fallback Session) Session {
@@ -2299,6 +2618,10 @@ func sessionKeyFromMessage(msg feishu.Message) SessionKey {
 		return SessionKey{BotID: msg.BotID, ChatID: msg.ChatID}
 	}
 	return keys[0]
+}
+
+func chatKeyFromMessage(msg feishu.Message) ChatKey {
+	return ChatKey{BotID: msg.BotID, ChatID: msg.ChatID}
 }
 
 func (s *Service) findSession(msg feishu.Message) (Session, bool) {

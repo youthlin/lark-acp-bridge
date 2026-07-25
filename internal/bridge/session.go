@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -16,6 +17,22 @@ func (k SessionKey) Valid() bool {
 	return k.ChatID != ""
 }
 
+type ChatKey struct {
+	BotID  string `json:"bot_id"`
+	ChatID string `json:"chat_id"`
+}
+
+func (k ChatKey) Valid() bool {
+	return k.ChatID != ""
+}
+
+type ChatConfig struct {
+	Key             ChatKey   `json:"key"`
+	MentionOptional bool      `json:"mention_optional,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
 type Session struct {
 	Key               SessionKey                `json:"key"`
 	Title             string                    `json:"title,omitempty"`
@@ -28,8 +45,24 @@ type Session struct {
 	AvailableCommands []acp.AvailableCommand    `json:"available_commands,omitempty"`
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`
-	Modes             *acp.SessionModeState     `json:"modes,omitempty"`
-	Mode              any                       `json:"mode,omitempty"`
+	Mode              *acp.SessionModeState     `json:"mode,omitempty"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	UpdatedAt         time.Time                 `json:"updated_at"`
+}
+
+func (s *Session) UnmarshalJSON(data []byte) error {
+	type sessionAlias Session
+	aux := struct {
+		*sessionAlias
+		LegacyModes *acp.SessionModeState `json:"modes,omitempty"`
+	}{
+		sessionAlias: (*sessionAlias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.Mode == nil {
+		s.Mode = aux.LegacyModes
+	}
+	return nil
 }

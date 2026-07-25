@@ -63,13 +63,14 @@ https://open.larkoffice.com/page/launcher
       "app_id": "cli_xxx",
       "app_secret": "secret",
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
+      "bot_open_id": "ou_bot",
       "owner_open_ids": ["ou_xxx"]
     }
   ]
 }
 ```
 
-`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
+`workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
 自动读取 owner 需要飞书应用具备查询本应用信息和协作者的权限，例如 `application:application:self_manage` 或等价的应用管理只读权限。也可以直接在 `owner_open_ids` 中手动配置允许审批人的 open_id，配置后启动时不会再查询飞书应用协作者。
 
@@ -96,7 +97,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
 
-普通文本会自动创建 ACP 会话；`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
+普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at，私聊始终响应且不支持 `/at` 配置。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 
@@ -196,6 +197,9 @@ github.com/larksuite/oapi-sdk-go/v3
 - `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
 - `/model`：打开飞书模型选择卡片，通过下拉列表设置当前会话模型。
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
+- `/mode`：打开飞书模式选择卡片，通过下拉列表设置当前会话模式。
+- `/mode <mode>`：通过 ACP `session/set_config_option` 设置当前会话模式。
+- `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。
 - 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
 - 权限卡片：权限选项来自 ACP agent，正文完整展示选项内容，按钮使用短编号文本避免截断。只有 bot owner 可以点击权限卡片；owner 优先来自 `bots[].owner_open_ids`，未配置时启动阶段会尝试从飞书应用所有者、创建者和管理员/开发者协作者自动解析。未解析到 owner 时，无论群聊还是私聊，权限卡片都不能被任何人批准。请求被取消时，bridge 会把卡片更新为已取消/已失效状态并移除按钮。

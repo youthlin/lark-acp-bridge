@@ -1,12 +1,33 @@
 package acp
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 type SessionInfo struct {
 	SessionID         string                `json:"sessionId,omitempty"`
 	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
-	Modes             *SessionModeState     `json:"modes,omitempty"`
-	Mode              any                   `json:"mode,omitempty"`
+	Mode              *SessionModeState     `json:"mode,omitempty"`
+}
+
+func (s *SessionInfo) UnmarshalJSON(data []byte) error {
+	type sessionInfoAlias SessionInfo
+	aux := struct {
+		*sessionInfoAlias
+		LegacyModes *SessionModeState `json:"modes,omitempty"`
+	}{
+		sessionInfoAlias: (*sessionInfoAlias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.Mode == nil {
+		s.Mode = aux.LegacyModes
+	}
+	return nil
 }
 
 type AvailableCommand struct {
@@ -49,6 +70,28 @@ type SessionModel struct {
 type SessionModeState struct {
 	CurrentModeID  string        `json:"currentModeId"`
 	AvailableModes []SessionMode `json:"availableModes,omitempty"`
+}
+
+func (s *SessionModeState) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var current string
+	if err := json.Unmarshal(data, &current); err == nil {
+		s.CurrentModeID = strings.TrimSpace(current)
+		s.AvailableModes = nil
+		return nil
+	}
+	var parsed struct {
+		CurrentModeID  string        `json:"currentModeId"`
+		AvailableModes []SessionMode `json:"availableModes,omitempty"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	s.CurrentModeID = strings.TrimSpace(parsed.CurrentModeID)
+	s.AvailableModes = append([]SessionMode(nil), parsed.AvailableModes...)
+	return nil
 }
 
 type SessionMode struct {

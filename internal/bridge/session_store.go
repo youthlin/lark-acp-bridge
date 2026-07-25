@@ -16,6 +16,7 @@ type SessionStore struct {
 	mu       sync.Mutex
 	sessions map[SessionKey]Session
 	history  []Session
+	chats    map[ChatKey]ChatConfig
 }
 
 // NewSessionStore 创建会话存储
@@ -23,6 +24,7 @@ func NewSessionStore(path string) *SessionStore {
 	return &SessionStore{
 		path:     path,
 		sessions: make(map[SessionKey]Session),
+		chats:    make(map[ChatKey]ChatConfig),
 	}
 }
 
@@ -43,11 +45,18 @@ func (s *SessionStore) Load() error {
 		return fmt.Errorf("解析会话映射文件: %w", err)
 	}
 	s.sessions = make(map[SessionKey]Session, len(file.Sessions))
+	s.chats = make(map[ChatKey]ChatConfig, len(file.Chats))
 	for _, session := range file.Sessions {
 		if !session.Key.Valid() {
 			continue
 		}
 		s.sessions[session.Key] = session
+	}
+	for _, chat := range file.Chats {
+		if !chat.Key.Valid() {
+			continue
+		}
+		s.chats[chat.Key] = chat
 	}
 	s.history = s.history[:0]
 	for _, session := range file.History {
@@ -96,6 +105,33 @@ func (s *SessionStore) Get(key SessionKey) (Session, bool) {
 	defer s.mu.Unlock()
 	session, ok := s.sessions[key]
 	return session, ok
+}
+
+func (s *SessionStore) GetChat(key ChatKey) (ChatConfig, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chat, ok := s.chats[key]
+	return chat, ok
+}
+
+func (s *SessionStore) UpsertChat(chat ChatConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !chat.Key.Valid() {
+		return fmt.Errorf("chat key 不能为空")
+	}
+	now := time.Now()
+	if chat.CreatedAt.IsZero() {
+		if existing, ok := s.chats[chat.Key]; ok {
+			chat.CreatedAt = existing.CreatedAt
+		} else {
+			chat.CreatedAt = now
+		}
+	}
+	chat.UpdatedAt = now
+	s.chats[chat.Key] = chat
+	return s.writeLocked()
 }
 
 func (s *SessionStore) Count() int {
@@ -149,11 +185,15 @@ func (s *SessionStore) writeLocked() error {
 		Version:  1,
 		Sessions: make([]Session, 0, len(s.sessions)),
 		History:  make([]Session, 0, len(s.history)),
+		Chats:    make([]ChatConfig, 0, len(s.chats)),
 	}
 	for _, session := range s.sessions {
 		file.Sessions = append(file.Sessions, session)
 	}
 	file.History = append(file.History, s.history...)
+	for _, chat := range s.chats {
+		file.Chats = append(file.Chats, chat)
+	}
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("编码会话映射文件: %w", err)
@@ -174,7 +214,8 @@ func (s *SessionStore) writeLocked() error {
 }
 
 type sessionFile struct {
-	Version  int       `json:"version"`
-	Sessions []Session `json:"sessions"`
-	History  []Session `json:"history,omitempty"`
+	Version  int          `json:"version"`
+	Sessions []Session    `json:"sessions"`
+	History  []Session    `json:"history,omitempty"`
+	Chats    []ChatConfig `json:"chats,omitempty"`
 }

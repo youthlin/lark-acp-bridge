@@ -5,6 +5,7 @@
       "app_id": "",
       "app_secret": "",
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
+      "bot_open_id": "",
       "owner_open_ids": []
     }
   ],

@@ -131,6 +131,13 @@ func TestClientNewSessionSendsMCPServers(t *testing.T) {
 					},
 				},
 			},
+			"mode": map[string]any{
+				"currentModeId": "default",
+				"availableModes": []map[string]any{
+					{"modeId": "default", "name": "Default"},
+					{"modeId": "plan", "name": "Plan"},
+				},
+			},
 		})
 	}()
 
@@ -147,7 +154,28 @@ func TestClientNewSessionSendsMCPServers(t *testing.T) {
 	if len(sessionInfo.ConfigOptions) != 1 || sessionInfo.ConfigOptions[0].ID != "model" {
 		t.Fatalf("ConfigOptions = %+v, want model option", sessionInfo.ConfigOptions)
 	}
+	if sessionInfo.Mode == nil || sessionInfo.Mode.CurrentModeID != "default" || len(sessionInfo.Mode.AvailableModes) != 2 {
+		t.Fatalf("Mode = %+v, want default mode state", sessionInfo.Mode)
+	}
 	<-done
+}
+
+func TestSessionInfoParsesModeStringAndLegacyModes(t *testing.T) {
+	var stringMode SessionInfo
+	if err := json.Unmarshal([]byte(`{"sessionId":"session-1","mode":"plan"}`), &stringMode); err != nil {
+		t.Fatalf("Unmarshal string mode error = %v", err)
+	}
+	if stringMode.Mode == nil || stringMode.Mode.CurrentModeID != "plan" {
+		t.Fatalf("Mode = %+v, want plan from string mode", stringMode.Mode)
+	}
+
+	var legacyModes SessionInfo
+	if err := json.Unmarshal([]byte(`{"sessionId":"session-1","modes":{"currentModeId":"default","availableModes":[{"modeId":"default","name":"Default"}]}}`), &legacyModes); err != nil {
+		t.Fatalf("Unmarshal legacy modes error = %v", err)
+	}
+	if legacyModes.Mode == nil || legacyModes.Mode.CurrentModeID != "default" || len(legacyModes.Mode.AvailableModes) != 1 {
+		t.Fatalf("Mode = %+v, want legacy modes fallback", legacyModes.Mode)
+	}
 }
 
 func TestClientNewSessionSendsAdditionalDirectoriesWhenSupported(t *testing.T) {

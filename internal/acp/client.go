@@ -87,9 +87,25 @@ type SessionUpdate struct {
 	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
-	Modes             *SessionModeState     `json:"modes,omitempty"`
-	Mode              any                   `json:"mode,omitempty"`
+	Mode              *SessionModeState     `json:"mode,omitempty"`
 	Raw               json.RawMessage       `json:"-"`
+}
+
+func (u *SessionUpdate) UnmarshalJSON(data []byte) error {
+	type sessionUpdateAlias SessionUpdate
+	aux := struct {
+		*sessionUpdateAlias
+		LegacyModes *SessionModeState `json:"modes,omitempty"`
+	}{
+		sessionUpdateAlias: (*sessionUpdateAlias)(u),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if u.Mode == nil {
+		u.Mode = aux.LegacyModes
+	}
+	return nil
 }
 
 type ContentBlock struct {

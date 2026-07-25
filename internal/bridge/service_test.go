@@ -19,8 +19,17 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
+const testBotOpenID = "ou_bot"
+
+func testBotMention(name string) feishu.Mention {
+	return feishu.Mention{ID: testBotOpenID, Name: name, Type: "bot"}
+}
+
 func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg feishu.Message) (string, error) {
 	t.Helper()
+	if strings.TrimSpace(msg.BotOpenID) == "" {
+		msg.BotOpenID = testBotOpenID
+	}
 	if strings.TrimSpace(msg.Workspace) == "" {
 		msg.Workspace = filepath.Join(t.TempDir(), "workspace")
 		if err := os.MkdirAll(msg.Workspace, 0o755); err != nil {
@@ -208,7 +217,7 @@ func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
 				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
 			},
 		},
-		Modes: &acp.SessionModeState{
+		Mode: &acp.SessionModeState{
 			CurrentModeID: "agent",
 			AvailableModes: []acp.SessionMode{
 				{ModeID: "agent", Name: "Agent"},
@@ -447,6 +456,132 @@ func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+				{Value: "bypass_permissions", Name: "Bypass Permissions"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "mode",
+				Name:         "Mode",
+				Category:     "mode",
+				Type:         "select",
+				CurrentValue: "plan",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "default", Name: "Default"},
+					{Value: "plan", Name: "Plan"},
+					{Value: "bypass_permissions", Name: "Bypass Permissions"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/mode",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/mode) error = %v", err)
+	}
+	for _, want := range []string{"当前会话模式", "default", "plan - Plan", "bypass_permissions - Bypass Permissions", "/mode <mode>"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/mode plan",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/mode plan) error = %v", err)
+	}
+	if reply != "已设置当前会话模式：plan" {
+		t.Fatalf("reply = %q, want set confirmation", reply)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "mode" || rt.configCalls[0].Value != "plan" {
+		t.Fatalf("configCalls = %+v, want mode set_config_option", rt.configCalls)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	modeOpt, ok := findModeConfigOption(updated)
+	if !ok || configOptionValueString(modeOpt.CurrentValue) != "plan" {
+		t.Fatalf("updated config options = %+v, want plan", updated.ConfigOptions)
+	}
+}
+
+func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := NewService(config.Default(), store)
+	var got feishu.ModeSelectionCard
+	ctx := feishu.WithModeSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModeSelectionCard) error {
+		got = card
+		return nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		SenderID: "ou_requester",
+		Text:     "/mode",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/mode) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending card", reply)
+	}
+	if got.ACPSessionID != session.ACPSessionID || got.CurrentMode != "default" || got.RequesterID != "ou_requester" {
+		t.Fatalf("card = %+v, want current session mode card", got)
+	}
+	if len(got.Options) != 2 || got.Options[1].Value != "plan" || got.Options[1].Name != "Plan" {
+		t.Fatalf("card options = %+v, want available modes", got.Options)
+	}
+}
+
 func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
 	session := Session{
 		Models: &acp.SessionModelState{
@@ -460,6 +595,22 @@ func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
 	options := modelSelectionOptions(session, acp.SessionConfigOption{ID: "model", Category: "model"})
 	if len(options) != 2 || options[1].Value != "gpt-5.6" || options[1].Name != "GPT-5.6" {
 		t.Fatalf("options = %+v, want models fallback", options)
+	}
+}
+
+func TestModeSelectionOptionsFallsBackToModeState(t *testing.T) {
+	session := Session{
+		Mode: &acp.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acp.SessionMode{
+				{ModeID: "default", Name: "Default"},
+				{ModeID: "plan", Name: "Plan"},
+			},
+		},
+	}
+	options := modeSelectionOptions(session, acp.SessionConfigOption{ID: "mode", Category: "mode"})
+	if len(options) != 2 || options[1].Value != "plan" || options[1].Name != "Plan" {
+		t.Fatalf("options = %+v, want modes fallback", options)
 	}
 }
 
@@ -532,6 +683,75 @@ func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
 	}
 }
 
+func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "mode",
+				Name:         "Mode",
+				Category:     "mode",
+				Type:         "select",
+				CurrentValue: "plan",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "default", Name: "Default"},
+					{Value: "plan", Name: "Plan"},
+				},
+			},
+		},
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+	selection := feishu.ModeSelection{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		RequesterID:  "ou_requester",
+		OperatorID:   "ou_requester",
+		Mode:         "plan",
+	}
+
+	display, err := svc.HandleModeSelection(context.Background(), selection)
+	if err != nil {
+		t.Fatalf("HandleModeSelection() error = %v", err)
+	}
+	if display != "Plan（plan）" {
+		t.Fatalf("display = %q, want friendly mode display", display)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].Value != "plan" {
+		t.Fatalf("configCalls = %+v, want plan", rt.configCalls)
+	}
+
+	selection.OperatorID = "ou_other"
+	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "只有发起") {
+		t.Fatalf("other user error = %v, want requester validation", err)
+	}
+
+	selection.OperatorID = selection.RequesterID
+	selection.ACPSessionID = "stale-session"
+	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "已过期") {
+		t.Fatalf("stale card error = %v, want expired validation", err)
+	}
+}
+
 func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -548,7 +768,7 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 		ThreadID:  "omt_thread",
 		Text:      "@我的智能助手 你好",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 	})
 	if err != nil {
@@ -648,7 +868,7 @@ func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 		ParentID:  "om_parent",
 		Text:      "@我的智能助手 这种情况怎么实现",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 		Reply: &feishu.ReplyContext{
 			MessageID:  "om_parent",
@@ -701,7 +921,7 @@ func TestHandleFeishuMessageIncludesImageReplyContextInPrompt(t *testing.T) {
 		ParentID:  "om_parent",
 		Text:      "@我的智能助手 看看这张图",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 		Reply: &feishu.ReplyContext{
 			MessageID: "om_parent",
@@ -889,14 +1109,16 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 			MessageID: "om_group_1",
 			ChatID:    "oc_group",
 			ChatType:  "group",
-			Text:      "你好",
+			Text:      "@智能助手 你好",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
 		},
 		{
 			BotID:     "bot-a",
 			MessageID: "om_group_2",
 			ChatID:    "oc_group",
 			ChatType:  "group",
-			Text:      "继续",
+			Text:      "@智能助手 继续",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
 		},
 	} {
 		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
@@ -921,6 +1143,258 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuGroupChatRequiresMentionByDefault(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_1",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "你好",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore", reply)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want no ACP calls", rt.newCalls, rt.promptCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_2",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "@智能助手 你好",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || len(rt.promptCalls) != 1 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want one ACP prompt", rt.newCalls, rt.promptCalls)
+	}
+}
+
+func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
+	msg := feishu.Message{
+		BotOpenID: testBotOpenID,
+		Mentions: []feishu.Mention{
+			{ID: "ou_other_user", Name: "其他用户", Type: "user"},
+			{ID: "ou_other_bot", Name: "其他助手", Type: "bot"},
+		},
+	}
+	if messageMentionsBot(msg) {
+		t.Fatalf("messageMentionsBot(%+v) = true, want false for mentions that do not target current bot", msg.Mentions)
+	}
+
+	msg.Mentions = append(msg.Mentions, testBotMention("智能助手"))
+	if !messageMentionsBot(msg) {
+		t.Fatalf("messageMentionsBot(%+v) = false, want true for current bot open_id", msg.Mentions)
+	}
+
+	msg.BotOpenID = ""
+	if messageMentionsBot(msg) {
+		t.Fatalf("messageMentionsBot without BotOpenID = true, want false")
+	}
+}
+
+func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_group",
+		ChatType: "group",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_status",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "@智能助手 /at status",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at status) error = %v", err)
+	}
+	if !strings.Contains(reply, "需要 at 才响应") {
+		t.Fatalf("reply = %q, want default mention-required status", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_off_without_mention",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at off without mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore for /at off without mention while mention is required", reply)
+	}
+	if _, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"}); ok {
+		t.Fatalf("chat config should not be created by ignored /at off")
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_off_mention_other",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "@其他助手 /at off",
+		Mentions:  []feishu.Mention{{ID: "ou_other_bot", Name: "其他助手", Type: "bot"}},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(@other /at off) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore for /at off mentioning another bot", reply)
+	}
+	if _, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"}); ok {
+		t.Fatalf("chat config should not be created by /at off mentioning another bot")
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_off",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "@智能助手 /at off",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(@bot /at off) error = %v", err)
+	}
+	if !strings.Contains(reply, "无需 at") {
+		t.Fatalf("reply = %q, want mention optional confirmation", reply)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || !chat.MentionOptional {
+		t.Fatalf("chat config = %+v, %v; want mention optional", chat, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_prompt",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "无需 at 也处理",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention after off) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt after /at off", rt.promptCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_on",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at on",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at on) error = %v", err)
+	}
+	if !strings.Contains(reply, "需要 at") {
+		t.Fatalf("reply = %q, want mention required confirmation", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_ignored",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "再次不 at",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention after on) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore after /at on", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want no extra prompt after /at on", rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuPrivateChatIgnoresAtConfigAndAlwaysResponds(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_private",
+		ChatType: "p2p",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_at",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(private /at) error = %v", err)
+	}
+	if !strings.Contains(reply, "私聊不支持") {
+		t.Fatalf("reply = %q, want private unsupported message", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_prompt",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "不用 at 也响应",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(private prompt) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want private prompt", rt.promptCalls)
+	}
+}
+
 func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -939,7 +1413,8 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 			ChatID:    "oc_group",
 			ChatType:  "group",
 			ThreadID:  "omt_topic_1",
-			Text:      "topic one",
+			Text:      "@智能助手 topic one",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
 		},
 		{
 			BotID:     "bot-a",
@@ -947,7 +1422,8 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 			ChatID:    "oc_group",
 			ChatType:  "group",
 			ThreadID:  "omt_topic_2",
-			Text:      "topic two",
+			Text:      "@智能助手 topic two",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
 		},
 	} {
 		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
@@ -1197,7 +1673,50 @@ func TestHandleFeishuNewSessionWaitsForSessionStateUpdate(t *testing.T) {
 				Models: &acp.SessionModelState{
 					CurrentModelID: "gpt-5.6",
 				},
-				Modes: &acp.SessionModeState{
+				Mode: &acp.SessionModeState{
+					CurrentModeID: "plan",
+				},
+			})
+		}()
+	}
+	svc := NewService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new " + workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	for _, want := range []string{"标题：session#1", "mode：plan", "model：gpt-5.6"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+}
+
+func TestHandleFeishuNewSessionWaitsAfterPartialSessionState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-session-1",
+			Models: &acp.SessionModelState{
+				CurrentModelID: "gpt-5.6",
+			},
+		},
+		noDefaultState: true,
+	}
+	rt.afterNewSession = func(key SessionKey, sessionID string) {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			rt.dispatchUpdate(key, sessionID, acp.SessionUpdate{
+				SessionUpdate: "session_state_update",
+				Mode: &acp.SessionModeState{
 					CurrentModeID: "plan",
 				},
 			})
@@ -2438,7 +2957,7 @@ func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 		ThreadID:  "omt_thread",
 		Text:      "@我的智能助手 介绍一下这个仓库",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 	})
 	if err != nil {
@@ -2485,7 +3004,7 @@ func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 		ThreadID:  "omt_thread",
 		Text:      "@我的智能助手 /new ~/repo",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 	}
 	t.Setenv("HOME", home)
@@ -2741,7 +3260,7 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 		MsgType:    "text",
 		Text:       "@我的智能助手 介绍一下这个仓库",
 		Mentions: []feishu.Mention{
-			{Name: "我的智能助手"},
+			testBotMention("我的智能助手"),
 		},
 	})
 	if err != nil {
@@ -3328,7 +3847,7 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 	if info.SessionID == "" {
 		info.SessionID = "acp-session"
 	}
-	if !f.noDefaultState && len(info.ConfigOptions) == 0 && info.Models == nil && info.Modes == nil && info.Mode == nil {
+	if !f.noDefaultState && len(info.ConfigOptions) == 0 && info.Models == nil && info.Mode == nil {
 		info.ConfigOptions = []acp.SessionConfigOption{
 			{ID: "model", Name: "Model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
 		}
