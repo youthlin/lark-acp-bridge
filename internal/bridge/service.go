@@ -291,6 +291,12 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 
 	// 斜杠命令
 	if strings.HasPrefix(text, "/") {
+		if !s.slashCommandAllowed(msg) {
+			if len(s.ownerOpenIDs(msg.BotID)) == 0 {
+				return "未配置 bot owner，不能执行斜杠命令。", nil
+			}
+			return "只有 bot owner 可以执行斜杠命令。", nil
+		}
 		return s.handleCommand(ctx, text, msg), nil
 	}
 	// 普通消息
@@ -314,7 +320,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/session list - 列出当前聊天的历史 ACP 会话",
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
-			"/wiki on|off|status|interval <duration> - 管理当前会话的自动知识沉淀",
+			"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀",
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",
@@ -322,7 +328,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/model <model> - 设置当前会话模型",
 			"/mode - 打开模式选择卡片",
 			"/mode <mode> - 设置当前会话模式",
-			"/show step|thought|tool|status|used on|off - 设置当前会话流式卡片展示项",
+			"/show step|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
 			"/at status|on|off - 查看或设置当前群聊是否需要 at 才响应",
 			"/restart - 重启 bridge 服务，重启完成后自动回复确认",
 			"/status - 查看服务状态",
@@ -392,6 +398,10 @@ func (s *Service) validateRestartCommand() error {
 }
 
 func (s *Service) restartAllowed(msg feishu.Message) bool {
+	return s.slashCommandAllowed(msg)
+}
+
+func (s *Service) slashCommandAllowed(msg feishu.Message) bool {
 	senderID := strings.TrimSpace(msg.SenderID)
 	if senderID == "" {
 		return false
@@ -411,6 +421,9 @@ func (s *Service) ownerOpenIDs(botID string) []string {
 			return bot.OwnerOpenIDs
 		}
 	}
+	if len(s.cfg.Bots) == 1 {
+		return s.cfg.Bots[0].OwnerOpenIDs
+	}
 	return nil
 }
 
@@ -419,7 +432,7 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
-	chat := s.showConfigForMessage(msg)
+	chat := s.chatConfigForMessage(msg)
 	fields := strings.Fields(text)
 	if len(fields) == 1 || len(fields) == 2 && fields[1] == "status" {
 		return formatShowStatus(chat)
@@ -482,7 +495,7 @@ func setChatShowOption(chat *ChatConfig, target string, visible bool) (string, b
 	}
 }
 
-func (s *Service) showConfigForMessage(msg feishu.Message) ChatConfig {
+func (s *Service) chatConfigForMessage(msg feishu.Message) ChatConfig {
 	chat := ChatConfig{Key: chatKeyFromMessage(msg)}
 	store := s.storeForMessage(msg)
 	if store == nil {
@@ -492,6 +505,8 @@ func (s *Service) showConfigForMessage(msg feishu.Message) ChatConfig {
 		return existing
 	}
 	if session, ok := s.findSession(msg); ok {
+		chat.WikiDisabled = session.WikiDisabled
+		chat.WikiIntervalSec = session.WikiIntervalSec
 		chat.HideStepMessages = session.HideStepMessages
 		chat.HideThoughts = session.HideThoughts
 		chat.HideTools = session.HideTools
@@ -516,6 +531,8 @@ func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu
 	}
 	chat := ChatConfig{
 		Key:              chatKey,
+		WikiDisabled:     session.WikiDisabled,
+		WikiIntervalSec:  session.WikiIntervalSec,
 		HideStepMessages: session.HideStepMessages,
 		HideThoughts:     session.HideThoughts,
 		HideTools:        session.HideTools,
@@ -532,7 +549,9 @@ func sessionHasShowConfig(session Session) bool {
 		session.HideThoughts ||
 		session.HideTools ||
 		session.HideStatusBar ||
-		session.HideUsageDetail
+		session.HideUsageDetail ||
+		session.WikiDisabled ||
+		session.WikiIntervalSec > 0
 }
 
 func formatShowStatus(chat ChatConfig) string {
@@ -617,7 +636,7 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 	if len(fields) < 2 || fields[1] == "status" {
 		return s.formatAtStatus(msg)
 	}
-	chat := ChatConfig{Key: chatKeyFromMessage(msg)}
+	chat := s.chatConfigForMessage(msg)
 	switch fields[1] {
 	case "on":
 		chat.MentionOptional = false
@@ -1216,32 +1235,31 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	if len(fields) < 2 {
 		return "可用命令：/wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
 	}
-	session, ok := s.findSession(msg)
-	if !ok {
-		return "当前会话还没有 ACP session，发送普通文本或 /new 后再配置 wiki。"
-	}
 	store := s.storeForMessage(msg)
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
+	chat := s.chatConfigForMessage(msg)
 	switch fields[1] {
 	case "on":
-		session.WikiDisabled = false
-		if err := store.Upsert(session); err != nil {
+		chat.WikiDisabled = false
+		if err := store.UpsertChat(chat); err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
 		}
-		return "已开启当前会话的自动知识沉淀。"
+		return "已开启当前聊天的自动知识沉淀。"
 	case "off":
-		session.WikiDisabled = true
-		s.cancelWikiTimer(session.Key)
-		if err := store.Upsert(session); err != nil {
+		chat.WikiDisabled = true
+		if session, ok := s.findSession(msg); ok {
+			s.cancelWikiTimer(session.Key)
+		}
+		if err := store.UpsertChat(chat); err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
 		}
-		return "已关闭当前会话的自动知识沉淀。"
+		return "已关闭当前聊天的自动知识沉淀。"
 	case "status":
-		return s.wikiStatus(session)
+		return s.wikiStatus(msg, chat)
 	case "interval":
 		if len(fields) < 3 {
 			return "请使用 /wiki interval <duration> 指定时间，例如 /wiki interval 5m。"
@@ -1250,17 +1268,17 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		if err != nil {
 			return err.Error()
 		}
-		session.WikiIntervalSec = int(interval.Seconds())
-		if err := store.Upsert(session); err != nil {
+		chat.WikiIntervalSec = int(interval.Seconds())
+		if err := store.UpsertChat(chat); err != nil {
 			slog.ErrorContext(ctx, "保存 wiki interval 失败", "错误", err)
 			return "保存 wiki interval 失败：" + err.Error()
 		}
-		if s.hasWikiTimer(session.Key) {
+		if session, ok := s.findSession(msg); ok && s.hasWikiTimer(session.Key) {
 			if agent, ok := s.registry.Get(session.AgentName); ok {
 				s.scheduleWikiAfterUserPrompt(session, agent)
 			}
 		}
-		return "已设置当前会话自动知识沉淀延迟：" + formatDuration(interval) + "。"
+		return "已设置当前聊天自动知识沉淀延迟：" + formatDuration(interval) + "。"
 	default:
 		return "暂不支持这个 wiki 命令。可用 /wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
 	}
@@ -1815,7 +1833,7 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
 	slog.InfoContext(ctx, "准备发送消息给ACP后端")
-	stream := newPromptCardStream(ctx, msg, session, s.showConfigForMessage(msg))
+	stream := newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg))
 	chunks := newPromptChunkAccumulator(stream)
 	flushStreams := func() {
 		chunks.finishStream()
@@ -3464,9 +3482,9 @@ func parseWikiInterval(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-func wikiInterval(session Session) time.Duration {
-	if session.WikiIntervalSec > 0 {
-		return time.Duration(session.WikiIntervalSec) * time.Second
+func wikiInterval(chat ChatConfig) time.Duration {
+	if chat.WikiIntervalSec > 0 {
+		return time.Duration(chat.WikiIntervalSec) * time.Second
 	}
 	return defaultWikiInterval
 }
@@ -3481,16 +3499,22 @@ func formatDuration(d time.Duration) string {
 	return d.String()
 }
 
-func (s *Service) wikiStatus(session Session) string {
-	enabled := !session.WikiDisabled
+func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
+	enabled := !chat.WikiDisabled
 	lines := []string{
-		"当前会话自动知识沉淀：" + map[bool]string{true: "开启", false: "关闭"}[enabled],
-		"延迟：" + formatDuration(wikiInterval(session)),
+		"当前聊天自动知识沉淀：" + map[bool]string{true: "开启", false: "关闭"}[enabled],
+		"延迟：" + formatDuration(wikiInterval(chat)),
 	}
+	session, hasSession := s.findSession(msg)
 	s.taskMu.Lock()
-	status := s.wikiStatuses[session.Key]
-	_, timerSet := s.wikiTimers[session.Key]
-	task := s.tasks[session.Key]
+	var status wikiRunStatus
+	var timerSet bool
+	var task *runningTask
+	if hasSession {
+		status = s.wikiStatuses[session.Key]
+		_, timerSet = s.wikiTimers[session.Key]
+		task = s.tasks[session.Key]
+	}
 	s.taskMu.Unlock()
 	if timerSet {
 		lines = append(lines, "状态：等待定时触发")
@@ -3606,11 +3630,12 @@ func (s *Service) hasWikiTimer(key SessionKey) bool {
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
-	if session.WikiDisabled || strings.TrimSpace(session.ACPSessionID) == "" {
+	chat := s.wikiConfigForSession(session)
+	if chat.WikiDisabled || strings.TrimSpace(session.ACPSessionID) == "" {
 		s.cancelWikiTimer(session.Key)
 		return
 	}
-	interval := wikiInterval(session)
+	interval := wikiInterval(chat)
 	if interval <= 0 {
 		interval = defaultWikiInterval
 	}
@@ -3629,6 +3654,20 @@ func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.Agen
 	})
 	s.wikiTimers[key] = timer
 	s.taskMu.Unlock()
+}
+
+func (s *Service) wikiConfigForSession(session Session) ChatConfig {
+	key := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
+	chat := ChatConfig{Key: key}
+	store := s.storeForMessage(feishu.Message{BotID: session.Key.BotID})
+	if store != nil {
+		if existing, ok := store.GetChat(key); ok {
+			return existing
+		}
+	}
+	chat.WikiDisabled = session.WikiDisabled
+	chat.WikiIntervalSec = session.WikiIntervalSec
+	return chat
 }
 
 func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {

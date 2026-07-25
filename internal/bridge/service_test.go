@@ -21,15 +21,31 @@ import (
 )
 
 const testBotOpenID = "ou_bot"
+const testOwnerOpenID = "ou_owner"
 
 func testBotMention(name string) feishu.Mention {
 	return feishu.Mention{ID: testBotOpenID, Name: name, Type: "bot"}
+}
+
+func newTestService(cfg config.Config, store *SessionStore) *Service {
+	if len(cfg.Bots) > 0 && len(cfg.Bots[0].OwnerOpenIDs) == 0 {
+		cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
+	}
+	return NewService(cfg, store)
 }
 
 func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg feishu.Message) (string, error) {
 	t.Helper()
 	if strings.TrimSpace(msg.BotOpenID) == "" {
 		msg.BotOpenID = testBotOpenID
+	}
+	if strings.TrimSpace(msg.SenderID) == "" && strings.HasPrefix(strings.TrimSpace(stripMentionNames(msg.Text, msg.Mentions)), "/") {
+		ensureTestOwner(t, svc, msg.BotID)
+		if owners := svc.ownerOpenIDs(msg.BotID); len(owners) > 0 {
+			msg.SenderID = strings.TrimSpace(owners[0])
+		} else {
+			msg.SenderID = testOwnerOpenID
+		}
 	}
 	if strings.TrimSpace(msg.Workspace) == "" {
 		msg.Workspace = filepath.Join(t.TempDir(), "workspace")
@@ -52,6 +68,26 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 		markWorkspaceBootstrapped(t, msg.Workspace)
 	}
 	return svc.HandleFeishuMessage(ctx, msg)
+}
+
+func ensureTestOwner(t *testing.T, svc *Service, botID string) {
+	t.Helper()
+	if svc == nil || len(svc.ownerOpenIDs(botID)) > 0 {
+		return
+	}
+	if len(svc.cfg.Bots) == 0 {
+		return
+	}
+	botID = strings.TrimSpace(botID)
+	for i := range svc.cfg.Bots {
+		if strings.TrimSpace(svc.cfg.Bots[i].ID) == botID {
+			svc.cfg.Bots[i].OwnerOpenIDs = []string{testOwnerOpenID}
+			return
+		}
+	}
+	if len(svc.cfg.Bots) == 1 {
+		svc.cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
+	}
 }
 
 func markWorkspaceBootstrapped(t *testing.T, workspace string) {
@@ -175,7 +211,7 @@ func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
 }
 
 func TestHandleFeishuMessageHelp(t *testing.T) {
-	svc := NewService(config.Default(), nil)
+	svc := newTestService(config.Default(), nil)
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		Text: "/help",
 	})
@@ -184,6 +220,45 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	}
 	if !strings.Contains(reply, "/status") {
 		t.Fatalf("reply = %q, want status help", reply)
+	}
+}
+
+func TestHandleFeishuMessageSlashCommandRequiresConfiguredOwner(t *testing.T) {
+	cfg := config.Default()
+	svc := NewService(cfg, nil)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:  "bot-a",
+		ChatID: "oc_chat",
+		Text:   "/help",
+		// 显式 SenderID 避免测试 helper 为普通命令用例注入默认 owner。
+		SenderID: "ou_someone",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/help) error = %v", err)
+	}
+	if reply != "未配置 bot owner，不能执行斜杠命令。" {
+		t.Fatalf("reply = %q, want missing owner warning", reply)
+	}
+}
+
+func TestHandleFeishuMessageSlashCommandRejectsNonOwner(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_owner"}
+	svc := NewService(cfg, nil)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		Text:     "/status",
+		SenderID: "ou_someone",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	if reply != "只有 bot owner 可以执行斜杠命令。" {
+		t.Fatalf("reply = %q, want non-owner warning", reply)
 	}
 }
 
@@ -236,7 +311,7 @@ func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
 }
 
 func TestHandleFeishuMessageStatus(t *testing.T) {
-	svc := NewService(config.Default(), nil)
+	svc := newTestService(config.Default(), nil)
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		Text: "@我的智能助手 /status",
 		Mentions: []feishu.Mention{
@@ -261,7 +336,7 @@ func TestHandleFeishuMessageCommandsListsACPCommands(t *testing.T) {
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{})
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -288,7 +363,7 @@ func TestHandleFeishuMessageCommandsForwardsACPCommand(t *testing.T) {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{promptReply: "review done"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -316,7 +391,7 @@ func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{promptReply: "review done"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -367,7 +442,7 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -429,7 +504,9 @@ func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
-	svc := NewService(config.Default(), store)
+	cfg := config.Default()
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_requester"}
+	svc := NewService(cfg, store)
 	var got feishu.ModelSelectionCard
 	ctx := feishu.WithModelSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModelSelectionCard) error {
 		got = card
@@ -493,7 +570,7 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -555,7 +632,9 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
-	svc := NewService(config.Default(), store)
+	cfg := config.Default()
+	cfg.Bots[0].OwnerOpenIDs = []string{"ou_requester"}
+	svc := NewService(cfg, store)
 	var got feishu.ModeSelectionCard
 	ctx := feishu.WithModeSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModeSelectionCard) error {
 		got = card
@@ -586,7 +665,7 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
@@ -664,7 +743,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 
 func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    "bot-a",
@@ -900,7 +979,7 @@ func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	selection := feishu.ModelSelection{
 		BotID:        session.Key.BotID,
@@ -969,7 +1048,7 @@ func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	selection := feishu.ModeSelection{
 		BotID:        session.Key.BotID,
@@ -1065,7 +1144,7 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 		promptReply:  "ACP 回复",
 		promptErrors: []error{errACPSessionUnavailable},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1243,7 +1322,7 @@ func TestHandleFeishuImageMessagePromptsWithLocalPath(t *testing.T) {
 func TestHandleFeishuUnsupportedEmptyMessageDoesNotPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1534,6 +1613,13 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 		ChatID:   "oc_group",
 		ChatType: "group",
 	}
+	if err := store.UpsertChat(ChatConfig{
+		Key:             ChatKey{BotID: "bot-a", ChatID: "oc_group"},
+		WikiIntervalSec: 30,
+		HideUsageDetail: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(chat) error = %v", err)
+	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
@@ -1563,8 +1649,9 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want silent ignore for /at off without mention while mention is required", reply)
 	}
-	if _, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"}); ok {
-		t.Fatalf("chat config should not be created by ignored /at off")
+	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || chat.MentionOptional || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+		t.Fatalf("chat config = %+v, %v; ignored /at off should not change existing chat config", chat, ok)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1581,8 +1668,9 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want silent ignore for /at off mentioning another bot", reply)
 	}
-	if _, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"}); ok {
-		t.Fatalf("chat config should not be created by /at off mentioning another bot")
+	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || chat.MentionOptional || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+		t.Fatalf("chat config = %+v, %v; /at off mentioning another bot should not change existing chat config", chat, ok)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1599,9 +1687,9 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if !strings.Contains(reply, "无需 at") {
 		t.Fatalf("reply = %q, want mention optional confirmation", reply)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
-	if !ok || !chat.MentionOptional {
-		t.Fatalf("chat config = %+v, %v; want mention optional", chat, ok)
+	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || !chat.MentionOptional || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+		t.Fatalf("chat config = %+v, %v; want mention optional without clearing other chat options", chat, ok)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1761,7 +1849,7 @@ func TestHandleFeishuSessionListAndResume(t *testing.T) {
 	firstDir := t.TempDir()
 	secondDir := t.TempDir()
 	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}, promptReply: "ACP 回复"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	base := feishu.Message{
 		BotID:    "bot-a",
@@ -1848,7 +1936,7 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	msg := feishu.Message{
 		BotID:    "bot-a",
@@ -1924,7 +2012,7 @@ func TestHandleFeishuNewSessionUsesDefaultTitleAndDisplaysModeModel(t *testing.T
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	msg := feishu.Message{
 		BotID:    "bot-a",
@@ -1985,7 +2073,7 @@ func TestHandleFeishuNewSessionWaitsForSessionStateUpdate(t *testing.T) {
 			})
 		}()
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2028,7 +2116,7 @@ func TestHandleFeishuNewSessionWaitsAfterPartialSessionState(t *testing.T) {
 			})
 		}()
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2087,7 +2175,7 @@ func TestHandleFeishuAutoSessionUsesFirstPromptAsTitle(t *testing.T) {
 
 func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "bot-a")
-	svc := NewService(config.Default(), nil)
+	svc := newTestService(config.Default(), nil)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     "bot-a",
@@ -2125,7 +2213,7 @@ func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 
 func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "请告诉我你想叫我什么名字，以及我的工作风格和需要长期记住的信息。"}
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
@@ -2202,7 +2290,7 @@ func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 
 func TestHandleFeishuMessageNewOnlyConfirmsSessionCreation(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "请先回答初始化问题。"}
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
@@ -2539,7 +2627,7 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var statusBarEnabled *bool
 	var cards []*fakeStreamCard
@@ -2606,7 +2694,7 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
@@ -2657,7 +2745,7 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
@@ -3189,7 +3277,7 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 					}},
 				},
 			}
-			svc := NewService(config.Default(), store)
+			svc := newTestService(config.Default(), store)
 			svc.setRuntime(rt)
 			var cards []*fakeStreamCard
 			ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
@@ -3263,7 +3351,7 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 			}},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var processPanelEnabled *bool
 	var cards []*fakeStreamCard
@@ -3365,7 +3453,7 @@ func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -3690,7 +3778,7 @@ func TestHandleFeishuMessageAutoCreatesSessionWithBootstrapContext(t *testing.T)
 
 func TestHandleFeishuMessageStatusShowsPersistedSessionWithoutReadyState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
@@ -3752,7 +3840,7 @@ func TestHandleFeishuMessageKeepsPersistedACPSessionAfterBootstrapDeleted(t *tes
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{newSessionID: "ready-session", promptReply: "我是小助手。"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -3806,7 +3894,7 @@ func TestHandleFeishuMessageRecreatesMissingACPSessionTitleUsesUserText(t *testi
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	rt := &fakeRuntime{newSessionID: "ready-session", promptReply: "ACP 回复"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -3841,7 +3929,7 @@ func TestHandleFeishuMessageRecreatesMissingACPSessionTitleUsesUserText(t *testi
 
 func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
@@ -3931,7 +4019,7 @@ func TestHandleFeishuMessagePreservesACPStateUpdates(t *testing.T) {
 			t.Errorf("Upsert(latest) error = %v", err)
 		}
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -4014,7 +4102,7 @@ func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1"}
 	svc.setRuntime(rt)
 	home := t.TempDir()
@@ -4059,7 +4147,7 @@ func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 
 func TestHandleFeishuMessagePersistsSessionByBotID(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	rt := &fakeRuntime{newSessionID: "acp-session-1"}
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
@@ -4130,7 +4218,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 
 func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	workDir := t.TempDir()
 	msg := feishu.Message{
@@ -4164,7 +4252,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 
 func TestHandleFeishuMessageStatusFallsBackToRootID(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	workDir := t.TempDir()
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -4257,7 +4345,7 @@ func TestHandleFeishuMessageNewWithoutCwdReusesCurrentSessionCwd(t *testing.T) {
 func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
 	msg := feishu.Message{
@@ -4319,7 +4407,7 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 
 func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	if err := store.Upsert(Session{
 		Key:          key,
@@ -4345,8 +4433,12 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		t.Fatalf("reply = %q, want interval confirmation", reply)
 	}
 	session, ok := store.Get(key)
-	if !ok || session.WikiIntervalSec != 1 {
-		t.Fatalf("session = %+v, want wiki interval persisted", session)
+	if !ok || session.WikiIntervalSec != 0 {
+		t.Fatalf("session = %+v, want wiki interval not stored on session", session)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"})
+	if !ok || chat.WikiIntervalSec != 1 {
+		t.Fatalf("chat config = %+v, %v; want wiki interval persisted", chat, ok)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -4363,14 +4455,76 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		t.Fatalf("reply = %q, want off confirmation", reply)
 	}
 	session, ok = store.Get(key)
-	if !ok || !session.WikiDisabled {
-		t.Fatalf("session = %+v, want wiki disabled", session)
+	if !ok || session.WikiDisabled {
+		t.Fatalf("session = %+v, want wiki disabled not stored on session", session)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"})
+	if !ok || !chat.WikiDisabled || chat.WikiIntervalSec != 1 {
+		t.Fatalf("chat config = %+v, %v; want wiki disabled and interval persisted", chat, ok)
+	}
+}
+
+func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-new"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/wiki interval 1s",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki interval) error = %v", err)
+	}
+	if !strings.Contains(reply, "1s") {
+		t.Fatalf("reply = %q, want wiki interval confirmation", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
+		t.Fatalf("reply = %q, want new session confirmation", reply)
+	}
+	session, ok := store.Get(SessionKey{BotID: msg.BotID, ChatID: msg.ChatID})
+	if !ok || session.WikiIntervalSec != 0 || session.WikiDisabled {
+		t.Fatalf("session = %+v, %v; wiki options should not be stored on session", session, ok)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: msg.BotID, ChatID: msg.ChatID})
+	if !ok || chat.WikiIntervalSec != 1 || chat.WikiDisabled {
+		t.Fatalf("chat config = %+v, %v; want wiki interval to survive /new", chat, ok)
+	}
+	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	t.Cleanup(func() { svc.cancelWikiTimer(session.Key) })
+	svc.taskMu.Lock()
+	_, hasTimer := svc.wikiTimers[session.Key]
+	svc.taskMu.Unlock()
+	if !hasTimer {
+		t.Fatal("wiki timer should use chat-level interval after /new")
 	}
 }
 
 func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	session := Session{
 		Key:             key,
@@ -4419,7 +4573,7 @@ func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 
 func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{promptReply: "NoReply"})
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	session := Session{
@@ -4466,8 +4620,12 @@ func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 		t.Fatalf("wiki generation = %d, want greater than %d after reschedule", afterGeneration, beforeGeneration)
 	}
 	session, ok := store.Get(key)
-	if !ok || session.WikiIntervalSec != 1 {
-		t.Fatalf("session = %+v, want wiki interval persisted", session)
+	if !ok || session.WikiIntervalSec != 60 {
+		t.Fatalf("session = %+v, want legacy session wiki interval unchanged", session)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"})
+	if !ok || chat.WikiIntervalSec != 1 {
+		t.Fatalf("chat config = %+v, %v; want wiki interval persisted", chat, ok)
 	}
 }
 
@@ -4488,7 +4646,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	if err := store.Upsert(Session{
@@ -4594,7 +4752,7 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	session := Session{
@@ -4739,7 +4897,7 @@ func TestHandleRestartCommandRequiresOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/restart) error = %v", err)
 	}
-	if reply != "只有 bot owner 可以重启 bridge 服务。" {
+	if reply != "只有 bot owner 可以执行斜杠命令。" {
 		t.Fatalf("reply = %q, want owner warning", reply)
 	}
 }
@@ -4910,7 +5068,7 @@ func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
 func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptReply: "NoReply"}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	session := Session{
 		Key:             SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
@@ -4945,7 +5103,7 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
 	}
-	svc := NewService(config.Default(), store)
+	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
 	session := Session{
