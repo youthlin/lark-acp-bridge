@@ -190,6 +190,9 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 	if !permissionCardOperatorAllowed(entry, cardOperatorOpenID(event)) {
 		return permissionCardToast("warning", permissionCardUnauthorizedMessage(entry)), nil
 	}
+	if !permissionCardOptionAllowed(entry, optionID) {
+		return permissionCardToast("error", "权限选项已失效"), nil
+	}
 	entry, ok = a.permissionCards.take(requestID)
 	if !ok {
 		return permissionCardToast("warning", "该权限请求已处理或已过期"), nil
@@ -213,6 +216,19 @@ func permissionCardOperatorAllowed(entry permissionCardEntry, operatorID string)
 	operatorID = strings.TrimSpace(operatorID)
 	if len(entry.ownerOpenIDs) > 0 {
 		return containsOpenID(entry.ownerOpenIDs, operatorID)
+	}
+	return false
+}
+
+func permissionCardOptionAllowed(entry permissionCardEntry, optionID string) bool {
+	optionID = strings.TrimSpace(optionID)
+	if optionID == "" {
+		return false
+	}
+	for _, option := range entry.request.Options {
+		if strings.TrimSpace(option.OptionID) == optionID {
+			return true
+		}
 	}
 	return false
 }

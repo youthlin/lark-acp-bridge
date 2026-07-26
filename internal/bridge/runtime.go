@@ -335,20 +335,25 @@ func (r *runtimeManager) CloseSession(key SessionKey) error {
 
 func (r *runtimeManager) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
-	clients := r.clients
-	r.clients = make(map[runtimeKey]*acp.Client)
 	unsubs := r.clientUnsub
 	r.clientUnsub = make(map[runtimeKey]func())
+	keys := make([]runtimeKey, 0, len(r.clients))
+	for key := range r.clients {
+		keys = append(keys, key)
+	}
 	r.mu.Unlock()
 	for _, unsub := range unsubs {
 		if unsub != nil {
 			unsub()
 		}
 	}
-	for _, client := range clients {
-		_ = client.Close()
+	var firstErr error
+	for _, key := range keys {
+		if err := r.CloseRuntimeKey(key); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) (*acp.Client, error) {

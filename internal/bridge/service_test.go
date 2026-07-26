@@ -6177,6 +6177,52 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 	}
 }
 
+func TestShutdownCancelsRuntimeTasksBeforeRuntimeShutdown(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].Workspace = t.TempDir()
+	svc := newTestService(cfg, store)
+	rt := &fakeRuntime{blockPrompt: make(chan struct{})}
+	svc.setRuntime(rt)
+	session := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		AgentName:    "traex",
+		Cwd:          t.TempDir(),
+		ACPSessionID: "acp-session-1",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := svc.runUserPrompt(context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			ChatID:    "oc_chat",
+			ChatType:  "p2p",
+			MessageID: "om_prompt",
+			Workspace: cfg.Bots[0].Workspace,
+		}, session, cfg.Agents["traex"], "长任务")
+		done <- err
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runUserPrompt() error = %v, want context.Canceled", err)
+	}
+	rt.mu.Lock()
+	cancelCount := len(rt.cancelCalls)
+	shutdownCancelCount := rt.shutdownCancelCount
+	rt.mu.Unlock()
+	if cancelCount != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCount)
+	}
+	if shutdownCancelCount != 1 {
+		t.Fatalf("shutdownCancelCount = %d, want runtime cancel completed before shutdown", shutdownCancelCount)
+	}
+}
+
 func waitForCondition(t *testing.T, timeout time.Duration, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -6266,33 +6312,34 @@ func promptSectionJSON(t *testing.T, prompt string, section string) map[string]s
 }
 
 type fakeRuntime struct {
-	mu                sync.Mutex
-	newSessionID      string
-	newSessionIDs     []string
-	newSessionInfo    acp.SessionInfo
-	newSessionError   error
-	noDefaultState    bool
-	afterNewSession   func(key SessionKey, sessionID string)
-	promptReply       string
-	promptErrors      []error
-	promptUpdates     []acp.PromptUpdate
-	afterUpdates      func()
-	permissionRequest *acp.PermissionRequest
-	permissionOutcome acp.PermissionOutcome
-	blockPrompt       chan struct{}
-	blockPromptAt     int
-	promptResult      acp.PromptResult
-	promptResults     []acp.PromptResult
-	configOptions     []acp.SessionConfigOption
-	configCalls       []fakeConfigCall
-	newCalls          []fakeNewCall
-	promptCalls       []fakePromptCall
-	wikiRuntimeCalls  []fakePromptCall
-	cancelCalls       []fakeCancelCall
-	closedRuntimeKeys []runtimeKey
-	closedKeys        []SessionKey
-	updateHandlers    map[SessionKey][]acp.UpdateHandler
-	blockWikiRuntime  chan struct{}
+	mu                  sync.Mutex
+	newSessionID        string
+	newSessionIDs       []string
+	newSessionInfo      acp.SessionInfo
+	newSessionError     error
+	noDefaultState      bool
+	afterNewSession     func(key SessionKey, sessionID string)
+	promptReply         string
+	promptErrors        []error
+	promptUpdates       []acp.PromptUpdate
+	afterUpdates        func()
+	permissionRequest   *acp.PermissionRequest
+	permissionOutcome   acp.PermissionOutcome
+	blockPrompt         chan struct{}
+	blockPromptAt       int
+	promptResult        acp.PromptResult
+	promptResults       []acp.PromptResult
+	configOptions       []acp.SessionConfigOption
+	configCalls         []fakeConfigCall
+	newCalls            []fakeNewCall
+	promptCalls         []fakePromptCall
+	wikiRuntimeCalls    []fakePromptCall
+	cancelCalls         []fakeCancelCall
+	closedRuntimeKeys   []runtimeKey
+	closedKeys          []SessionKey
+	shutdownCancelCount int
+	updateHandlers      map[SessionKey][]acp.UpdateHandler
+	blockWikiRuntime    chan struct{}
 }
 
 type fakeNewCall struct {
@@ -6483,6 +6530,9 @@ func (f *fakeRuntime) CloseSession(key SessionKey) error {
 }
 
 func (f *fakeRuntime) Shutdown(ctx context.Context) error {
+	f.mu.Lock()
+	f.shutdownCancelCount = len(f.cancelCalls)
+	f.mu.Unlock()
 	return nil
 }
 

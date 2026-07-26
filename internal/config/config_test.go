@@ -59,6 +59,22 @@ func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	}
 }
 
+func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(config.example.json) error = %v", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal(config.example.json) error = %v", err)
+	}
+	got := cfg.Agents["traex"].Args
+	want := Default().Agents["traex"].Args
+	if !slices.Equal(got, want) {
+		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
+	}
+}
+
 func TestLoadExpandsHomePath(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

@@ -110,6 +110,13 @@ type loopAnchor struct {
 	request loopRequest
 }
 
+type preparedPrompt struct {
+	session Session
+	agent   config.AgentConfig
+	text    string
+	errText string
+}
+
 // NewService 创建服务实例
 //
 //	@param cfg 服务配置
@@ -1363,24 +1370,24 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	if err != nil {
 		return err.Error()
 	}
-	session, agent, _, errText, err := s.preparePrompt(ctx, msg, req.Prompt)
+	prepared, err := s.preparePrompt(ctx, msg, req.Prompt)
 	if err != nil {
 		return "启动 loop 失败：" + err.Error()
 	}
-	if errText != "" {
-		return errText
+	if prepared.errText != "" {
+		return prepared.errText
 	}
-	s.subscribeACPStateUpdates(ctx, msg, session.Key)
-	session = s.updateAutomaticSessionTitle(ctx, msg, session, req.Prompt)
+	s.subscribeACPStateUpdates(ctx, msg, prepared.session.Key)
+	session := s.updateAutomaticSessionTitle(ctx, msg, prepared.session, req.Prompt)
 	startText := loopAnchorText(req, loopProgressStarted, 0, "", time.Now())
 	if sent, ok, err := feishu.SendMessage(ctx, msg, startText); err != nil {
 		return "启动 loop 失败：" + err.Error()
 	} else if ok {
 		anchor := loopAnchor{message: loopAnchorMessage(msg, sent), request: req}
-		s.startLoop(ctx, msg, anchor, session, agent, req)
+		s.startLoop(ctx, msg, anchor, session, prepared.agent, req)
 		return ""
 	}
-	s.startLoop(ctx, msg, loopAnchor{}, session, agent, req)
+	s.startLoop(ctx, msg, loopAnchor{}, session, prepared.agent, req)
 	return startText
 }
 
@@ -2229,43 +2236,40 @@ func (s *Service) status(msg feishu.Message) string {
 }
 
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
-	session, agent, promptText, errText, err := s.preparePrompt(ctx, msg, text)
+	prepared, err := s.preparePrompt(ctx, msg, text)
 	if err != nil {
 		return "", err
 	}
-	if errText != "" {
-		return errText, nil
+	if prepared.errText != "" {
+		return prepared.errText, nil
 	}
-	return s.promptSession(ctx, msg, session, agent, promptText, text)
+	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, text)
 }
 
-func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (
-	// TODO 返回值太多了吧 用结构体包装一下?
-	Session, config.AgentConfig, string, string, error,
-) {
+func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (preparedPrompt, error) {
 	session, ok := s.findSession(msg)
 	if !ok {
 		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
 		if errText != "" {
-			return Session{}, config.AgentConfig{}, "", errText, nil
+			return preparedPrompt{errText: errText}, nil
 		}
 		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
-		return created, agent, text, "", nil
+		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
-		return Session{}, config.AgentConfig{}, "", "", fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
+		return preparedPrompt{}, fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
 	}
 	text := promptTextWithReplyContext(msg, userText)
 	if strings.TrimSpace(session.ACPSessionID) == "" {
 		created, _, _, errText := s.createSession(ctx, []string{"/new", session.Cwd}, msg)
 		if errText != "" {
-			return Session{}, config.AgentConfig{}, "", errText, nil
+			return preparedPrompt{errText: errText}, nil
 		}
 		session = created
 	}
 	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
-	return session, agent, text, "", nil
+	return preparedPrompt{session: session, agent: agent, text: text}, nil
 }
 
 func promptTextWithReplyContext(msg feishu.Message, text string) string {
@@ -4341,31 +4345,40 @@ func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {
 
 func (s *Service) cancelAllSessionWork(ctx context.Context) {
 	s.taskMu.Lock()
-	timerKeys := make([]SessionKey, 0, len(s.wikiTimers))
-	for key := range s.wikiTimers {
-		timerKeys = append(timerKeys, key)
+	if s.wikiGenerations == nil {
+		s.wikiGenerations = make(map[SessionKey]int64)
 	}
-	taskKeys := make([]SessionKey, 0, len(s.tasks))
-	for key := range s.tasks {
-		taskKeys = append(taskKeys, key)
-	}
-	wikiTaskKeys := make([]SessionKey, 0, len(s.wikiTasks))
-	seenWikiTaskKeys := make(map[SessionKey]bool, len(s.wikiTasks))
-	for runtime := range s.wikiTasks {
-		if !seenWikiTaskKeys[runtime.SessionKey] {
-			seenWikiTaskKeys[runtime.SessionKey] = true
-			wikiTaskKeys = append(wikiTaskKeys, runtime.SessionKey)
+	timers := make([]*time.Timer, 0, len(s.wikiTimers))
+	for key, pending := range s.wikiTimers {
+		s.wikiGenerations[key]++
+		if pending != nil && pending.timer != nil {
+			timers = append(timers, pending.timer)
 		}
+		delete(s.wikiTimers, key)
+	}
+	tasks := make([]*runningTask, 0, len(s.tasks)+len(s.wikiTasks))
+	for key, task := range s.tasks {
+		if task != nil {
+			tasks = append(tasks, task)
+		}
+		delete(s.tasks, key)
+	}
+	for runtime, task := range s.wikiTasks {
+		if task != nil {
+			tasks = append(tasks, task)
+		}
+		delete(s.wikiTasks, runtime)
 	}
 	s.taskMu.Unlock()
-	for _, key := range timerKeys {
-		s.cancelWikiTimer(key)
+	for _, timer := range timers {
+		timer.Stop()
 	}
-	for _, key := range taskKeys {
-		s.cancelRunningSessionWork(ctx, key)
-	}
-	for _, key := range wikiTaskKeys {
-		s.cancelWikiTasks(ctx, key)
+	for _, task := range tasks {
+		task.cancel()
+		if task.onCancel != nil {
+			task.onCancel(ctx, "已取消")
+		}
+		s.cancelRuntimeTask(ctx, task)
 	}
 }
 

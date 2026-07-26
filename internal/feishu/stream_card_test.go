@@ -668,6 +668,51 @@ func TestPermissionCardActionAllowsOwnerInGroup(t *testing.T) {
 	}
 }
 
+func TestPermissionCardActionRejectsUnknownOption(t *testing.T) {
+	adapter := &Adapter{permissionCards: newPermissionCardRegistry()}
+	waiter := newPermissionCardWaiter()
+	adapter.permissionCards.add("perm-1", permissionCardEntry{
+		waiter:       waiter,
+		requesterID:  "ou_requester",
+		ownerOpenIDs: []string{"ou_owner"},
+		groupChat:    true,
+		request: acp.PermissionRequest{
+			RequestID: "perm-1",
+			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
+			Options: []acp.PermissionOption{
+				{OptionID: "allow-once", Kind: "allow_once"},
+			},
+		},
+	})
+
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_owner"},
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{
+					"action":     permissionCardAction,
+					"request_id": "perm-1",
+					"option_id":  "allow-always",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "error" {
+		t.Fatalf("response = %+v, want error toast", resp)
+	}
+	select {
+	case outcome := <-waiter.once:
+		t.Fatalf("waiter received unknown option outcome: %+v", outcome)
+	default:
+	}
+	if _, ok := adapter.permissionCards.get("perm-1"); !ok {
+		t.Fatal("unknown option should not remove permission request")
+	}
+}
+
 func TestPermissionCardActionRejectsPrivateWhenOwnerMissing(t *testing.T) {
 	adapter := &Adapter{permissionCards: newPermissionCardRegistry()}
 	waiter := newPermissionCardWaiter()
