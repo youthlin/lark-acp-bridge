@@ -2671,7 +2671,6 @@ type promptChunkFlush struct {
 	target string
 	text   string
 	finish bool
-	clear  bool
 }
 
 type promptChunkAccumulator struct {
@@ -2681,7 +2680,6 @@ type promptChunkAccumulator struct {
 	reply           strings.Builder
 	finalCandidate  strings.Builder
 	hasTool         bool
-	textVisible     bool
 	timer           *time.Timer
 	timerGeneration int64
 	flushing        sync.WaitGroup
@@ -2731,12 +2729,7 @@ func (a *promptChunkAccumulator) markToolBoundary() {
 		flushes = append(flushes, promptChunkFlush{target: promptChunkTargetProcessMessage, text: processText, finish: true})
 		a.finalCandidate.Reset()
 	}
-	clearText := a.textVisible && processText != ""
 	a.hasTool = true
-	if clearText {
-		flushes = append(flushes, promptChunkFlush{target: promptChunkTargetText, clear: true, finish: true})
-		a.textVisible = false
-	}
 	a.mu.Unlock()
 	for _, flush := range flushes {
 		a.applyFlush(flush)
@@ -2802,9 +2795,6 @@ func (a *promptChunkAccumulator) takeFlushLocked(finish bool) promptChunkFlush {
 	if !hasPending {
 		return promptChunkFlush{target: current.target, finish: finish}
 	}
-	if current.target == promptChunkTargetText && text != "" {
-		a.textVisible = true
-	}
 	return promptChunkFlush{target: current.target, text: text, finish: finish}
 }
 
@@ -2814,9 +2804,7 @@ func (a *promptChunkAccumulator) applyFlush(flush promptChunkFlush) {
 	}
 	switch flush.target {
 	case promptChunkTargetText:
-		if flush.clear {
-			a.stream.updateText("")
-		} else if flush.text != "" {
+		if flush.text != "" {
 			a.stream.updateText(flush.text)
 		}
 	case promptChunkTargetProcessMessage:

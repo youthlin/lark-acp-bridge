@@ -2909,8 +2909,8 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
 	card := cards[0]
-	if got := card.textUpdatesSnapshot(); len(got) != 3 || got[0] != "收到。现在开始。" || got[1] != "" || got[2] != "工具处理完成。" {
-		t.Fatalf("textUpdates = %+v, want pre-tool text moved away and final candidate retained", got)
+	if got := card.textUpdatesSnapshot(); len(got) != 2 || got[0] != "收到。现在开始。" || got[1] != "工具处理完成。" {
+		t.Fatalf("textUpdates = %+v, want pre-tool text kept until final candidate replaces it", got)
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 3 ||
 		got[0] != "💬 收到。现在开始。" ||
@@ -2999,9 +2999,9 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 	if len(textUpdates) == 0 || textUpdates[len(textUpdates)-1] != "最终结论。" {
 		t.Fatalf("textUpdates = %+v, want only text after last tool as final candidate", textUpdates)
 	}
-	wantTextUpdates := []string{"先检查。", "", "中间说明。", "", "最终结论。"}
+	wantTextUpdates := []string{"先检查。", "中间说明。", "最终结论。"}
 	if !reflect.DeepEqual(textUpdates, wantTextUpdates) {
-		t.Fatalf("textUpdates = %+v, want stale intermediate candidate cleared as %+v", textUpdates, wantTextUpdates)
+		t.Fatalf("textUpdates = %+v, want intermediate candidates replaced without clearing as %+v", textUpdates, wantTextUpdates)
 	}
 	processUpdates := cards[0].processUpdatesSnapshot()
 	if len(processUpdates) == 0 {
