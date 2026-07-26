@@ -302,7 +302,7 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	text = stripMentionNames(text, msg.Mentions)
 	msg.Text = text
 	promptText := strings.TrimSpace(msg.PromptText())
-	slog.InfoContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
+	slog.DebugContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
 
 	if s.shouldIgnoreMessage(msg, text) {
 		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")

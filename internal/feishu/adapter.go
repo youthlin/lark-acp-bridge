@@ -566,7 +566,8 @@ func hydrateMessageImages(ctx context.Context, client messageClient, messageID s
 		if strings.TrimSpace(image.ImageKey) != "" && strings.TrimSpace(image.LocalPath) == "" {
 			path, err := client.DownloadImage(ctx, messageID, image.ImageKey, workspace)
 			if err != nil {
-				slog.WarnContext(ctx, "下载飞书图片失败", "message_id", messageID, "image_key", image.ImageKey, "错误", err)
+				slog.WarnContext(ctx, "下载飞书图片失败", "错误", err)
+				slog.DebugContext(ctx, "下载飞书图片失败详情", "message_id", messageID, "image_key", image.ImageKey, "错误", err)
 			} else {
 				image.LocalPath = path
 			}

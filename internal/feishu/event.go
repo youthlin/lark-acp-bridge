@@ -18,10 +18,11 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.InfoContext(ctx, "Bot收到原始消息", "body", eventLogBody(body, event))
+	slog.DebugContext(ctx, "Bot收到原始消息", "body", eventLogBody(body, event))
 	msg, err := ParseMessage(event)
 	if err != nil {
-		slog.Warn("解析飞书消息失败", "错误", err, "事件", larkcore.Prettify(event))
+		slog.Warn("解析飞书消息失败", "错误", err)
+		slog.Debug("解析飞书消息失败详情", "错误", err, "事件", larkcore.Prettify(event))
 		return nil
 	}
 	msg.BotID = a.cfg.ID
@@ -100,7 +101,7 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.InfoContext(ctx, "有消息添加了表情回应", "body", eventLogBody(body, event))
+	slog.DebugContext(ctx, "有消息添加了表情回应", "body", eventLogBody(body, event))
 	return nil
 }
 
@@ -109,7 +110,7 @@ func (a *Adapter) handleReactionDeleted(ctx context.Context, event *larkim.P2Mes
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.InfoContext(ctx, "有消息移除了表情回应", "body", eventLogBody(body, event))
+	slog.DebugContext(ctx, "有消息移除了表情回应", "body", eventLogBody(body, event))
 	return nil
 }
 

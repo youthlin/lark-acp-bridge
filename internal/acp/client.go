@@ -401,7 +401,7 @@ func (c *Client) CancelSession(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	slog.InfoContext(ctx, "Notify ACP", "method", "session/cancel", "req", msg)
+	slog.DebugContext(ctx, "Notify ACP", "method", "session/cancel", "req", msg)
 	return c.write(msg)
 }
 
@@ -518,7 +518,7 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	if err != nil {
 		return nil, err
 	}
-	slog.InfoContext(ctx, "Call ACP", "method", method, "req", req)
+	slog.DebugContext(ctx, "Call ACP", "method", method, "req", req)
 	ch := make(chan rpcResponse, 1)
 	c.pendingMu.Lock()
 	c.pending[req.ID.Key()] = ch
@@ -568,7 +568,7 @@ func (c *Client) readLoop(stdout io.Reader) {
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
-		slog.Info("read acp line", "line", arg.RawJSON(line), "comp", "acp-loop")
+		slog.Debug("read acp line", "line", arg.RawJSON(line), "comp", "acp-loop")
 		var msg Message
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
