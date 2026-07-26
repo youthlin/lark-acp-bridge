@@ -6458,6 +6458,95 @@ func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
 	}
 }
 
+func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "正在执行\n"},
+				},
+			},
+		},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	client := newFakeSentMessageClient("om_loop_start")
+	var cards []*fakeStreamCard
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{failOnCanceledContext: true}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_user",
+		ChatID:    "oc_chat",
+		ChatType:  "group",
+		ThreadID:  "omt_thread",
+		Text:      "@智能助手 /loop -n 0 -i 1ms 长循环",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 && len(cards) == 1 })
+
+	display, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
+		BotID:        "bot-a",
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_thread",
+		ACPSessionID: "acp-session-1",
+		OperatorID:   testOwnerOpenID,
+	})
+	if err != nil {
+		t.Fatalf("HandleLoopCancel() error = %v", err)
+	}
+	if !strings.Contains(display, "结束原因：已通过卡片取消") {
+		t.Fatalf("display = %q, want card cancel reason", display)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		statusCancelled := false
+		for _, update := range cards[0].statusUpdatesSnapshot() {
+			if strings.Contains(update, "已取消") {
+				statusCancelled = true
+				break
+			}
+		}
+		return statusCancelled && cards[0].isClosed()
+	})
+
+	processCancelled := false
+	for _, update := range cards[0].processUpdatesSnapshot() {
+		if strings.Contains(update, "已取消") {
+			processCancelled = true
+			break
+		}
+	}
+	if !processCancelled {
+		t.Fatalf("process updates = %+v, want cancellation marker", cards[0].processUpdatesSnapshot())
+	}
+}
+
 func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
@@ -7226,12 +7315,13 @@ func (f *fakeRuntime) cancelCallCount() int {
 }
 
 type fakeStreamCard struct {
-	mu             sync.Mutex
-	textUpdates    []string
-	processUpdates []string
-	statusUpdates  []string
-	usageDetails   []string
-	closed         bool
+	mu                    sync.Mutex
+	textUpdates           []string
+	processUpdates        []string
+	statusUpdates         []string
+	usageDetails          []string
+	closed                bool
+	failOnCanceledContext bool
 }
 
 type fakeRestartAckSender struct {
@@ -7252,6 +7342,9 @@ func (f *fakeRestartAckSender) SendText(ctx context.Context, msg feishu.Message,
 func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.textUpdates = append(f.textUpdates, text)
 	return nil
 }
@@ -7259,6 +7352,9 @@ func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {
 func (f *fakeStreamCard) UpdateProcess(ctx context.Context, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.processUpdates = append(f.processUpdates, text)
 	return nil
 }
@@ -7266,6 +7362,9 @@ func (f *fakeStreamCard) UpdateProcess(ctx context.Context, text string) error {
 func (f *fakeStreamCard) UpdateStatus(ctx context.Context, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.statusUpdates = append(f.statusUpdates, text)
 	return nil
 }
@@ -7273,6 +7372,9 @@ func (f *fakeStreamCard) UpdateStatus(ctx context.Context, text string) error {
 func (f *fakeStreamCard) UpdateUsageDetail(ctx context.Context, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.usageDetails = append(f.usageDetails, text)
 	return nil
 }
@@ -7280,6 +7382,9 @@ func (f *fakeStreamCard) UpdateUsageDetail(ctx context.Context, text string) err
 func (f *fakeStreamCard) Close(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.closed = true
 	return nil
 }
