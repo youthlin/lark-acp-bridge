@@ -10,6 +10,14 @@ type intermediateReplySender func(context.Context, Message, string) error
 
 type intermediateReplySenderKey struct{}
 
+type sentMessageSender func(context.Context, Message, string) (SentMessage, error)
+
+type sentMessageSenderKey struct{}
+
+type messageUpdater func(context.Context, string, string) error
+
+type messageUpdaterKey struct{}
+
 // StreamCard 表示一张可流式更新的飞书卡片。
 type StreamCard interface {
 	UpdateProcess(context.Context, string) error
@@ -105,6 +113,37 @@ func SendIntermediateReply(ctx context.Context, msg Message, text string) (bool,
 		return false, nil
 	}
 	return true, sender(ctx, msg, text)
+}
+
+func WithSentMessageSender(ctx context.Context, sender func(context.Context, Message, string) (SentMessage, error)) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sentMessageSenderKey{}, sentMessageSender(sender))
+}
+
+func SendMessage(ctx context.Context, msg Message, text string) (SentMessage, bool, error) {
+	sender, ok := ctx.Value(sentMessageSenderKey{}).(sentMessageSender)
+	if !ok || sender == nil {
+		return SentMessage{}, false, nil
+	}
+	sent, err := sender(ctx, msg, text)
+	return sent, true, err
+}
+
+func WithMessageUpdater(ctx context.Context, updater func(context.Context, string, string) error) context.Context {
+	if updater == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, messageUpdaterKey{}, messageUpdater(updater))
+}
+
+func UpdateMessageText(ctx context.Context, messageID string, text string) (bool, error) {
+	updater, ok := ctx.Value(messageUpdaterKey{}).(messageUpdater)
+	if !ok || updater == nil {
+		return false, nil
+	}
+	return true, updater(ctx, messageID, text)
 }
 
 func WithStreamCardStarter(ctx context.Context, starter func(context.Context, Message) (StreamCard, error)) context.Context {

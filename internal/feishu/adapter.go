@@ -356,25 +356,35 @@ func (a *Adapter) Shutdown(ctx context.Context) error {
 }
 
 func (a *Adapter) SendText(ctx context.Context, msg Message, text string) error {
+	_, err := a.SendTextMessage(ctx, msg, text)
+	return err
+}
+
+func (a *Adapter) SendTextMessage(ctx context.Context, msg Message, text string) (SentMessage, error) {
 	if strings.TrimSpace(msg.MessageID) != "" {
-		return a.ReplyText(ctx, msg, text)
+		return a.ReplyTextMessage(ctx, msg, text)
 	}
 	if msg.IsPrivateChat() {
-		return a.SendChatText(ctx, msg.ChatID, text)
+		return a.SendChatTextMessage(ctx, msg.ChatID, msg.ChatType, text)
 	}
-	return fmt.Errorf("飞书 message_id 为空")
+	return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
 }
 
 func (a *Adapter) SendChatText(ctx context.Context, chatID string, text string) error {
+	_, err := a.SendChatTextMessage(ctx, chatID, "p2p", text)
+	return err
+}
+
+func (a *Adapter) SendChatTextMessage(ctx context.Context, chatID string, chatType string, text string) (SentMessage, error) {
 	if a.client == nil {
-		return fmt.Errorf("飞书客户端未初始化")
+		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")
 	}
 	if chatID == "" {
-		return fmt.Errorf("飞书 chat_id 为空")
+		return SentMessage{}, fmt.Errorf("飞书 chat_id 为空")
 	}
 	content, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
-		return fmt.Errorf("编码飞书消息内容: %w", err)
+		return SentMessage{}, fmt.Errorf("编码飞书消息内容: %w", err)
 	}
 	msgType := "text"
 	req := larkim.NewCreateMessageReqBuilder().
@@ -387,24 +397,29 @@ func (a *Adapter) SendChatText(ctx context.Context, chatID string, text string) 
 		Build()
 	resp, err := a.client.Im.V1.Message.Create(ctx, req)
 	if err != nil {
-		return fmt.Errorf("调用飞书发消息接口: %w", err)
+		return SentMessage{}, fmt.Errorf("调用飞书发消息接口: %w", err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("飞书发消息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		return SentMessage{}, fmt.Errorf("飞书发消息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
-	return nil
+	return sentMessageFromCreateResp(resp, chatID, chatType), nil
 }
 
 func (a *Adapter) ReplyText(ctx context.Context, msg Message, text string) error {
+	_, err := a.ReplyTextMessage(ctx, msg, text)
+	return err
+}
+
+func (a *Adapter) ReplyTextMessage(ctx context.Context, msg Message, text string) (SentMessage, error) {
 	if a.client == nil {
-		return fmt.Errorf("飞书客户端未初始化")
+		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")
 	}
 	if msg.MessageID == "" {
-		return fmt.Errorf("飞书 message_id 为空")
+		return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
 	}
 	content, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
-		return fmt.Errorf("编码飞书回复内容: %w", err)
+		return SentMessage{}, fmt.Errorf("编码飞书回复内容: %w", err)
 	}
 	msgType := "text"
 	replyInThread := replyInThreadForMessage(msg)
@@ -418,16 +433,81 @@ func (a *Adapter) ReplyText(ctx context.Context, msg Message, text string) error
 		Build()
 	resp, err := a.client.Im.Message.Reply(ctx, req)
 	if err != nil {
-		return fmt.Errorf("调用飞书回复接口: %w", err)
+		return SentMessage{}, fmt.Errorf("调用飞书回复接口: %w", err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("飞书回复接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		return SentMessage{}, fmt.Errorf("飞书回复接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return sentMessageFromReplyResp(resp, msg), nil
+}
+
+func replyInThreadForMessage(msg Message) bool {
+	if msg.ForceReplyInThread {
+		return true
+	}
+	return msg.IsTopicThread()
+}
+
+func (a *Adapter) UpdateText(ctx context.Context, messageID string, text string) error {
+	if a.client == nil {
+		return fmt.Errorf("飞书客户端未初始化")
+	}
+	if strings.TrimSpace(messageID) == "" {
+		return fmt.Errorf("飞书 message_id 为空")
+	}
+	content, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		return fmt.Errorf("编码飞书消息内容: %w", err)
+	}
+	resp, err := a.client.Im.V1.Message.Update(ctx, larkim.NewUpdateMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewUpdateMessageReqBodyBuilder().
+			MsgType("text").
+			Content(string(content)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("调用飞书更新消息接口: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("飞书更新消息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
 
-func replyInThreadForMessage(msg Message) bool {
-	return msg.IsTopicThread()
+func sentMessageFromCreateResp(resp *larkim.CreateMessageResp, chatID string, chatType string) SentMessage {
+	sent := SentMessage{ChatID: chatID, ChatType: chatType}
+	if resp == nil || resp.Data == nil {
+		return sent
+	}
+	sent.MessageID = value(resp.Data.MessageId)
+	sent.ChatID = firstNonEmpty(value(resp.Data.ChatId), sent.ChatID)
+	sent.ThreadID = value(resp.Data.ThreadId)
+	sent.RootID = value(resp.Data.RootId)
+	sent.ParentID = value(resp.Data.ParentId)
+	return sent
+}
+
+func sentMessageFromReplyResp(resp *larkim.ReplyMessageResp, msg Message) SentMessage {
+	sent := SentMessage{ChatID: msg.ChatID, ChatType: msg.ChatType}
+	if resp == nil || resp.Data == nil {
+		return sent
+	}
+	sent.MessageID = value(resp.Data.MessageId)
+	sent.ChatID = firstNonEmpty(value(resp.Data.ChatId), sent.ChatID)
+	sent.ThreadID = firstNonEmpty(value(resp.Data.ThreadId), msg.ThreadID)
+	sent.RootID = value(resp.Data.RootId)
+	sent.ParentID = value(resp.Data.ParentId)
+	return sent
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // processingReactionEmojis 收到消息时随机选一个表情加在消息上

@@ -59,11 +59,12 @@ const (
 )
 
 type runningTask struct {
-	kind    taskKind
-	runtime runtimeKey
-	cancel  context.CancelFunc
-	session Session
-	agent   config.AgentConfig
+	kind     taskKind
+	runtime  runtimeKey
+	cancel   context.CancelFunc
+	session  Session
+	agent    config.AgentConfig
+	onCancel func(context.Context, string)
 }
 
 type pendingWikiRun struct {
@@ -93,6 +94,20 @@ type loopRunStatus struct {
 	prompt      string
 	reason      string
 	lastError   string
+}
+
+type loopProgressState string
+
+const (
+	loopProgressStarted   loopProgressState = "started"
+	loopProgressRunning   loopProgressState = "running"
+	loopProgressCompleted loopProgressState = "completed"
+	loopProgressFinished  loopProgressState = "finished"
+)
+
+type loopAnchor struct {
+	message feishu.Message
+	request loopRequest
 }
 
 // NewService 创建服务实例
@@ -1357,28 +1372,40 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	}
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	session = s.updateAutomaticSessionTitle(ctx, msg, session, req.Prompt)
-	s.startLoop(ctx, msg, session, agent, req)
-	return "已启动 loop。\n" + formatLoopRequest(req)
+	startText := loopAnchorText(req, loopProgressStarted, 0, "", time.Now())
+	if sent, ok, err := feishu.SendMessage(ctx, msg, startText); err != nil {
+		return "启动 loop 失败：" + err.Error()
+	} else if ok {
+		anchor := loopAnchor{message: loopAnchorMessage(msg, sent), request: req}
+		s.startLoop(ctx, msg, anchor, session, agent, req)
+		return ""
+	}
+	s.startLoop(ctx, msg, loopAnchor{}, session, agent, req)
+	return startText
 }
 
-func (s *Service) startLoop(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, req loopRequest) {
-	ctx, finish := s.startTask(context.WithoutCancel(ctx), session, agent, taskKindLoop)
+func (s *Service) startLoop(ctx context.Context, msg feishu.Message, anchor loopAnchor, session Session, agent config.AgentConfig, req loopRequest) {
 	started := time.Now()
+	ctx, finish := s.startTask(context.WithoutCancel(ctx), session, agent, taskKindLoop)
 	s.markLoopStarted(session.Key, started, req)
+	s.setTaskCancelHandler(session.Key, func(cancelCtx context.Context, reason string) {
+		s.updateLoopAnchor(cancelCtx, anchor, loopProgressFinished, 0, reason)
+	})
 	go func() {
 		defer finish()
-		reason, err := s.runLoop(ctx, msg, session, agent, req, started)
+		reason, err := s.runLoop(ctx, msg, anchor, session, agent, req, started)
 		s.markLoopFinished(session.Key, started, reason, err)
-		s.sendLoopFinished(ctx, msg, reason, err)
+		s.updateLoopFinished(ctx, msg, anchor, reason, err)
 	}()
 }
 
-func (s *Service) runLoop(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, req loopRequest, started time.Time) (string, error) {
+func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAnchor, session Session, agent config.AgentConfig, req loopRequest, started time.Time) (string, error) {
 	var deadline time.Time
 	if req.MaxDuration > 0 {
 		deadline = started.Add(req.MaxDuration)
 	}
 	basePrompt := promptTextWithReplyContext(msg, req.Prompt)
+	cardMsg := loopRoundMessage(msg, anchor)
 	for round := 1; ; round++ {
 		if req.MaxRounds > 0 && round > req.MaxRounds {
 			return "已达到最大轮次", nil
@@ -1387,8 +1414,10 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, session Sessi
 			return "已达到最长运行时间", nil
 		}
 		s.markLoopRound(session.Key, started, round)
+		s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
 		roundPrompt := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, loopPrompt(basePrompt, req, round, started, deadline))
-		result, _, rawResult, streamedReply, err := s.promptRuntimeWithProgressRaw(ctx, msg, session, agent, roundPrompt)
+		result, _, rawResult, streamedReply, err := s.promptRuntimeWithProgressRaw(ctx, cardMsg, session, agent, roundPrompt)
+		s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return "已取消", context.Canceled
@@ -1453,6 +1482,93 @@ func loopDone(text string) bool {
 	return strings.TrimSpace(text) == "DONE"
 }
 
+func loopAnchorMessage(original feishu.Message, sent feishu.SentMessage) feishu.Message {
+	msg := original
+	msg.MessageID = strings.TrimSpace(sent.MessageID)
+	msg.ChatID = firstNonEmptyString(sent.ChatID, original.ChatID)
+	msg.ChatType = firstNonEmptyString(sent.ChatType, original.ChatType)
+	msg.ThreadID = strings.TrimSpace(sent.ThreadID)
+	msg.RootID = strings.TrimSpace(sent.RootID)
+	msg.ParentID = strings.TrimSpace(sent.ParentID)
+	msg.Text = ""
+	msg.Reply = nil
+	return msg
+}
+
+func loopRoundMessage(original feishu.Message, anchor loopAnchor) feishu.Message {
+	if strings.TrimSpace(anchor.message.MessageID) == "" {
+		return original
+	}
+	msg := anchor.message
+	msg.BotID = firstNonEmptyString(msg.BotID, original.BotID)
+	msg.BotOpenID = firstNonEmptyString(msg.BotOpenID, original.BotOpenID)
+	msg.Workspace = firstNonEmptyString(msg.Workspace, original.Workspace)
+	msg.SenderID = original.SenderID
+	msg.SenderType = original.SenderType
+	msg.ForceReplyInThread = !msg.IsPrivateChat()
+	return msg
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (s *Service) updateLoopAnchor(ctx context.Context, anchor loopAnchor, state loopProgressState, round int, reason string) bool {
+	messageID := strings.TrimSpace(anchor.message.MessageID)
+	if messageID == "" {
+		return false
+	}
+	text := loopAnchorText(anchor.request, state, round, reason, time.Now())
+	if ok, err := feishu.UpdateMessageText(ctx, messageID, text); err != nil {
+		slog.WarnContext(ctx, "更新 loop 启动消息失败", "message_id", messageID, "错误", err)
+		return false
+	} else if !ok {
+		slog.InfoContext(ctx, "当前上下文不支持更新 loop 启动消息", "message_id", messageID)
+		return false
+	}
+	return true
+}
+
+func loopAnchorText(req loopRequest, state loopProgressState, round int, reason string, now time.Time) string {
+	lines := []string{
+		"已启动 loop。",
+		formatLoopRequest(req),
+		"",
+		"状态：" + loopProgressText(state, round),
+	}
+	if strings.TrimSpace(reason) != "" {
+		lines = append(lines, "结束原因："+strings.TrimSpace(reason))
+	}
+	if !now.IsZero() {
+		lines = append(lines, "更新时间："+now.Format(time.RFC3339))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func loopProgressText(state loopProgressState, round int) string {
+	switch state {
+	case loopProgressRunning:
+		if round > 0 {
+			return "第 " + strconv.Itoa(round) + " 轮运行中"
+		}
+		return "运行中"
+	case loopProgressCompleted:
+		if round > 0 {
+			return "第 " + strconv.Itoa(round) + " 轮已完成"
+		}
+		return "本轮已完成"
+	case loopProgressFinished:
+		return "已完成"
+	default:
+		return "已启动"
+	}
+}
+
 func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopRequest) {
 	s.taskMu.Lock()
 	s.loopStatuses[key] = loopRunStatus{
@@ -1498,8 +1614,11 @@ func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason str
 	s.taskMu.Unlock()
 }
 
-func (s *Service) sendLoopFinished(ctx context.Context, msg feishu.Message, reason string, err error) {
+func (s *Service) updateLoopFinished(ctx context.Context, msg feishu.Message, anchor loopAnchor, reason string, err error) {
 	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if s.updateLoopAnchor(ctx, anchor, loopProgressFinished, 0, reason) {
 		return
 	}
 	text := "loop 已结束：" + reason
@@ -1526,6 +1645,9 @@ func (s *Service) cancelLoopTask(ctx context.Context, key SessionKey, reason str
 	s.loopStatuses[key] = status
 	s.taskMu.Unlock()
 	task.cancel()
+	if task.onCancel != nil {
+		task.onCancel(ctx, reason)
+	}
 	go s.cancelRuntimeTask(ctx, task)
 	return true
 }
@@ -4134,6 +4256,9 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 	s.taskMu.Unlock()
 	if previous != nil {
 		previous.cancel()
+		if previous.onCancel != nil {
+			previous.onCancel(ctx, "已取消")
+		}
 		go s.cancelRuntimeTask(ctx, previous)
 	}
 
@@ -4145,6 +4270,17 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 		s.taskMu.Unlock()
 		cancel()
 	}
+}
+
+func (s *Service) setTaskCancelHandler(key SessionKey, handler func(context.Context, string)) {
+	if handler == nil {
+		return
+	}
+	s.taskMu.Lock()
+	if task := s.tasks[key]; task != nil {
+		task.onCancel = handler
+	}
+	s.taskMu.Unlock()
 }
 
 func (s *Service) startWikiTask(ctx context.Context, session Session, agent config.AgentConfig, runtime runtimeKey) (context.Context, func()) {
@@ -4190,6 +4326,9 @@ func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) 
 	s.taskMu.Unlock()
 	if task != nil {
 		task.cancel()
+		if task.onCancel != nil {
+			task.onCancel(ctx, "已取消")
+		}
 		go s.cancelRuntimeTask(ctx, task)
 	}
 }
@@ -4242,6 +4381,9 @@ func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
 	s.taskMu.Unlock()
 	for _, task := range tasks {
 		task.cancel()
+		if task.onCancel != nil {
+			task.onCancel(ctx, "已取消")
+		}
 		go s.cancelRuntimeTask(ctx, task)
 	}
 }

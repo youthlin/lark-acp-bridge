@@ -27,6 +27,18 @@ type Message struct {
 	Images     []MessageImage
 	Mentions   []Mention
 	Reply      *ReplyContext
+	// ForceReplyInThread forces replies to use Feishu topic/thread mode even
+	// when the source message is not itself a topic-thread event.
+	ForceReplyInThread bool
+}
+
+type SentMessage struct {
+	MessageID string
+	ChatID    string
+	ChatType  string
+	ThreadID  string
+	RootID    string
+	ParentID  string
 }
 
 type Mention struct {

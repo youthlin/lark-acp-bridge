@@ -70,6 +70,68 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 	return svc.HandleFeishuMessage(ctx, msg)
 }
 
+type fakeSentMessageClient struct {
+	mu        sync.Mutex
+	nextID    string
+	sent      []string
+	msgs      []feishu.Message
+	updates   []string
+	updateIDs []string
+}
+
+func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
+	return &fakeSentMessageClient{nextID: nextID}
+}
+
+func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := strings.TrimSpace(f.nextID)
+	if id == "" {
+		id = "om_loop_start"
+	}
+	f.sent = append(f.sent, text)
+	f.msgs = append(f.msgs, msg)
+	return feishu.SentMessage{
+		MessageID: id,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		ThreadID:  msg.ThreadID,
+		RootID:    id,
+	}, nil
+}
+
+func (f *fakeSentMessageClient) update(ctx context.Context, messageID string, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateIDs = append(f.updateIDs, messageID)
+	f.updates = append(f.updates, text)
+	return nil
+}
+
+func (f *fakeSentMessageClient) sentSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
+}
+
+func (f *fakeSentMessageClient) updatesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.updates...)
+}
+
+func (f *fakeSentMessageClient) updateIDsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.updateIDs...)
+}
+
+func withFakeSentMessageClient(ctx context.Context, client *fakeSentMessageClient) context.Context {
+	ctx = feishu.WithSentMessageSender(ctx, client.send)
+	return feishu.WithMessageUpdater(ctx, client.update)
+}
+
 func ensureTestOwner(t *testing.T, svc *Service, botID string) {
 	t.Helper()
 	if svc == nil || len(svc.ownerOpenIDs(botID)) > 0 {
@@ -5411,7 +5473,7 @@ func TestParseLoopRequest(t *testing.T) {
 	}
 }
 
-func TestLoopCommandRunsUntilDoneAndSendsFinishReply(t *testing.T) {
+func TestLoopCommandRunsUntilDoneAndUpdatesStartMessage(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "继续"}, {Text: "DONE"}}}
 	svc := newTestService(config.Default(), store)
@@ -5425,8 +5487,10 @@ func TestLoopCommandRunsUntilDoneAndSendsFinishReply(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
+	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
 	})
@@ -5440,13 +5504,32 @@ func TestLoopCommandRunsUntilDoneAndSendsFinishReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
 	}
-	if !strings.Contains(reply, "已启动 loop") || !strings.Contains(reply, "最大轮次：5") {
-		t.Fatalf("reply = %q, want loop start confirmation", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
+	}
+	sent := client.sentSnapshot()
+	if len(sent) != 1 || !strings.Contains(sent[0], "已启动 loop") || !strings.Contains(sent[0], "最大轮次：5") {
+		t.Fatalf("sent = %#v, want loop start confirmation", sent)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
-	waitForCondition(t, time.Second, func() bool { return len(intermediate) == 1 })
-	if intermediate[0] != "loop 已结束：agent 返回 DONE" {
-		t.Fatalf("intermediate = %#v, want DONE finish reply", intermediate)
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "状态：已完成") && strings.Contains(updates[len(updates)-1], "结束原因：agent 返回 DONE")
+	})
+	if len(intermediate) != 0 {
+		t.Fatalf("intermediate = %#v, want no separate finish reply", intermediate)
+	}
+	updates := client.updatesSnapshot()
+	if !containsStringWithAll(updates, "状态：第 1 轮运行中", "更新时间：") {
+		t.Fatalf("updates = %#v, want round 1 running update", updates)
+	}
+	if !containsStringWithAll(updates, "状态：第 2 轮已完成", "更新时间：") {
+		t.Fatalf("updates = %#v, want round 2 completed update", updates)
+	}
+	for _, id := range client.updateIDsSnapshot() {
+		if id != "om_loop_start" {
+			t.Fatalf("update message id = %q, want loop start message", id)
+		}
 	}
 	rt.mu.Lock()
 	calls := append([]fakePromptCall(nil), rt.promptCalls...)
@@ -5489,12 +5572,16 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
+	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	var streamMsgs []feishu.Message
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
 	})
 	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		streamMsgs = append(streamMsgs, msg)
 		return &fakeStreamCard{}, nil
 	})
 
@@ -5507,19 +5594,79 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
 	}
-	if !strings.Contains(reply, "已启动 loop") {
-		t.Fatalf("reply = %q, want loop start confirmation", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
-	waitForCondition(t, time.Second, func() bool { return len(intermediate) == 1 })
-	if intermediate[0] != "loop 已结束：agent 返回 DONE" {
-		t.Fatalf("intermediate = %#v, want DONE finish reply", intermediate)
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "结束原因：agent 返回 DONE")
+	})
+	if len(intermediate) != 0 {
+		t.Fatalf("intermediate = %#v, want no separate finish reply", intermediate)
+	}
+	if len(streamMsgs) != 1 || streamMsgs[0].MessageID != "om_loop_start" {
+		t.Fatalf("stream messages = %+v, want card reply to loop start message", streamMsgs)
 	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
 	svc.taskMu.Unlock()
 	if status.running || status.round != 1 || status.reason != "agent 返回 DONE" {
 		t.Fatalf("loop status = %+v, want completed at round 1 by streamed DONE", status)
+	}
+}
+
+func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "DONE"},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	var streamMsgs []feishu.Message
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		streamMsgs = append(streamMsgs, msg)
+		return &fakeStreamCard{}, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "group",
+		Text:     "@智能助手 /loop -n 3 -i 1ms 等待流式 DONE",
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	if len(streamMsgs) != 1 {
+		t.Fatalf("stream messages = %+v, want one card", streamMsgs)
+	}
+	if streamMsgs[0].MessageID != "om_loop_start" || !streamMsgs[0].ForceReplyInThread {
+		t.Fatalf("stream message = %+v, want card reply to loop start message in thread", streamMsgs[0])
 	}
 }
 
@@ -5537,8 +5684,10 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
+	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
 	})
@@ -5552,9 +5701,12 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
-	waitForCondition(t, time.Second, func() bool { return len(intermediate) == 1 })
-	if intermediate[0] != "loop 已结束：已达到最大轮次" {
-		t.Fatalf("intermediate = %#v, want max rounds finish", intermediate)
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "结束原因：已达到最大轮次")
+	})
+	if len(intermediate) != 0 {
+		t.Fatalf("intermediate = %#v, want no separate finish reply", intermediate)
 	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
@@ -5583,7 +5735,10 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 
-	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
@@ -5592,13 +5747,12 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
 	}
-	if !strings.Contains(reply, "已启动 loop") {
-		t.Fatalf("reply = %q, want loop started", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
-	close(rt.blockPrompt)
-	secondReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+	secondReply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
@@ -5611,8 +5765,13 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 		t.Fatalf("second reply = %q, want user prompt reply", secondReply)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	close(rt.blockPrompt)
 	if rt.promptCallCount() != 2 {
 		t.Fatalf("prompt calls = %d, want loop prompt and replacement user prompt", rt.promptCallCount())
+	}
+	updates := client.updatesSnapshot()
+	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已取消") {
+		t.Fatalf("updates = %#v, want cancelled loop start message update", updates)
 	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
@@ -5641,7 +5800,10 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 
-	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), client)
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
@@ -5651,7 +5813,7 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
-	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
@@ -5664,6 +5826,10 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 		t.Fatalf("reply = %q, want stop confirmation", reply)
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	updates := client.updatesSnapshot()
+	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已手动停止") {
+		t.Fatalf("updates = %#v, want manual stop update", updates)
+	}
 	close(rt.blockPrompt)
 
 	statusReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -6024,6 +6190,22 @@ func waitForCondition(t *testing.T, timeout time.Duration, ok func() bool) {
 		return
 	}
 	t.Fatalf("condition not met within %s", timeout)
+}
+
+func containsStringWithAll(values []string, parts ...string) bool {
+	for _, value := range values {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(value, part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, userText string) {
