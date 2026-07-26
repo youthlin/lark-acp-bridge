@@ -82,6 +82,44 @@ func (s *SessionStore) Upsert(session Session) error {
 		return fmt.Errorf("会话 key 不能为空")
 	}
 	now := time.Now()
+	s.upsertSessionLocked(session, now)
+	return s.writeLocked()
+}
+
+func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !session.Key.Valid() {
+		return Session{}, fmt.Errorf("会话 key 不能为空")
+	}
+	if session.ACPSessionID == "" {
+		return Session{}, fmt.Errorf("ACP session 不能为空")
+	}
+	chatKey := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
+	if !chatKey.Valid() {
+		return Session{}, fmt.Errorf("chat key 不能为空")
+	}
+	now := time.Now()
+	chat := s.chats[chatKey]
+	chat.Key = chatKey
+	if chat.CreatedAt.IsZero() {
+		chat.CreatedAt = now
+	}
+	if chat.NextSessionSeq < 1 {
+		chat.NextSessionSeq = 1
+	}
+	session.Title = fmt.Sprintf("session#%d", chat.NextSessionSeq)
+	session.ManualTitle = false
+	chat.NextSessionSeq++
+	chat.UpdatedAt = now
+
+	s.upsertSessionLocked(session, now)
+	s.chats[chatKey] = chat
+	return session, s.writeLocked()
+}
+
+func (s *SessionStore) upsertSessionLocked(session Session, now time.Time) {
 	if session.CreatedAt.IsZero() {
 		if existing, ok := s.sessions[session.Key]; ok {
 			if existing.ACPSessionID == session.ACPSessionID {
@@ -99,7 +137,6 @@ func (s *SessionStore) Upsert(session Session) error {
 		s.upsertHistoryLocked(session)
 		s.trimHistoryLocked()
 	}
-	return s.writeLocked()
 }
 
 func (s *SessionStore) Get(key SessionKey) (Session, bool) {

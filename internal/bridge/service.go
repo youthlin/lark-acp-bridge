@@ -2240,9 +2240,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if errText != "" {
 		return Session{}, config.AgentConfig{}, "", errText
 	}
-	if req.Title == "" {
-		req.Title = s.nextDefaultSessionTitle(store, msg)
-	}
+	useDefaultTitle := req.Title == ""
 	cwd := req.Cwd
 	if !filepath.IsAbs(cwd) {
 		return Session{}, config.AgentConfig{}, "", "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
@@ -2288,7 +2286,17 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		Models:            sessionInfo.Models,
 		Mode:              sessionInfo.Mode,
 	}
-	if err := store.Upsert(session); err != nil {
+	if useDefaultTitle {
+		var err error
+		session, err = store.UpsertWithDefaultTitle(session)
+		if err != nil {
+			if hasPendingWiki {
+				s.restorePendingWiki(pendingWiki)
+			}
+			slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
+			return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
+		}
+	} else if err := store.Upsert(session); err != nil {
 		if hasPendingWiki {
 			s.restorePendingWiki(pendingWiki)
 		}
@@ -4284,17 +4292,6 @@ func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) 
 	}
 	req.Cwd = agent.DefaultCwd
 	return req, "默认配置", ""
-}
-
-func (s *Service) nextDefaultSessionTitle(store *SessionStore, msg feishu.Message) string {
-	next := 1
-	if store != nil {
-		next = len(store.ListByChat(msg.BotID, msg.ChatID)) + 1
-	}
-	if next < 1 {
-		next = 1
-	}
-	return fmt.Sprintf("session#%d", next)
 }
 
 const maxSessionTitleRunes = 40

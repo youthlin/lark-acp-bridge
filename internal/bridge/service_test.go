@@ -2710,6 +2710,58 @@ func TestHandleFeishuNewSessionUsesDefaultTitleAndDisplaysModeModel(t *testing.T
 	}
 }
 
+func TestHandleFeishuNewSessionDefaultTitleUsesChatSequenceAfterHistoryTrim(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	sessionIDs := make([]string, 0, maxSessionHistoryPerChat+2)
+	for i := 1; i <= maxSessionHistoryPerChat+2; i++ {
+		sessionIDs = append(sessionIDs, fmt.Sprintf("acp-session-%d", i))
+	}
+	rt := &fakeRuntime{newSessionIDs: sessionIDs}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_private",
+		ChatType: "p2p",
+	}
+
+	var reply string
+	var err error
+	for i := 1; i <= maxSessionHistoryPerChat+2; i++ {
+		text := "/new"
+		if i == 1 {
+			text += " " + workDir
+		}
+		reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     msg.BotID,
+			ChatID:    msg.ChatID,
+			ChatType:  msg.ChatType,
+			MessageID: fmt.Sprintf("om_new_%d", i),
+			Text:      text,
+		})
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(/new %d) error = %v", i, err)
+		}
+		want := fmt.Sprintf("标题：session#%d", i)
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply %d = %q, want %q", i, reply, want)
+		}
+	}
+
+	items := store.ListByChat(msg.BotID, msg.ChatID)
+	if len(items) != maxSessionHistoryPerChat {
+		t.Fatalf("len(history) = %d, want %d", len(items), maxSessionHistoryPerChat)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: msg.BotID, ChatID: msg.ChatID})
+	if !ok || chat.NextSessionSeq != maxSessionHistoryPerChat+3 {
+		t.Fatalf("chat = %+v ok=%v, want next sequence %d", chat, ok, maxSessionHistoryPerChat+3)
+	}
+	if !strings.Contains(reply, fmt.Sprintf("标题：session#%d", maxSessionHistoryPerChat+2)) {
+		t.Fatalf("final reply = %q, want latest title after history trim", reply)
+	}
+}
+
 func TestHandleFeishuNewSessionWaitsForSessionStateUpdate(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()

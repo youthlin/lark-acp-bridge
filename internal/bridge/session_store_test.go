@@ -58,6 +58,59 @@ func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 	}
 }
 
+func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	store := NewSessionStore(storePath)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+
+	first, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo",
+	})
+	if err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(first) error = %v", err)
+	}
+	if first.Title != "session#1" || first.ManualTitle {
+		t.Fatalf("first session title = %q manual=%v, want automatic session#1", first.Title, first.ManualTitle)
+	}
+
+	second, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-2",
+		Cwd:          "/repo",
+	})
+	if err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(second) error = %v", err)
+	}
+	if second.Title != "session#2" {
+		t.Fatalf("second session title = %q, want session#2", second.Title)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: key.ChatID})
+	if !ok || chat.NextSessionSeq != 3 {
+		t.Fatalf("chat = %+v ok=%v, want next sequence 3", chat, ok)
+	}
+
+	reloaded := NewSessionStore(storePath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	third, err := reloaded.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-3",
+		Cwd:          "/repo",
+	})
+	if err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(third) error = %v", err)
+	}
+	if third.Title != "session#3" {
+		t.Fatalf("third session title = %q, want session#3", third.Title)
+	}
+}
+
 func sessionListContains(items []Session, acpSessionID string) bool {
 	for _, item := range items {
 		if item.ACPSessionID == acpSessionID {

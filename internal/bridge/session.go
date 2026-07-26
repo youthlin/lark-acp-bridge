@@ -36,6 +36,7 @@ type ChatConfig struct {
 	HideTools        bool      `json:"hide_tools,omitempty"`
 	HideStatusBar    bool      `json:"hide_status_bar,omitempty"`
 	HideUsageDetail  bool      `json:"hide_usage_detail,omitempty"`
+	NextSessionSeq   int       `json:"next_session_seq,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
