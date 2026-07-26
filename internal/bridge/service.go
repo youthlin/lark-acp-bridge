@@ -39,6 +39,7 @@ type Service struct {
 	wikiTimers      map[SessionKey]*pendingWikiRun
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
+	loopStatuses    map[SessionKey]loopRunStatus
 
 	acpUpdateMu    sync.Mutex
 	acpUpdateUnsub map[SessionKey]func()
@@ -49,8 +50,10 @@ type taskKind string
 const (
 	taskKindUser taskKind = "user"
 	taskKindWiki taskKind = "wiki"
+	taskKindLoop taskKind = "loop"
 
 	defaultWikiInterval        = 5 * time.Minute
+	defaultLoopInterval        = 10 * time.Second
 	newSessionStateWait        = 600 * time.Millisecond
 	newSessionPartialStateWait = 120 * time.Millisecond
 )
@@ -79,6 +82,19 @@ type wikiRunStatus struct {
 	lastSuccess bool
 }
 
+type loopRunStatus struct {
+	running     bool
+	started     time.Time
+	ended       time.Time
+	round       int
+	maxRounds   int
+	maxDuration time.Duration
+	interval    time.Duration
+	prompt      string
+	reason      string
+	lastError   string
+}
+
 // NewService 创建服务实例
 //
 //	@param cfg 服务配置
@@ -94,6 +110,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		wikiTimers:      make(map[SessionKey]*pendingWikiRun),
 		wikiGenerations: make(map[SessionKey]int64),
 		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
+		loopStatuses:    make(map[SessionKey]loopRunStatus),
 		acpUpdateUnsub:  make(map[SessionKey]func()),
 	}
 	for _, bot := range cfg.Bots {
@@ -336,6 +353,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
 			"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀",
+			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
+			"/loop status|stop - 查看或停止当前会话的循环任务",
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",
@@ -362,6 +381,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleSessionCommand(ctx, text, msg)
 	case "/wiki":
 		return s.handleWikiCommand(ctx, text, msg)
+	case "/loop":
+		return s.handleLoopCommand(ctx, text, msg)
 	case "/cmds":
 		return s.handleCommandsCommand(ctx, text, msg)
 	case "/model":
@@ -1306,6 +1327,361 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	}
 }
 
+func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	if len(fields) >= 2 {
+		switch fields[1] {
+		case "status":
+			return s.loopStatus(msg)
+		case "stop":
+			session, ok := s.findSession(msg)
+			if !ok {
+				return "当前会话没有正在运行的 loop。"
+			}
+			if s.cancelLoopTask(ctx, session.Key, "已手动停止") {
+				return "已停止当前会话的 loop。"
+			}
+			return "当前会话没有正在运行的 loop。"
+		}
+	}
+	req, err := parseLoopRequest(text)
+	if err != nil {
+		return err.Error()
+	}
+	session, agent, _, errText, err := s.preparePrompt(ctx, msg, req.Prompt)
+	if err != nil {
+		return "启动 loop 失败：" + err.Error()
+	}
+	if errText != "" {
+		return errText
+	}
+	s.subscribeACPStateUpdates(ctx, msg, session.Key)
+	session = s.updateAutomaticSessionTitle(ctx, msg, session, req.Prompt)
+	s.startLoop(ctx, msg, session, agent, req)
+	return "已启动 loop。\n" + formatLoopRequest(req)
+}
+
+func (s *Service) startLoop(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, req loopRequest) {
+	ctx, finish := s.startTask(context.WithoutCancel(ctx), session, agent, taskKindLoop)
+	started := time.Now()
+	s.markLoopStarted(session.Key, started, req)
+	go func() {
+		defer finish()
+		reason, err := s.runLoop(ctx, msg, session, agent, req, started)
+		s.markLoopFinished(session.Key, started, reason, err)
+		s.sendLoopFinished(ctx, msg, reason, err)
+	}()
+}
+
+func (s *Service) runLoop(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, req loopRequest, started time.Time) (string, error) {
+	var deadline time.Time
+	if req.MaxDuration > 0 {
+		deadline = started.Add(req.MaxDuration)
+	}
+	basePrompt := promptTextWithReplyContext(msg, req.Prompt)
+	for round := 1; ; round++ {
+		if req.MaxRounds > 0 && round > req.MaxRounds {
+			return "已达到最大轮次", nil
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return "已达到最长运行时间", nil
+		}
+		s.markLoopRound(session.Key, started, round)
+		roundPrompt := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, loopPrompt(basePrompt, req, round, started, deadline))
+		result, _, rawResult, streamedReply, err := s.promptRuntimeWithProgressRaw(ctx, msg, session, agent, roundPrompt)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return "已取消", context.Canceled
+			}
+			if strings.TrimSpace(rawResult.Text) != "" || strings.TrimSpace(result.Text) != "" {
+				return "执行失败：" + err.Error(), err
+			}
+			return "执行失败：" + err.Error(), err
+		}
+		if loopDone(rawResult.Text) || loopDone(result.Text) || loopDone(streamedReply) {
+			return "agent 返回 DONE", nil
+		}
+		if req.MaxRounds > 0 && round >= req.MaxRounds {
+			return "已达到最大轮次", nil
+		}
+		if !deadline.IsZero() && !time.Now().Add(req.Interval).Before(deadline) {
+			return "已达到最长运行时间", nil
+		}
+		timer := time.NewTimer(req.Interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "已取消", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func loopPrompt(promptText string, req loopRequest, round int, started time.Time, deadline time.Time) string {
+	maxDuration := "不限"
+	if req.MaxDuration > 0 {
+		maxDuration = formatDuration(req.MaxDuration)
+	}
+	maxRounds := "不限"
+	if req.MaxRounds > 0 {
+		maxRounds = strconv.Itoa(req.MaxRounds)
+	}
+	deadlineText := "不限"
+	if !deadline.IsZero() {
+		deadlineText = deadline.Format(time.RFC3339)
+	}
+	prefixes := []string{
+		"## Loop Metadata\n" + strings.Join([]string{
+			"round: " + strconv.Itoa(round),
+			"started_at: " + started.Format(time.RFC3339),
+			"deadline: " + deadlineText,
+			"max_duration: " + maxDuration,
+			"max_rounds: " + maxRounds,
+			"interval: " + formatDuration(req.Interval),
+		}, "\n"),
+		"## Loop Stop Rules\n" + strings.Join([]string{
+			"这是 /loop 自动循环任务的一轮。",
+			"如果用户目标已经完成、无需继续，或继续执行没有新增价值，最终回复必须只输出 DONE。",
+			"如果还需要继续推进，请正常执行本轮工作并说明结果。",
+			"不要因为这是循环任务而空转。",
+		}, "\n"),
+	}
+	return promptWithUserMessage(prefixes, promptText)
+}
+
+func loopDone(text string) bool {
+	return strings.TrimSpace(text) == "DONE"
+}
+
+func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopRequest) {
+	s.taskMu.Lock()
+	s.loopStatuses[key] = loopRunStatus{
+		running:     true,
+		started:     started,
+		maxRounds:   req.MaxRounds,
+		maxDuration: req.MaxDuration,
+		interval:    req.Interval,
+		prompt:      req.Prompt,
+	}
+	s.taskMu.Unlock()
+}
+
+func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
+	s.taskMu.Lock()
+	status := s.loopStatuses[key]
+	if status.started == started {
+		status.running = true
+		status.round = round
+		s.loopStatuses[key] = status
+	}
+	s.taskMu.Unlock()
+}
+
+func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason string, err error) {
+	s.taskMu.Lock()
+	status := s.loopStatuses[key]
+	if status.started == started {
+		if errors.Is(err, context.Canceled) && !status.running && status.reason != "" {
+			s.taskMu.Unlock()
+			return
+		}
+		status.running = false
+		status.ended = time.Now()
+		status.reason = reason
+		if err != nil && !errors.Is(err, context.Canceled) {
+			status.lastError = err.Error()
+		} else {
+			status.lastError = ""
+		}
+		s.loopStatuses[key] = status
+	}
+	s.taskMu.Unlock()
+}
+
+func (s *Service) sendLoopFinished(ctx context.Context, msg feishu.Message, reason string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	text := "loop 已结束：" + reason
+	if ok, sendErr := feishu.SendIntermediateReply(ctx, msg, text); sendErr != nil {
+		slog.WarnContext(ctx, "发送 loop 结束消息失败", "错误", sendErr)
+	} else if !ok {
+		slog.InfoContext(ctx, "当前上下文不支持发送 loop 结束消息", "reason", reason)
+	}
+}
+
+func (s *Service) cancelLoopTask(ctx context.Context, key SessionKey, reason string) bool {
+	s.taskMu.Lock()
+	task := s.tasks[key]
+	if task == nil || task.kind != taskKindLoop {
+		s.taskMu.Unlock()
+		return false
+	}
+	delete(s.tasks, key)
+	status := s.loopStatuses[key]
+	status.running = false
+	status.ended = time.Now()
+	status.reason = reason
+	status.lastError = ""
+	s.loopStatuses[key] = status
+	s.taskMu.Unlock()
+	task.cancel()
+	go s.cancelRuntimeTask(ctx, task)
+	return true
+}
+
+func (s *Service) loopStatus(msg feishu.Message) string {
+	session, hasSession := s.findSession(msg)
+	if !hasSession {
+		return "当前会话还没有 loop 状态。"
+	}
+	s.taskMu.Lock()
+	status, ok := s.loopStatuses[session.Key]
+	s.taskMu.Unlock()
+	if !ok || status.started.IsZero() {
+		return "当前会话还没有 loop 状态。"
+	}
+	lines := []string{"当前会话 loop："}
+	if status.running {
+		lines = append(lines, "状态：运行中")
+	} else {
+		lines = append(lines, "状态：已结束")
+	}
+	if status.round > 0 {
+		lines = append(lines, "当前轮次："+strconv.Itoa(status.round))
+	}
+	if !status.started.IsZero() {
+		lines = append(lines, "开始时间："+status.started.Format(time.RFC3339))
+	}
+	if !status.ended.IsZero() {
+		lines = append(lines, "结束时间："+status.ended.Format(time.RFC3339))
+	}
+	if status.reason != "" {
+		lines = append(lines, "原因："+status.reason)
+	}
+	if status.lastError != "" {
+		lines = append(lines, "错误："+status.lastError)
+	}
+	lines = append(lines,
+		"最长运行："+loopDurationStatus(status.maxDuration),
+		"最大轮次："+loopRoundsStatus(status.maxRounds),
+		"每轮间隔："+formatDuration(status.interval),
+	)
+	if status.prompt != "" {
+		lines = append(lines, "提示词："+truncateRunes(status.prompt, 80))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func loopDurationStatus(d time.Duration) string {
+	if d <= 0 {
+		return "不限"
+	}
+	return formatDuration(d)
+}
+
+func loopRoundsStatus(n int) string {
+	if n <= 0 {
+		return "不限"
+	}
+	return strconv.Itoa(n)
+}
+
+type loopRequest struct {
+	MaxDuration time.Duration
+	MaxRounds   int
+	Interval    time.Duration
+	Prompt      string
+}
+
+func parseLoopRequest(text string) (loopRequest, error) {
+	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "/loop")))
+	req := loopRequest{Interval: defaultLoopInterval}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "-t":
+			i++
+			if i >= len(args) {
+				return loopRequest{}, fmt.Errorf("请为 -t 指定 duration，例如 /loop -t 30m 提示词；-t 0 表示不限。")
+			}
+			d, err := parseLoopDuration(args[i], "time")
+			if err != nil {
+				return loopRequest{}, err
+			}
+			req.MaxDuration = d
+		case "-n":
+			i++
+			if i >= len(args) {
+				return loopRequest{}, fmt.Errorf("请为 -n 指定最大轮次；-n 0 表示不限。")
+			}
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 {
+				return loopRequest{}, fmt.Errorf("-n 必须是非负整数；-n 0 表示不限。")
+			}
+			req.MaxRounds = n
+		case "-i":
+			i++
+			if i >= len(args) {
+				return loopRequest{}, fmt.Errorf("请为 -i 指定每轮间隔，例如 /loop -i 10s 提示词。")
+			}
+			d, err := parseLoopDuration(args[i], "interval")
+			if err != nil {
+				return loopRequest{}, err
+			}
+			if d <= 0 {
+				return loopRequest{}, fmt.Errorf("-i 必须大于 0，例如 10s。")
+			}
+			req.Interval = d
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return loopRequest{}, fmt.Errorf("未知 loop 参数：%s。用法：/loop [-t 0] [-n 0] [-i 10s] 提示词", arg)
+			}
+			req.Prompt = strings.TrimSpace(strings.Join(args[i:], " "))
+			i = len(args)
+		}
+	}
+	if req.Prompt == "" {
+		return loopRequest{}, fmt.Errorf("提示词必填。用法：/loop [-t 0] [-n 0] [-i 10s] 提示词")
+	}
+	return req, nil
+}
+
+func parseLoopDuration(raw string, name string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("%s duration 不能为空", name)
+	}
+	if raw == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s duration 格式无效，可用 10s、30m、1h 或 0", name)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s duration 不能小于 0", name)
+	}
+	return d, nil
+}
+
+func formatLoopRequest(req loopRequest) string {
+	maxDuration := "不限"
+	if req.MaxDuration > 0 {
+		maxDuration = formatDuration(req.MaxDuration)
+	}
+	maxRounds := "不限"
+	if req.MaxRounds > 0 {
+		maxRounds = strconv.Itoa(req.MaxRounds)
+	}
+	return strings.Join([]string{
+		"最长运行：" + maxDuration,
+		"最大轮次：" + maxRounds,
+		"每轮间隔：" + formatDuration(req.Interval),
+		"停止条件：agent 最终回复 DONE、达到最长运行、达到最大轮次，或发送新消息 / /loop stop。",
+	}, "\n")
+}
+
 func (s *Service) sendSessionList(ctx context.Context, msg feishu.Message) string {
 	store := s.storeForMessage(msg)
 	if store == nil {
@@ -1973,6 +2349,11 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 }
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
+	result, sentProgress, _, _, err := s.promptRuntimeWithProgressRaw(ctx, msg, session, agent, text)
+	return result, sentProgress, err
+}
+
+func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
 	slog.InfoContext(ctx, "准备发送消息给ACP后端")
 	stream := newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg))
 	chunks := newPromptChunkAccumulator(stream)
@@ -2009,6 +2390,7 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 		},
 	}
 	result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
+	rawResult := result
 	chunks.close()
 	streamedReply := chunks.replyText()
 	if stream.hasStarted() {
@@ -2033,7 +2415,7 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 	if stream.hasStarted() {
 		result.Text = ""
 	}
-	return result, stream.hasStarted(), err
+	return result, stream.hasStarted(), rawResult, streamedReply, err
 }
 
 func defaultPermissionOutcome(req acp.PermissionRequest) acp.PermissionOutcome {
