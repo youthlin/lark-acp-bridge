@@ -34,6 +34,9 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[string]chan rpcResponse
 
+	agentRequestMu      sync.Mutex
+	agentRequestCancels map[string]context.CancelFunc
+
 	capMu      sync.RWMutex
 	initialize InitializeResult
 
@@ -67,6 +70,16 @@ type PromptUpdateHandler func(update PromptUpdate)
 type PromptOptions struct {
 	OnUpdate            PromptUpdateHandler
 	OnPermissionRequest PermissionRequestHandler
+}
+
+type SessionListOptions struct {
+	Cwd    string
+	Cursor string
+}
+
+type SessionListResult struct {
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
 type PromptUpdate struct {
@@ -107,6 +120,11 @@ type ContextWindowUsage struct {
 	AutoCompactTokenLimit int64 `json:"autoCompactTokenLimit,omitempty"`
 }
 
+type UsageCost struct {
+	Amount   float64 `json:"amount,omitempty"`
+	Currency string  `json:"currency,omitempty"`
+}
+
 type SessionUpdate struct {
 	SessionUpdate     string                `json:"sessionUpdate"`
 	Content           *ContentBlock         `json:"content,omitempty"`
@@ -114,38 +132,128 @@ type SessionUpdate struct {
 	Name              string                `json:"name,omitempty"`
 	Status            string                `json:"status,omitempty"`
 	Title             string                `json:"title,omitempty"`
+	UpdatedAt         string                `json:"updatedAt,omitempty"`
+	Meta              map[string]any        `json:"_meta,omitempty"`
+	TitleSet          bool                  `json:"-"`
+	UpdatedAtSet      bool                  `json:"-"`
+	ModeID            string                `json:"modeId,omitempty"`
 	ToolCallID        string                `json:"toolCallId,omitempty"`
 	Kind              string                `json:"kind,omitempty"`
 	StopReason        string                `json:"stopReason,omitempty"`
+	ToolCallContent   []ToolCallContent     `json:"-"`
+	ContentRaw        json.RawMessage       `json:"-"`
+	Locations         json.RawMessage       `json:"locations,omitempty"`
+	RawInput          json.RawMessage       `json:"rawInput,omitempty"`
+	RawOutput         json.RawMessage       `json:"rawOutput,omitempty"`
 	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
 	Mode              *SessionModeState     `json:"mode,omitempty"`
 	Used              int64                 `json:"used,omitempty"`
 	Size              int64                 `json:"size,omitempty"`
+	Cost              *UsageCost            `json:"cost,omitempty"`
 	Raw               json.RawMessage       `json:"-"`
 }
 
 func (u *SessionUpdate) UnmarshalJSON(data []byte) error {
 	type sessionUpdateAlias SessionUpdate
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	contentRaw := append(json.RawMessage(nil), fields["content"]...)
+	delete(fields, "content")
+	withoutContent, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	*u = SessionUpdate{}
 	aux := struct {
 		*sessionUpdateAlias
 		LegacyModes *SessionModeState `json:"modes,omitempty"`
 	}{
 		sessionUpdateAlias: (*sessionUpdateAlias)(u),
 	}
-	if err := json.Unmarshal(data, &aux); err != nil {
+	if err := json.Unmarshal(withoutContent, &aux); err != nil {
 		return err
+	}
+	if _, ok := fields["title"]; ok {
+		u.TitleSet = true
+	}
+	if _, ok := fields["updatedAt"]; ok {
+		u.UpdatedAtSet = true
 	}
 	if u.Mode == nil {
 		u.Mode = aux.LegacyModes
 	}
+	u.ConfigOptions = filterSupportedConfigOptions(u.ConfigOptions)
+	if u.SessionUpdate == "tool_call" && strings.TrimSpace(u.Status) == "" {
+		u.Status = "pending"
+	}
+	if u.SessionUpdate == "tool_call" && strings.TrimSpace(u.Kind) == "" {
+		u.Kind = "other"
+	}
+	if len(contentRaw) > 0 && string(contentRaw) != "null" {
+		u.ContentRaw = append(json.RawMessage(nil), contentRaw...)
+		switch firstJSONToken(contentRaw) {
+		case '[':
+			var content []ToolCallContent
+			if err := json.Unmarshal(contentRaw, &content); err != nil {
+				return err
+			}
+			u.ToolCallContent = content
+		case '{':
+			var content ContentBlock
+			if err := json.Unmarshal(contentRaw, &content); err != nil {
+				return err
+			}
+			u.Content = &content
+		}
+	}
 	return nil
 }
 
+func firstJSONToken(raw json.RawMessage) byte {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+			continue
+		default:
+			return b
+		}
+	}
+	return 0
+}
+
 type ContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type        string         `json:"type"`
+	Text        string         `json:"text,omitempty"`
+	Data        string         `json:"data,omitempty"`
+	Resource    *Resource      `json:"resource,omitempty"`
+	URI         string         `json:"uri,omitempty"`
+	Name        string         `json:"name,omitempty"`
+	MIMEType    string         `json:"mimeType,omitempty"`
+	Title       string         `json:"title,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Size        int64          `json:"size,omitempty"`
+	Annotations map[string]any `json:"annotations,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
+}
+
+type Resource struct {
+	URI      string `json:"uri"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+}
+
+type ToolCallContent struct {
+	Type       string        `json:"type"`
+	Content    *ContentBlock `json:"content,omitempty"`
+	Path       string        `json:"path,omitempty"`
+	OldText    *string       `json:"oldText,omitempty"`
+	NewText    string        `json:"newText,omitempty"`
+	TerminalID string        `json:"terminalId,omitempty"`
 }
 
 type ToolCallInfo struct {
@@ -200,6 +308,17 @@ type SetConfigOptionResult struct {
 	ConfigOptions []SessionConfigOption `json:"configOptions"`
 }
 
+func (r *SetConfigOptionResult) UnmarshalJSON(data []byte) error {
+	type setConfigOptionResultAlias SetConfigOptionResult
+	var parsed setConfigOptionResultAlias
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*r = SetConfigOptionResult(parsed)
+	r.ConfigOptions = filterSupportedConfigOptions(r.ConfigOptions)
+	return nil
+}
+
 type InitializeResult struct {
 	ProtocolVersion   int                `json:"protocolVersion"`
 	AgentCapabilities AgentCapabilities  `json:"agentCapabilities"`
@@ -213,6 +332,7 @@ type AgentCapabilities struct {
 	MCPCapabilities     MCPCapabilities     `json:"mcpCapabilities,omitempty"`
 	SessionCapabilities SessionCapabilities `json:"sessionCapabilities,omitempty"`
 	Auth                AuthCapabilities    `json:"auth,omitempty"`
+	Meta                map[string]any      `json:"_meta,omitempty"`
 }
 
 type PromptCapabilities struct {
@@ -238,12 +358,28 @@ func (c SessionCapabilities) SupportsResume() bool {
 	return c.Resume != nil
 }
 
+func (c SessionCapabilities) SupportsClose() bool {
+	return c.Close != nil
+}
+
+func (c SessionCapabilities) SupportsDelete() bool {
+	return c.Delete != nil
+}
+
+func (c SessionCapabilities) SupportsList() bool {
+	return c.List != nil
+}
+
 func (c SessionCapabilities) SupportsAdditionalDirectories() bool {
 	return c.AdditionalDirectories != nil
 }
 
 type AuthCapabilities struct {
 	Logout any `json:"logout,omitempty"`
+}
+
+func (c AuthCapabilities) SupportsLogout() bool {
+	return c.Logout != nil
 }
 
 type ImplementationInfo struct {
@@ -256,6 +392,20 @@ type AuthMethod struct {
 	ID          string `json:"id,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"`
+}
+
+func (m *AuthMethod) UnmarshalJSON(data []byte) error {
+	type authMethodAlias AuthMethod
+	var parsed authMethodAlias
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*m = AuthMethod(parsed)
+	if strings.TrimSpace(m.Type) == "" {
+		m.Type = "agent"
+	}
+	return nil
 }
 
 type rpcResponse struct {
@@ -292,13 +442,14 @@ func Start(ctx context.Context, agent config.AgentConfig, workspace string) (*Cl
 	}
 
 	client := &Client{
-		cmd:              cmd,
-		stdin:            stdin,
-		workspace:        workspace,
-		pending:          make(map[string]chan rpcResponse),
-		toolCalls:        make(map[string]map[string]ToolCallInfo),
-		permissionScopes: make(map[string]permissionScope),
-		updateHandlers:   make(map[int64]UpdateHandler),
+		cmd:                 cmd,
+		stdin:               stdin,
+		workspace:           workspace,
+		pending:             make(map[string]chan rpcResponse),
+		agentRequestCancels: make(map[string]context.CancelFunc),
+		toolCalls:           make(map[string]map[string]ToolCallInfo),
+		permissionScopes:    make(map[string]permissionScope),
+		updateHandlers:      make(map[int64]UpdateHandler),
 	}
 	client.nextID.Store(1)
 	go client.readLoop(stdout)
@@ -325,7 +476,13 @@ func (c *Client) Initialize(ctx context.Context) error {
 		// its own local file and command tools under the session cwd. Do not
 		// advertise ACP client-side fs/terminal capabilities unless the bridge
 		// later owns a remote, virtual, or permission-gated workspace surface.
-		"clientCapabilities": map[string]any{},
+		"clientCapabilities": map[string]any{
+			"session": map[string]any{
+				"configOptions": map[string]any{
+					"boolean": map[string]any{},
+				},
+			},
+		},
 		"clientInfo": map[string]any{
 			"name":    "lark-acp-bridge",
 			"title":   "Lark ACP Bridge",
@@ -340,6 +497,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 		return fmt.Errorf("解析 initialize 响应: %w", err)
 	}
 	if parsed.ProtocolVersion != 1 {
+		c.Close()
 		return fmt.Errorf("不支持的 ACP protocolVersion: %d", parsed.ProtocolVersion)
 	}
 	c.capMu.Lock()
@@ -348,9 +506,60 @@ func (c *Client) Initialize(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) Authenticate(ctx context.Context, methodID string) error {
+	methodID = strings.TrimSpace(methodID)
+	if methodID == "" {
+		return fmt.Errorf("ACP auth method id 为空")
+	}
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	c.capMu.RLock()
+	methods := append([]AuthMethod(nil), c.initialize.AuthMethods...)
+	c.capMu.RUnlock()
+	found := false
+	for _, method := range methods {
+		if method.ID == methodID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("ACP agent 未声明 auth method: %s", methodID)
+	}
+	_, err := c.call(ctx, "authenticate", map[string]any{
+		"methodId": methodID,
+	})
+	return err
+}
+
+func (c *Client) SupportsLogout() bool {
+	c.capMu.RLock()
+	defer c.capMu.RUnlock()
+	return c.initialize.AgentCapabilities.Auth.SupportsLogout()
+}
+
+func (c *Client) Logout(ctx context.Context) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	if !c.SupportsLogout() {
+		return fmt.Errorf("ACP agent 未声明 auth.logout capability")
+	}
+	_, err := c.call(ctx, "logout", map[string]any{})
+	return err
+}
+
 func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error) {
-	c.cwd = filepath.Clean(cwd)
-	result, err := c.call(ctx, "session/new", c.lifecycleParams("", cwd))
+	if err := c.ensureInitialized(); err != nil {
+		return SessionInfo{}, err
+	}
+	cleanCwd, err := cleanSessionCwd(cwd)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	c.cwd = cleanCwd
+	result, err := c.call(ctx, "session/new", c.lifecycleParams("", cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -364,15 +573,35 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error
 	return parsed, nil
 }
 
+func (c *Client) ensureInitialized() error {
+	c.capMu.RLock()
+	initialized := c.initialize.ProtocolVersion != 0
+	c.capMu.RUnlock()
+	if !initialized {
+		return fmt.Errorf("ACP client 尚未 initialize")
+	}
+	return nil
+}
+
 func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) (SessionInfo, error) {
+	if err := c.ensureInitialized(); err != nil {
+		return SessionInfo{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return SessionInfo{}, fmt.Errorf("ACP session id 为空")
+	}
+	cleanCwd, err := cleanSessionCwd(cwd)
+	if err != nil {
+		return SessionInfo{}, err
+	}
 	c.capMu.RLock()
 	supportsLoad := c.initialize.AgentCapabilities.LoadSession
 	c.capMu.RUnlock()
 	if !supportsLoad {
 		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 loadSession capability")
 	}
-	c.cwd = filepath.Clean(cwd)
-	result, err := c.call(ctx, "session/load", c.lifecycleParams(sessionID, cwd))
+	c.cwd = cleanCwd
+	result, err := c.call(ctx, "session/load", c.lifecycleParams(sessionID, cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -380,14 +609,24 @@ func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) (Sessio
 }
 
 func (c *Client) ResumeSession(ctx context.Context, sessionID, cwd string) (SessionInfo, error) {
+	if err := c.ensureInitialized(); err != nil {
+		return SessionInfo{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return SessionInfo{}, fmt.Errorf("ACP session id 为空")
+	}
+	cleanCwd, err := cleanSessionCwd(cwd)
+	if err != nil {
+		return SessionInfo{}, err
+	}
 	c.capMu.RLock()
 	supportsResume := c.initialize.AgentCapabilities.SessionCapabilities.SupportsResume()
 	c.capMu.RUnlock()
 	if !supportsResume {
 		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 sessionCapabilities.resume")
 	}
-	c.cwd = filepath.Clean(cwd)
-	result, err := c.call(ctx, "session/resume", c.lifecycleParams(sessionID, cwd))
+	c.cwd = cleanCwd
+	result, err := c.call(ctx, "session/resume", c.lifecycleParams(sessionID, cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -395,6 +634,12 @@ func (c *Client) ResumeSession(ctx context.Context, sessionID, cwd string) (Sess
 }
 
 func (c *Client) CancelSession(ctx context.Context, sessionID string) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("ACP session id 为空")
+	}
 	msg, err := NewNotification("session/cancel", map[string]any{
 		"sessionId": sessionID,
 	})
@@ -405,12 +650,107 @@ func (c *Client) CancelSession(ctx context.Context, sessionID string) error {
 	return c.write(msg)
 }
 
+func (c *Client) SupportsCloseSession() bool {
+	c.capMu.RLock()
+	defer c.capMu.RUnlock()
+	return c.initialize.AgentCapabilities.SessionCapabilities.SupportsClose()
+}
+
+func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("ACP session id 为空")
+	}
+	if !c.SupportsCloseSession() {
+		return fmt.Errorf("ACP agent 未声明 sessionCapabilities.close")
+	}
+	_, err := c.call(ctx, "session/close", map[string]any{
+		"sessionId": sessionID,
+	})
+	return err
+}
+
+func (c *Client) SupportsDeleteSession() bool {
+	c.capMu.RLock()
+	defer c.capMu.RUnlock()
+	return c.initialize.AgentCapabilities.SessionCapabilities.SupportsDelete()
+}
+
+func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("ACP session id 为空")
+	}
+	if !c.SupportsDeleteSession() {
+		return fmt.Errorf("ACP agent 未声明 sessionCapabilities.delete")
+	}
+	_, err := c.call(ctx, "session/delete", map[string]any{
+		"sessionId": sessionID,
+	})
+	return err
+}
+
+func (c *Client) SupportsListSessions() bool {
+	c.capMu.RLock()
+	defer c.capMu.RUnlock()
+	return c.initialize.AgentCapabilities.SessionCapabilities.SupportsList()
+}
+
+func (c *Client) ListSessions(ctx context.Context, opts SessionListOptions) (SessionListResult, error) {
+	if err := c.ensureInitialized(); err != nil {
+		return SessionListResult{}, err
+	}
+	if !c.SupportsListSessions() {
+		return SessionListResult{}, fmt.Errorf("ACP agent 未声明 sessionCapabilities.list")
+	}
+	params := map[string]any{}
+	if strings.TrimSpace(opts.Cwd) != "" {
+		cwd, err := cleanSessionCwd(opts.Cwd)
+		if err != nil {
+			return SessionListResult{}, err
+		}
+		params["cwd"] = cwd
+	}
+	if opts.Cursor != "" {
+		params["cursor"] = opts.Cursor
+	}
+	result, err := c.call(ctx, "session/list", params)
+	if err != nil {
+		return SessionListResult{}, err
+	}
+	var parsed SessionListResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		return SessionListResult{}, fmt.Errorf("解析 session/list 响应: %w", err)
+	}
+	if parsed.Sessions == nil {
+		parsed.Sessions = []SessionInfo{}
+	}
+	return parsed, nil
+}
+
 func (c *Client) SetConfigOption(ctx context.Context, sessionID, configID string, value any) ([]SessionConfigOption, error) {
-	result, err := c.call(ctx, "session/set_config_option", map[string]any{
+	if err := c.ensureInitialized(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("ACP session id 为空")
+	}
+	if strings.TrimSpace(configID) == "" {
+		return nil, fmt.Errorf("ACP config id 为空")
+	}
+	params := map[string]any{
 		"sessionId": sessionID,
 		"configId":  configID,
 		"value":     value,
-	})
+	}
+	if _, ok := value.(bool); ok {
+		params["type"] = "boolean"
+	}
+	result, err := c.call(ctx, "session/set_config_option", params)
 	if err != nil {
 		return nil, err
 	}
@@ -419,6 +759,23 @@ func (c *Client) SetConfigOption(ctx context.Context, sessionID, configID string
 		return nil, fmt.Errorf("解析 session/set_config_option 响应: %w", err)
 	}
 	return parsed.ConfigOptions, nil
+}
+
+func (c *Client) SetMode(ctx context.Context, sessionID, modeID string) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("ACP session id 为空")
+	}
+	if strings.TrimSpace(modeID) == "" {
+		return fmt.Errorf("ACP mode id 为空")
+	}
+	_, err := c.call(ctx, "session/set_mode", map[string]any{
+		"sessionId": sessionID,
+		"modeId":    modeID,
+	})
+	return err
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
@@ -431,6 +788,12 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	defer c.promptMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return PromptResult{}, err
+	}
+	if err := c.ensureInitialized(); err != nil {
+		return PromptResult{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return PromptResult{}, fmt.Errorf("ACP session id 为空")
 	}
 
 	var output strings.Builder
@@ -532,6 +895,7 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	}
 	select {
 	case <-ctx.Done():
+		c.cancelRequest(ctx, req.ID)
 		if cancelWait <= 0 {
 			c.removePending(req.ID)
 			return nil, ctx.Err()
@@ -547,6 +911,20 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	case res := <-ch:
 		return res.result, res.err
 	}
+}
+
+func (c *Client) cancelRequest(ctx context.Context, id *RequestID) {
+	if id == nil {
+		return
+	}
+	msg, err := NewNotification("$/cancel_request", map[string]any{
+		"id": id,
+	})
+	if err != nil {
+		return
+	}
+	slog.DebugContext(ctx, "Notify ACP", "method", "$/cancel_request", "req", msg)
+	_ = c.write(msg)
 }
 
 func (c *Client) write(msg Message) error {
@@ -571,7 +949,10 @@ func (c *Client) readLoop(stdout io.Reader) {
 		slog.Debug("read acp line", "line", arg.RawJSON(line), "comp", "acp-loop")
 		var msg Message
 		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
+			err := fmt.Errorf("ACP server stdout 输出非 JSON-RPC 消息: %w", err)
+			c.failPending(err)
+			c.Close()
+			return
 		}
 		c.handleMessage(msg)
 	}
@@ -584,16 +965,30 @@ func (c *Client) readLoop(stdout io.Reader) {
 
 func (c *Client) handleMessage(msg Message) {
 	if msg.ID != nil && msg.Method != "" {
-		c.handleAgentRequest(msg)
+		go c.handleAgentRequest(msg)
 		return
 	}
 	if msg.ID != nil {
 		c.handleResponse(msg)
 		return
 	}
+	if msg.Method == "$/cancel_request" {
+		c.handleCancelRequest(msg.Params)
+		return
+	}
 	if msg.Method == "session/update" {
 		c.handleSessionUpdate(msg)
 	}
+}
+
+func (c *Client) handleCancelRequest(raw json.RawMessage) {
+	var params struct {
+		ID RequestID `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return
+	}
+	c.cancelAgentRequest(&params.ID)
 }
 
 func (c *Client) handleResponse(msg Message) {
@@ -602,6 +997,10 @@ func (c *Client) handleResponse(msg Message) {
 		return
 	}
 	if msg.Error != nil {
+		if msg.Error.Code == -32800 {
+			ch <- rpcResponse{err: context.Canceled}
+			return
+		}
 		detail := strings.TrimSpace(msg.Error.Detail())
 		if detail != "" && detail != msg.Error.Message {
 			ch <- rpcResponse{err: fmt.Errorf("ACP JSON-RPC 错误: code=%d message=%s detail=%s", msg.Error.Code, msg.Error.Message, detail)}
@@ -621,6 +1020,9 @@ func (c *Client) handleSessionUpdate(msg Message) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		return
 	}
+	if strings.TrimSpace(params.SessionID) == "" {
+		return
+	}
 	if len(params.Update) == 0 {
 		return
 	}
@@ -632,6 +1034,7 @@ func (c *Client) handleSessionUpdate(msg Message) {
 			Name          string `json:"name"`
 			Status        string `json:"status"`
 			Title         string `json:"title"`
+			UpdatedAt     string `json:"updatedAt"`
 			StopReason    string `json:"stopReason"`
 		}
 		_ = json.Unmarshal(params.Update, &header)
@@ -641,6 +1044,7 @@ func (c *Client) handleSessionUpdate(msg Message) {
 			Name:          header.Name,
 			Status:        header.Status,
 			Title:         header.Title,
+			UpdatedAt:     header.UpdatedAt,
 			StopReason:    header.StopReason,
 		}
 	}
@@ -670,6 +1074,17 @@ func (c *Client) handleAgentRequest(msg Message) {
 
 func (c *Client) replyResult(msg Message, result any, err error) {
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			c.write(Message{
+				JSONRPC: "2.0",
+				ID:      msg.ID,
+				Error: &RPCError{
+					Code:    -32800,
+					Message: "Request Cancelled",
+				},
+			})
+			return
+		}
 		c.write(Message{
 			JSONRPC: "2.0",
 			ID:      msg.ID,
@@ -714,6 +1129,14 @@ func (c *Client) lifecycleParams(sessionID, cwd string) map[string]any {
 	return params
 }
 
+func cleanSessionCwd(cwd string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(cwd))
+	if clean == "." || !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("ACP session cwd 必须是绝对路径: %s", cwd)
+	}
+	return clean, nil
+}
+
 func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (any, error) {
 	var req PermissionRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -730,6 +1153,11 @@ func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (an
 	if ctx != nil && ctx.Err() != nil {
 		return PermissionResult{Outcome: PermissionOutcome{Outcome: "cancelled"}}, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cleanup := c.trackAgentRequest(ctx, id)
+	defer cleanup()
 	if handler != nil {
 		outcome, err := handler(ctx, req)
 		if err != nil {
@@ -738,8 +1166,15 @@ func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (an
 			}
 			return nil, err
 		}
-		if strings.TrimSpace(outcome.Outcome) == "" {
-			outcome.Outcome = "cancelled"
+		switch outcome.Outcome {
+		case "selected":
+		case "cancelled":
+			outcome.OptionID = ""
+		default:
+			outcome = PermissionOutcome{Outcome: "cancelled"}
+		}
+		if outcome.Outcome == "selected" && !permissionOptionExists(req.Options, outcome.OptionID) {
+			outcome = PermissionOutcome{Outcome: "cancelled"}
 		}
 		return PermissionResult{Outcome: outcome}, nil
 	}
@@ -752,6 +1187,55 @@ func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (an
 		}
 	}
 	return PermissionResult{Outcome: PermissionOutcome{Outcome: "cancelled"}}, nil
+}
+
+func permissionOptionExists(options []PermissionOption, optionID string) bool {
+	optionID = strings.TrimSpace(optionID)
+	if optionID == "" {
+		return false
+	}
+	for _, option := range options {
+		if option.OptionID == optionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) trackAgentRequest(parent context.Context, id *RequestID) (context.Context, func()) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if id == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	key := id.Key()
+	c.agentRequestMu.Lock()
+	if c.agentRequestCancels == nil {
+		c.agentRequestCancels = make(map[string]context.CancelFunc)
+	}
+	c.agentRequestCancels[key] = cancel
+	c.agentRequestMu.Unlock()
+	return ctx, func() {
+		c.agentRequestMu.Lock()
+		delete(c.agentRequestCancels, key)
+		c.agentRequestMu.Unlock()
+		cancel()
+	}
+}
+
+func (c *Client) cancelAgentRequest(id *RequestID) {
+	if id == nil {
+		return
+	}
+	key := id.Key()
+	c.agentRequestMu.Lock()
+	cancel := c.agentRequestCancels[key]
+	c.agentRequestMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (c *Client) setPermissionHandler(sessionID string, ctx context.Context, handler PermissionRequestHandler) int64 {

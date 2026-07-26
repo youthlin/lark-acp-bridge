@@ -6,11 +6,16 @@ import (
 )
 
 type SessionInfo struct {
-	SessionID         string                `json:"sessionId,omitempty"`
-	AvailableCommands []AvailableCommand    `json:"availableCommands,omitempty"`
-	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
-	Models            *SessionModelState    `json:"models,omitempty"`
-	Mode              *SessionModeState     `json:"mode,omitempty"`
+	SessionID             string                `json:"sessionId,omitempty"`
+	Cwd                   string                `json:"cwd,omitempty"`
+	AdditionalDirectories []string              `json:"additionalDirectories,omitempty"`
+	Title                 string                `json:"title,omitempty"`
+	UpdatedAt             string                `json:"updatedAt,omitempty"`
+	Meta                  map[string]any        `json:"_meta,omitempty"`
+	AvailableCommands     []AvailableCommand    `json:"availableCommands,omitempty"`
+	ConfigOptions         []SessionConfigOption `json:"configOptions,omitempty"`
+	Models                *SessionModelState    `json:"models,omitempty"`
+	Mode                  *SessionModeState     `json:"mode,omitempty"`
 }
 
 func (s *SessionInfo) UnmarshalJSON(data []byte) error {
@@ -27,6 +32,7 @@ func (s *SessionInfo) UnmarshalJSON(data []byte) error {
 	if s.Mode == nil {
 		s.Mode = aux.LegacyModes
 	}
+	s.ConfigOptions = filterSupportedConfigOptions(s.ConfigOptions)
 	return nil
 }
 
@@ -54,6 +60,28 @@ type SessionConfigOptionValue struct {
 	Value       string `json:"value"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+}
+
+func filterSupportedConfigOptions(options []SessionConfigOption) []SessionConfigOption {
+	if len(options) == 0 {
+		return options
+	}
+	filtered := options[:0]
+	for _, opt := range options {
+		if isSupportedConfigOptionType(opt.Type) {
+			filtered = append(filtered, opt)
+		}
+	}
+	return filtered
+}
+
+func isSupportedConfigOptionType(optionType string) bool {
+	switch strings.TrimSpace(optionType) {
+	case "select", "boolean":
+		return true
+	default:
+		return false
+	}
 }
 
 type SessionModelState struct {
@@ -95,7 +123,26 @@ func (s *SessionModeState) UnmarshalJSON(data []byte) error {
 }
 
 type SessionMode struct {
-	ModeID      string `json:"modeId"`
+	ModeID      string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+}
+
+func (m *SessionMode) UnmarshalJSON(data []byte) error {
+	var parsed struct {
+		ID          string `json:"id"`
+		LegacyID    string `json:"modeId"`
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	m.ModeID = strings.TrimSpace(parsed.ID)
+	if m.ModeID == "" {
+		m.ModeID = strings.TrimSpace(parsed.LegacyID)
+	}
+	m.Name = parsed.Name
+	m.Description = parsed.Description
+	return nil
 }

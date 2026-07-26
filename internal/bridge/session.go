@@ -46,6 +46,8 @@ type Session struct {
 	ManualTitle       bool                      `json:"manual_title,omitempty"`
 	AgentName         string                    `json:"agent_name"`
 	ACPSessionID      string                    `json:"acp_session_id,omitempty"`
+	ACPUpdatedAt      string                    `json:"acp_updated_at,omitempty"`
+	ACPMeta           map[string]any            `json:"acp_meta,omitempty"`
 	Cwd               string                    `json:"cwd"`
 	Workspace         string                    `json:"workspace,omitempty"`
 	WikiDisabled      bool                      `json:"wiki_disabled,omitempty"`

@@ -40,6 +40,30 @@ func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
 	}
 }
 
+func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
+	r := newRuntimeManager()
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "thread-a"}
+	var updates []acp.SessionUpdate
+	unsub := r.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
+		if sessionID != "session-1" {
+			t.Fatalf("sessionID = %q, want session-1", sessionID)
+		}
+		updates = append(updates, update)
+	})
+	defer unsub()
+
+	r.dispatchSessionInfo(key, "session-1", acp.SessionInfo{
+		Meta: map[string]any{"messageCount": 12},
+	})
+
+	if len(updates) != 1 {
+		t.Fatalf("updates = %+v, want meta update", updates)
+	}
+	if updates[0].SessionUpdate != "session_info_update" || updates[0].Meta["messageCount"] != 12 {
+		t.Fatalf("update = %+v, want session info meta", updates[0])
+	}
+}
+
 func TestPromptActivityTimeoutExpiresAfterIdlePeriod(t *testing.T) {
 	timeout := newPromptActivityTimeout(context.Background(), 30*time.Millisecond, time.Second)
 	defer timeout.Stop()

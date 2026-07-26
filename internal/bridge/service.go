@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -1032,6 +1033,22 @@ func resolveModeValue(opt acp.SessionConfigOption, target string) (string, bool)
 	return resolveConfigOptionValue(opt, target)
 }
 
+func resolveLegacyModeValue(state *acp.SessionModeState, target string) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	if state == nil || len(state.AvailableModes) == 0 {
+		return "", false
+	}
+	for _, mode := range state.AvailableModes {
+		if mode.ModeID == target || strings.EqualFold(mode.Name, target) {
+			return mode.ModeID, true
+		}
+	}
+	return "", false
+}
+
 func modelValueString(value any) string {
 	return configOptionValueString(value)
 }
@@ -1157,8 +1174,8 @@ var errUnknownMode = errors.New("未知模式")
 
 func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message, session Session) string {
 	modeOpt, ok := findModeConfigOption(session)
-	if !ok {
-		return "当前 ACP server 没有上报 mode 配置项，无法通过 /mode 设置。"
+	if !ok && session.Mode == nil {
+		return "当前 ACP server 没有上报 mode 配置项或 legacy modes，无法通过 /mode 设置。"
 	}
 	options := modeSelectionOptions(session, modeOpt)
 	if len(options) == 0 {
@@ -1230,17 +1247,30 @@ func (s *Service) HandleModeSelection(ctx context.Context, selection feishu.Mode
 }
 
 func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, session Session, target string) (string, string, error) {
-	modeOpt, ok := findModeConfigOption(session)
+	modeOpt, hasModeOpt := findModeConfigOption(session)
+	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
-		return "", "", fmt.Errorf("当前 ACP server 没有上报 mode 配置项，无法设置模式")
+		return "", "", fmt.Errorf("未找到 agent 配置：%s", session.AgentName)
+	}
+	if !hasModeOpt {
+		value, ok := resolveLegacyModeValue(session.Mode, target)
+		if !ok {
+			return "", "", fmt.Errorf("%w：%s", errUnknownMode, target)
+		}
+		if err := s.runtime.SetMode(ctx, session, agent, value); err != nil {
+			slog.ErrorContext(ctx, "设置 ACP legacy mode 失败", "mode", value, "错误", err)
+			return "", "", fmt.Errorf("设置模式失败：%w", err)
+		}
+		if session.Mode == nil {
+			session.Mode = &acp.SessionModeState{}
+		}
+		session.Mode.CurrentModeID = value
+		s.saveSessionState(ctx, msg, session)
+		return value, legacyModeDisplayName(session.Mode, value), nil
 	}
 	value, ok := resolveModeValue(modeOpt, target)
 	if !ok {
 		return "", "", fmt.Errorf("%w：%s", errUnknownMode, target)
-	}
-	agent, ok := s.registry.Get(session.AgentName)
-	if !ok {
-		return "", "", fmt.Errorf("未找到 agent 配置：%s", session.AgentName)
 	}
 	options, err := s.runtime.SetConfigOption(ctx, session, agent, modeOpt.ID, value)
 	if err != nil {
@@ -1320,6 +1350,23 @@ func configOptionDisplayName(opt acp.SessionConfigOption, value string) string {
 			continue
 		}
 		name := strings.TrimSpace(option.Name)
+		if name != "" && name != value {
+			return name + "（" + value + "）"
+		}
+		break
+	}
+	return value
+}
+
+func legacyModeDisplayName(state *acp.SessionModeState, value string) string {
+	if state == nil {
+		return value
+	}
+	for _, mode := range state.AvailableModes {
+		if mode.ModeID != value {
+			continue
+		}
+		name := strings.TrimSpace(mode.Name)
 		if name != "" && name != value {
 			return name + "（" + value + "）"
 		}
@@ -2112,8 +2159,10 @@ func (s *Service) saveSessionState(ctx context.Context, msg feishu.Message, sess
 
 func isACPStateUpdate(update acp.SessionUpdate) bool {
 	switch update.SessionUpdate {
-	case "available_commands_update", "config_option_update":
+	case "available_commands_update", "config_option_update", "session_info_update":
 		return true
+	case "current_mode_update":
+		return strings.TrimSpace(update.ModeID) != ""
 	default:
 		return update.Models != nil || update.Mode != nil
 	}
@@ -2131,6 +2180,30 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 	case "config_option_update":
 		session.ConfigOptions = append([]acp.SessionConfigOption(nil), update.ConfigOptions...)
 		changed = true
+	case "session_info_update":
+		if update.TitleSet && !session.ManualTitle && session.Title != update.Title {
+			session.Title = update.Title
+			changed = true
+		}
+		if update.UpdatedAtSet && session.ACPUpdatedAt != update.UpdatedAt {
+			session.ACPUpdatedAt = update.UpdatedAt
+			changed = true
+		}
+		if update.Meta != nil {
+			session.ACPMeta = maps.Clone(update.Meta)
+			changed = true
+		}
+	case "current_mode_update":
+		modeID := strings.TrimSpace(update.ModeID)
+		if modeID != "" {
+			if session.Mode == nil {
+				session.Mode = &acp.SessionModeState{}
+			}
+			if session.Mode.CurrentModeID != modeID {
+				session.Mode.CurrentModeID = modeID
+				changed = true
+			}
+		}
 	}
 	if update.Models != nil {
 		models := *update.Models
@@ -2206,6 +2279,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		ManualTitle:       req.ManualTitle,
 		AgentName:         agentName,
 		ACPSessionID:      sessionInfo.SessionID,
+		ACPMeta:           maps.Clone(sessionInfo.Meta),
 		Cwd:               filepath.Clean(cwd),
 		Workspace:         msg.Workspace,
 		AvailableCommands: sessionInfo.AvailableCommands,
@@ -2534,6 +2608,7 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 	if strings.TrimSpace(session.Workspace) == "" {
 		session.Workspace = msg.Workspace
 	}
+	session.ACPMeta = maps.Clone(sessionInfo.Meta)
 	session.AvailableCommands = sessionInfo.AvailableCommands
 	session.ConfigOptions = sessionInfo.ConfigOptions
 	session.Models = sessionInfo.Models

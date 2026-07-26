@@ -25,6 +25,7 @@ type acpRuntime interface {
 	PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error
 	SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error)
+	SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error
 	SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func()
 	CloseRuntimeKey(key runtimeKey) error
 	CloseSession(key SessionKey) error
@@ -59,6 +60,7 @@ func wikiRuntimeKey(key SessionKey, generation int64, sessionID string) runtimeK
 type runtimeManager struct {
 	mu            sync.Mutex
 	clients       map[runtimeKey]*acp.Client
+	sessionIDs    map[runtimeKey]string
 	subscriptions map[SessionKey]map[int64]acp.UpdateHandler
 	clientUnsub   map[runtimeKey]func()
 	nextSubID     int64
@@ -67,6 +69,7 @@ type runtimeManager struct {
 func newRuntimeManager() *runtimeManager {
 	return &runtimeManager{
 		clients:       make(map[runtimeKey]*acp.Client),
+		sessionIDs:    make(map[runtimeKey]string),
 		subscriptions: make(map[SessionKey]map[int64]acp.UpdateHandler),
 		clientUnsub:   make(map[runtimeKey]func()),
 	}
@@ -90,7 +93,7 @@ func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentNa
 		return acp.SessionInfo{}, fmt.Errorf("session/new: %w", err)
 	}
 
-	r.replaceClient(currentRuntimeKey(key), client)
+	r.replaceClient(currentRuntimeKey(key), client, sessionInfo.SessionID)
 	return sessionInfo, nil
 }
 
@@ -271,6 +274,19 @@ func (r *runtimeManager) SetConfigOption(ctx context.Context, session Session, a
 	return options, nil
 }
 
+func (r *runtimeManager) SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error {
+	client, err := r.clientForRuntimeSession(ctx, currentRuntimeKey(session.Key), session, agent)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := client.SetMode(ctx, session.ACPSessionID, modeID); err != nil {
+		return fmt.Errorf("session/set_mode: %w", err)
+	}
+	return nil
+}
+
 func (r *runtimeManager) SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func() {
 	if handler == nil {
 		return func() {}
@@ -303,6 +319,8 @@ func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
 	r.mu.Lock()
 	client := r.clients[key]
 	delete(r.clients, key)
+	sessionID := r.sessionIDs[key]
+	delete(r.sessionIDs, key)
 	unsub := r.clientUnsub[key]
 	delete(r.clientUnsub, key)
 	r.mu.Unlock()
@@ -310,7 +328,7 @@ func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
 		unsub()
 	}
 	if client != nil {
-		return client.Close()
+		return r.closeClient(client, sessionID)
 	}
 	return nil
 }
@@ -386,25 +404,45 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 			sessionInfo = loadInfo
 		}
 	}
-	r.replaceClient(key, client)
+	r.replaceClient(key, client, session.ACPSessionID)
 	r.dispatchSessionInfo(session.Key, session.ACPSessionID, sessionInfo)
 	return client, nil
 }
 
-func (r *runtimeManager) replaceClient(key runtimeKey, client *acp.Client) {
+func (r *runtimeManager) replaceClient(key runtimeKey, client *acp.Client, sessionID string) {
 	r.mu.Lock()
 	old := r.clients[key]
+	oldSessionID := r.sessionIDs[key]
 	oldUnsub := r.clientUnsub[key]
 	delete(r.clientUnsub, key)
 	r.clients[key] = client
+	r.sessionIDs[key] = sessionID
 	r.mu.Unlock()
 	if oldUnsub != nil {
 		oldUnsub()
 	}
 	if old != nil && old != client {
-		_ = old.Close()
+		r.closeClient(old, oldSessionID)
 	}
 	r.attachClientSubscriptions(key, client)
+}
+
+func (r *runtimeManager) closeClient(client *acp.Client, sessionID string) error {
+	if client == nil {
+		return nil
+	}
+	var firstErr error
+	if sessionID != "" && client.SupportsCloseSession() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := client.CloseSession(ctx, sessionID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		cancel()
+	}
+	if err := client.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.Client) {
@@ -431,6 +469,12 @@ func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.C
 }
 
 func (r *runtimeManager) dispatchSessionInfo(key SessionKey, sessionID string, info acp.SessionInfo) {
+	if info.Meta != nil {
+		r.dispatchUpdate(key, sessionID, acp.SessionUpdate{
+			SessionUpdate: "session_info_update",
+			Meta:          info.Meta,
+		})
+	}
 	if len(info.AvailableCommands) > 0 {
 		r.dispatchUpdate(key, sessionID, acp.SessionUpdate{
 			SessionUpdate:     "available_commands_update",

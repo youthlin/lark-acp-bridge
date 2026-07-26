@@ -486,6 +486,33 @@ func TestApplyACPStateUpdateAllowsEmptyLists(t *testing.T) {
 	}
 }
 
+func TestApplyACPStateUpdateReplacesConfigOptions(t *testing.T) {
+	session := Session{
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.5"},
+			{ID: "mode", Name: "Mode", Type: "select", CurrentValue: "ask"},
+		},
+	}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "config_option_update",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "reasoning", Name: "Reasoning", Type: "select", CurrentValue: "high"},
+			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.6"},
+		},
+	}) {
+		t.Fatal("config_option_update should be treated as changed")
+	}
+	if len(session.ConfigOptions) != 2 {
+		t.Fatalf("ConfigOptions = %+v, want full replacement with two options", session.ConfigOptions)
+	}
+	if session.ConfigOptions[0].ID != "reasoning" || session.ConfigOptions[0].CurrentValue != "high" {
+		t.Fatalf("first config option = %+v, want reasoning high", session.ConfigOptions[0])
+	}
+	if session.ConfigOptions[1].ID != "model" || session.ConfigOptions[1].CurrentValue != "gpt-5.6" {
+		t.Fatalf("second config option = %+v, want model gpt-5.6", session.ConfigOptions[1])
+	}
+}
+
 func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
 	session := Session{}
 	if !applyACPStateUpdate(&session, acp.SessionUpdate{
@@ -510,6 +537,132 @@ func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
 	}
 	if got := currentModeDisplay(session); got != "agent" {
 		t.Fatalf("currentModeDisplay = %q, want agent", got)
+	}
+}
+
+func TestApplyACPStateUpdatePersistsCurrentModeUpdate(t *testing.T) {
+	session := Session{
+		Mode: &acp.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acp.SessionMode{
+				{ModeID: "default", Name: "Default"},
+				{ModeID: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if !isACPStateUpdate(acp.SessionUpdate{SessionUpdate: "current_mode_update", ModeID: "plan"}) {
+		t.Fatal("current_mode_update should be treated as state update")
+	}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "current_mode_update", ModeID: "plan"}) {
+		t.Fatal("current_mode_update should update current mode")
+	}
+	if session.Mode == nil || session.Mode.CurrentModeID != "plan" {
+		t.Fatalf("Mode = %+v, want current mode plan", session.Mode)
+	}
+	if len(session.Mode.AvailableModes) != 2 {
+		t.Fatalf("AvailableModes = %+v, want preserved mode list", session.Mode.AvailableModes)
+	}
+}
+
+func TestApplyACPStateUpdatePersistsSessionInfoTitle(t *testing.T) {
+	session := Session{Title: "旧标题"}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		Title:         "新标题",
+		TitleSet:      true,
+	}) {
+		t.Fatal("session_info_update should update title")
+	}
+	if session.Title != "新标题" {
+		t.Fatalf("Title = %q, want 新标题", session.Title)
+	}
+
+	session.ManualTitle = true
+	if applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		Title:         "自动标题",
+		TitleSet:      true,
+	}) {
+		t.Fatal("manual title should not be overwritten by session_info_update")
+	}
+	if session.Title != "新标题" {
+		t.Fatalf("Title = %q, want manual title preserved", session.Title)
+	}
+}
+
+func TestApplyACPStateUpdateClearsSessionInfoTitle(t *testing.T) {
+	session := Session{Title: "旧标题"}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		TitleSet:      true,
+	}) {
+		t.Fatal("session_info_update should clear title when title is null")
+	}
+	if session.Title != "" {
+		t.Fatalf("Title = %q, want cleared", session.Title)
+	}
+
+	session = Session{Title: "手动标题", ManualTitle: true}
+	if applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		TitleSet:      true,
+	}) {
+		t.Fatal("manual title should not be cleared by session_info_update")
+	}
+	if session.Title != "手动标题" {
+		t.Fatalf("Title = %q, want manual title preserved", session.Title)
+	}
+}
+
+func TestApplyACPStateUpdatePersistsACPUpdatedAt(t *testing.T) {
+	session := Session{ACPUpdatedAt: "2025-10-29T14:22:15Z"}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		UpdatedAt:     "2025-10-29T15:00:00Z",
+		UpdatedAtSet:  true,
+	}) {
+		t.Fatal("session_info_update should update ACP updatedAt")
+	}
+	if session.ACPUpdatedAt != "2025-10-29T15:00:00Z" {
+		t.Fatalf("ACPUpdatedAt = %q, want updated timestamp", session.ACPUpdatedAt)
+	}
+
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		UpdatedAtSet:  true,
+	}) {
+		t.Fatal("session_info_update should clear ACP updatedAt")
+	}
+	if session.ACPUpdatedAt != "" {
+		t.Fatalf("ACPUpdatedAt = %q, want cleared", session.ACPUpdatedAt)
+	}
+}
+
+func TestApplyACPStateUpdatePersistsACPMeta(t *testing.T) {
+	session := Session{ACPMeta: map[string]any{"old": true}}
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		Meta: map[string]any{
+			"priority": "high",
+		},
+	}) {
+		t.Fatal("session_info_update should update ACP meta")
+	}
+	if got, ok := session.ACPMeta["priority"]; !ok || got != "high" {
+		t.Fatalf("ACPMeta[priority] = %v, want high", got)
+	}
+	if _, ok := session.ACPMeta["old"]; ok {
+		t.Fatalf("ACPMeta retained old key: %+v", session.ACPMeta)
+	}
+
+	if !applyACPStateUpdate(&session, acp.SessionUpdate{
+		SessionUpdate: "session_info_update",
+		Meta:          map[string]any{},
+	}) {
+		t.Fatal("session_info_update should clear ACP meta with empty object")
+	}
+	if len(session.ACPMeta) != 0 {
+		t.Fatalf("ACPMeta = %+v, want empty", session.ACPMeta)
 	}
 }
 
@@ -1286,6 +1439,51 @@ func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
 	}
 }
 
+func TestHandleModeSelectionFallsBackToLegacySetMode(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = nil
+	session.Mode = &acp.SessionModeState{
+		CurrentModeID: "default",
+		AvailableModes: []acp.SessionMode{
+			{ModeID: "default", Name: "Default"},
+			{ModeID: "plan", Name: "Plan"},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	display, err := svc.HandleModeSelection(context.Background(), feishu.ModeSelection{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		RequesterID:  "ou_requester",
+		OperatorID:   "ou_requester",
+		Mode:         "Plan",
+	})
+	if err != nil {
+		t.Fatalf("HandleModeSelection() error = %v", err)
+	}
+	if display != "Plan（plan）" {
+		t.Fatalf("display = %q, want friendly legacy mode display", display)
+	}
+	if len(rt.modeCalls) != 1 || rt.modeCalls[0].ModeID != "plan" {
+		t.Fatalf("modeCalls = %+v, want legacy set_mode plan", rt.modeCalls)
+	}
+	if len(rt.configCalls) != 0 {
+		t.Fatalf("configCalls = %+v, want no set_config_option fallback call", rt.configCalls)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.Mode == nil || updated.Mode.CurrentModeID != "plan" {
+		t.Fatalf("updated session = %+v, want legacy mode plan persisted", updated)
+	}
+}
+
 func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -1329,6 +1527,45 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessagePersistsNewSessionInfoMeta(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = workDir
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-session-1",
+			Meta: map[string]any{
+				"messageCount": 12,
+			},
+		},
+		promptReply: "ACP 回复",
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "@我的智能助手 你好",
+		Mentions: []feishu.Mention{
+			testBotMention("我的智能助手"),
+		},
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	session, ok := store.Get(SessionKey{ChatID: "oc_chat", ThreadID: "omt_thread"})
+	if !ok {
+		t.Fatalf("auto-created session not persisted")
+	}
+	if got := session.ACPMeta["messageCount"]; got != 12 {
+		t.Fatalf("ACPMeta[messageCount] = %v, want 12", got)
+	}
+}
+
 func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -1343,7 +1580,12 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 		t.Fatalf("Upsert() error = %v", err)
 	}
 	rt := &fakeRuntime{
-		newSessionID: "new-acp-session",
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "new-acp-session",
+			Meta: map[string]any{
+				"refreshed": true,
+			},
+		},
 		promptReply:  "ACP 回复",
 		promptErrors: []error{errACPSessionUnavailable},
 	}
@@ -1380,6 +1622,9 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 	}
 	if updated.ACPSessionID != "new-acp-session" {
 		t.Fatalf("persisted session = %q, want new-acp-session", updated.ACPSessionID)
+	}
+	if got := updated.ACPMeta["refreshed"]; got != true {
+		t.Fatalf("ACPMeta[refreshed] = %v, want true", got)
 	}
 	if updated.Title != "继续" {
 		t.Fatalf("persisted title = %q, want final session title", updated.Title)
@@ -6744,6 +6989,7 @@ type fakeRuntime struct {
 	promptResults       []acp.PromptResult
 	configOptions       []acp.SessionConfigOption
 	configCalls         []fakeConfigCall
+	modeCalls           []fakeModeCall
 	newCalls            []fakeNewCall
 	promptCalls         []fakePromptCall
 	wikiRuntimeCalls    []fakePromptCall
@@ -6778,6 +7024,11 @@ type fakeConfigCall struct {
 	Session  Session
 	ConfigID string
 	Value    any
+}
+
+type fakeModeCall struct {
+	Session Session
+	ModeID  string
 }
 
 func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
@@ -6904,6 +7155,13 @@ func (f *fakeRuntime) SetConfigOption(ctx context.Context, session Session, agen
 			CurrentValue: value,
 		},
 	}, nil
+}
+
+func (f *fakeRuntime) SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modeCalls = append(f.modeCalls, fakeModeCall{Session: session, ModeID: modeID})
+	return nil
 }
 
 func (f *fakeRuntime) SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func() {
