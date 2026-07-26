@@ -2887,6 +2887,12 @@ type promptCardStream struct {
 	showUsageDetail   bool
 	text              string
 	process           []string
+	processPending    string
+	processDirty      bool
+	processLastFlush  time.Time
+	processTimer      *time.Timer
+	processTimerGen   int64
+	processFlushing   sync.WaitGroup
 	streaming         bool
 	activeStreamClass promptProcessClass
 	tools             []promptToolRow
@@ -3301,9 +3307,7 @@ func (s *promptCardStream) updateProcess(text string) {
 	s.process = append(s.process, normalizeStreamMarkdown(text))
 	processText := truncateProcessText(strings.Join(s.process, "\n"))
 	s.mu.Unlock()
-	if err := card.UpdateProcess(s.ctx, processText); err != nil {
-		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片过程失败", "session", s.session.ACPSessionID, "错误", err)
-	}
+	s.queueProcessUpdate(card, processText, false)
 }
 
 func (s *promptCardStream) updatePromptUpdate(update acp.PromptUpdate) {
@@ -3347,9 +3351,7 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 	s.mu.Lock()
 	processText := s.applyToolProgressLineLocked(status, title, line)
 	s.mu.Unlock()
-	if err := card.UpdateProcess(s.ctx, processText); err != nil {
-		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片过程失败", "session", s.session.ACPSessionID, "错误", err)
-	}
+	s.queueProcessUpdate(card, processText, true)
 	return true
 }
 
@@ -3475,9 +3477,7 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 	}
 	processText := truncateProcessText(strings.Join(s.process, "\n"))
 	s.mu.Unlock()
-	if err := card.UpdateProcess(s.ctx, processText); err != nil {
-		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片过程失败", "session", s.session.ACPSessionID, "错误", err)
-	}
+	s.queueProcessUpdate(card, processText, false)
 }
 
 func (s *promptCardStream) finishProcessStream() {
@@ -3488,11 +3488,13 @@ func (s *promptCardStream) finishProcessStream() {
 }
 
 const (
-	promptCardFlushDelay  = 180 * time.Millisecond
-	maxPromptProcessRunes = 6000
+	promptCardFlushDelay       = 180 * time.Millisecond
+	promptProcessFlushInterval = time.Second
+	maxPromptProcessRunes      = 6000
 )
 
 func (s *promptCardStream) close() {
+	s.flushPendingProcessUpdate()
 	s.mu.Lock()
 	card := s.card
 	s.mu.Unlock()
@@ -3501,6 +3503,108 @@ func (s *promptCardStream) close() {
 	}
 	if err := card.Close(s.ctx); err != nil {
 		slog.ErrorContext(s.ctx, "关闭 ACP 流式卡片失败", "session", s.session.ACPSessionID, "错误", err)
+	}
+}
+
+func (s *promptCardStream) queueProcessUpdate(card feishu.StreamCard, text string, force bool) {
+	if card == nil {
+		return
+	}
+	now := time.Now()
+	var flushText string
+	flushNow := false
+	s.mu.Lock()
+	s.processPending = text
+	s.processDirty = true
+	if force || s.processLastFlush.IsZero() || !now.Before(s.processLastFlush.Add(promptProcessFlushInterval)) {
+		flushText, flushNow = s.takePendingProcessUpdateLocked(now)
+		s.stopProcessFlushTimerLocked()
+	} else {
+		s.scheduleProcessFlushLocked(s.processLastFlush.Add(promptProcessFlushInterval).Sub(now))
+	}
+	s.mu.Unlock()
+	if flushNow {
+		s.applyProcessUpdate(card, flushText)
+	}
+}
+
+func (s *promptCardStream) flushPendingProcessUpdate() {
+	var (
+		card      feishu.StreamCard
+		flushText string
+		flushNow  bool
+	)
+	s.mu.Lock()
+	card = s.card
+	s.stopProcessFlushTimerLocked()
+	flushText, flushNow = s.takePendingProcessUpdateLocked(time.Now())
+	s.mu.Unlock()
+	if flushNow && card != nil {
+		s.applyProcessUpdate(card, flushText)
+	}
+	s.processFlushing.Wait()
+}
+
+func (s *promptCardStream) scheduleProcessFlushLocked(delay time.Duration) {
+	if s.processTimer != nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	s.processTimerGen++
+	generation := s.processTimerGen
+	s.processFlushing.Add(1)
+	s.processTimer = time.AfterFunc(delay, func() {
+		defer s.processFlushing.Done()
+		var (
+			card      feishu.StreamCard
+			flushText string
+			flushNow  bool
+		)
+		s.mu.Lock()
+		if s.processTimerGen != generation {
+			s.mu.Unlock()
+			return
+		}
+		s.processTimer = nil
+		card = s.card
+		flushText, flushNow = s.takePendingProcessUpdateLocked(time.Now())
+		s.mu.Unlock()
+		if flushNow && card != nil {
+			s.applyProcessUpdate(card, flushText)
+		}
+	})
+}
+
+func (s *promptCardStream) stopProcessFlushTimerLocked() {
+	s.processTimerGen++
+	if s.processTimer == nil {
+		return
+	}
+	if s.processTimer.Stop() {
+		s.processFlushing.Done()
+	}
+	s.processTimer = nil
+}
+
+func (s *promptCardStream) takePendingProcessUpdateLocked(now time.Time) (string, bool) {
+	if !s.processDirty {
+		return "", false
+	}
+	text := s.processPending
+	s.processPending = ""
+	s.processDirty = false
+	s.processLastFlush = now
+	return text, true
+}
+
+func (s *promptCardStream) applyProcessUpdate(card feishu.StreamCard, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if err := card.UpdateProcess(s.ctx, text); err != nil {
+		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片过程失败", "session", s.session.ACPSessionID, "错误", err)
 	}
 }
 

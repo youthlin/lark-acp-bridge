@@ -2916,7 +2916,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		got[0] != "💬 收到。现在开始。" ||
 		got[1] != "💬 收到。现在开始。\n⏳ exec_command" ||
 		got[2] != "💬 收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
-		t.Fatalf("processUpdates = %+v, want pre-tool agent text and normalized process updates", got)
+		t.Fatalf("processUpdates = %+v, want immediate tool update and final normalized process update", got)
 	}
 	if !card.isClosed() {
 		t.Fatalf("stream card should be closed")
@@ -3648,10 +3648,10 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	}
 	got := cards[0].processUpdatesSnapshot()
 	if len(got) != 1 {
-		t.Fatalf("processUpdates = %+v, want generic chunk stream to update one process block", got)
+		t.Fatalf("processUpdates = %+v, want generic chunk stream to update once within throttle window", got)
 	}
 	if got[0] != "line one line two" {
-		t.Fatalf("process update = %q, want accumulated generic chunk stream", got[0])
+		t.Fatalf("process update = %q, want final accumulated generic chunk stream", got[0])
 	}
 }
 
@@ -4087,6 +4087,34 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 	}
 	if len([]rune(got[0])) > maxPromptProcessRunes+20 {
 		t.Fatalf("process update length = %d, want bounded text", len([]rune(got[0])))
+	}
+}
+
+func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+	stream := newPromptCardStream(ctx, feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
+
+	stream.updateProcess("one")
+	stream.updateProcess("two")
+
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "one" {
+		t.Fatalf("processUpdates = %+v, want second process update throttled", got)
+	}
+	stream.close()
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\ntwo" {
+		t.Fatalf("processUpdates = %+v, want pending process flushed on close", got)
 	}
 }
 
