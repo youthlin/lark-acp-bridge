@@ -271,6 +271,9 @@ var errBuiltinRestartUnavailable = errors.New("当前进程不是内置后台 da
 var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
 var _ feishu.ModeSelectionHandler = (*Service)(nil)
+var _ feishu.SessionSelectionHandler = (*Service)(nil)
+
+const maxSessionHistoryPerChat = 10
 
 // HandleFeishuMessage 消息处理
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
@@ -348,8 +351,14 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
 		}, "\n")
 	case "/new":
+		if isTopicGroupMessage(msg) {
+			return "话题群内不支持使用 /new 手动切换会话；新发一条话题消息会自动创建独立会话。"
+		}
 		return s.newSession(ctx, fields, msg)
 	case "/session":
+		if isTopicGroupMessage(msg) {
+			return "话题群内不支持使用 /session 命令；每条话题会自动维护独立会话。"
+		}
 		return s.handleSessionCommand(ctx, text, msg)
 	case "/wiki":
 		return s.handleWikiCommand(ctx, text, msg)
@@ -683,11 +692,11 @@ func (s *Service) formatAtStatus(msg feishu.Message) string {
 func (s *Service) handleSessionCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		return "可用命令：/session list 或 /session resume <index>"
+		return "可用命令：/session list、/session resume <index> 或 /session title <title>"
 	}
 	switch fields[1] {
 	case "list":
-		return s.listSessions(msg)
+		return s.sendSessionList(ctx, msg)
 	case "resume":
 		if len(fields) < 3 {
 			return "请使用 /session resume <index> 指定要恢复的会话序号。"
@@ -1297,7 +1306,7 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	}
 }
 
-func (s *Service) listSessions(msg feishu.Message) string {
+func (s *Service) sendSessionList(ctx context.Context, msg feishu.Message) string {
 	store := s.storeForMessage(msg)
 	if store == nil {
 		return "会话持久化未初始化。"
@@ -1305,6 +1314,37 @@ func (s *Service) listSessions(msg feishu.Message) string {
 	items := store.ListByChat(msg.BotID, msg.ChatID)
 	if len(items) == 0 {
 		return "当前聊天还没有历史 ACP 会话。发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。"
+	}
+	sent, err := feishu.SendSessionSelectionCard(ctx, msg, feishu.SessionSelectionCard{
+		BotID:               msg.BotID,
+		ChatID:              msg.ChatID,
+		ThreadID:            msg.ThreadID,
+		RequesterID:         msg.SenderID,
+		CurrentACPSessionID: currentACPSessionID(s, msg),
+		Options:             sessionSelectionOptions(items, maxSessionHistoryPerChat),
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "发送会话选择卡片失败", "错误", err)
+		return "发送会话选择卡片失败：" + err.Error()
+	}
+	if sent {
+		return ""
+	}
+	return s.formatSessionList(msg, 0)
+}
+
+func (s *Service) formatSessionList(msg feishu.Message, limit int) string {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "会话持久化未初始化。"
+	}
+	items := store.ListByChat(msg.BotID, msg.ChatID)
+	if len(items) == 0 {
+		return "当前聊天还没有历史 ACP 会话。发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。"
+	}
+	total := len(items)
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
 	}
 	current, hasCurrent := s.findSession(msg)
 	lines := []string{"当前聊天的历史 ACP 会话："}
@@ -1315,8 +1355,40 @@ func (s *Service) listSessions(msg feishu.Message) string {
 		}
 		lines = append(lines, fmt.Sprintf("%d. %s%s\n   标题：%s\n   cwd：%s", i+1, item.ACPSessionID, marker, displaySessionTitle(item), item.Cwd))
 	}
+	if limit > 0 && total > limit {
+		lines = append(lines, fmt.Sprintf("仅显示最近 %d 个，共 %d 个历史会话。", limit, total))
+	}
 	lines = append(lines, "使用 /session resume <index> 恢复指定会话。")
 	return strings.Join(lines, "\n")
+}
+
+func currentACPSessionID(svc *Service, msg feishu.Message) string {
+	if svc == nil {
+		return ""
+	}
+	session, ok := svc.findSession(msg)
+	if !ok {
+		return ""
+	}
+	return session.ACPSessionID
+}
+
+func sessionSelectionOptions(items []Session, limit int) []feishu.SessionOption {
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	options := make([]feishu.SessionOption, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.ACPSessionID) == "" {
+			continue
+		}
+		options = append(options, feishu.SessionOption{
+			ACPSessionID: item.ACPSessionID,
+			Title:        displaySessionTitle(item),
+			Cwd:          item.Cwd,
+		})
+	}
+	return options
 }
 
 func (s *Service) resumeSession(ctx context.Context, msg feishu.Message, index int) string {
@@ -1331,16 +1403,58 @@ func (s *Service) resumeSession(ctx context.Context, msg feishu.Message, index i
 	if index > len(items) {
 		return fmt.Sprintf("会话序号超出范围。当前共有 %d 个历史会话。", len(items))
 	}
-	session := items[index-1]
-	session.Key = sessionKeyFromMessage(msg)
-	if err := store.Upsert(session); err != nil {
-		slog.ErrorContext(ctx, "恢复会话映射失败", "错误", err)
-		return "恢复会话失败：" + err.Error()
-	}
-	if err := s.runtime.CloseSession(session.Key); err != nil {
-		slog.WarnContext(ctx, "关闭旧 ACP runtime 失败", "key", session.Key, "错误", err)
+	session, errText := s.resumeSessionByID(ctx, msg, items[index-1].ACPSessionID)
+	if errText != "" {
+		return errText
 	}
 	return fmt.Sprintf("已恢复会话 %d。\n标题：%s\nagent：%s\ncwd：%s\nsession：%s", index, displaySessionTitle(session), session.AgentName, session.Cwd, session.ACPSessionID)
+}
+
+func (s *Service) resumeSessionByID(ctx context.Context, msg feishu.Message, acpSessionID string) (Session, string) {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return Session{}, "会话持久化未初始化。"
+	}
+	acpSessionID = strings.TrimSpace(acpSessionID)
+	if acpSessionID == "" {
+		return Session{}, "会话 ID 不能为空。"
+	}
+	for _, item := range store.ListByChat(msg.BotID, msg.ChatID) {
+		if item.ACPSessionID != acpSessionID {
+			continue
+		}
+		session := item
+		session.Key = sessionKeyFromMessage(msg)
+		if err := store.Upsert(session); err != nil {
+			slog.ErrorContext(ctx, "恢复会话映射失败", "错误", err)
+			return Session{}, "恢复会话失败：" + err.Error()
+		}
+		if err := s.runtime.CloseSession(session.Key); err != nil {
+			slog.WarnContext(ctx, "关闭旧 ACP runtime 失败", "key", session.Key, "错误", err)
+		}
+		return session, ""
+	}
+	return Session{}, "选择的会话不存在或已过期，请重新发送 /session list。"
+}
+
+func (s *Service) HandleSessionSelection(ctx context.Context, selection feishu.SessionSelection) (string, error) {
+	msg := feishu.Message{
+		BotID:    selection.BotID,
+		ChatID:   selection.ChatID,
+		ThreadID: selection.ThreadID,
+		SenderID: selection.OperatorID,
+	}
+	if !s.slashCommandAllowed(msg) {
+		if len(s.ownerOpenIDs(selection.BotID)) == 0 {
+			return "", fmt.Errorf("未配置 bot owner，不能恢复会话")
+		}
+		return "", fmt.Errorf("只有 bot owner 可以恢复会话")
+	}
+	session, errText := s.resumeSessionByID(ctx, msg, selection.ACPSessionID)
+	if errText != "" {
+		return "", fmt.Errorf("%s", strings.TrimSuffix(errText, "。"))
+	}
+	return displaySessionTitle(session), nil
 }
 
 func (s *Service) setSessionTitle(ctx context.Context, msg feishu.Message, title string) string {
@@ -1353,6 +1467,7 @@ func (s *Service) setSessionTitle(ctx context.Context, msg feishu.Message, title
 		return "当前会话还没有 ACP session，无法设置标题。"
 	}
 	session.Title = normalizeSessionTitle(title)
+	session.ManualTitle = true
 	if err := store.Upsert(session); err != nil {
 		slog.ErrorContext(ctx, "设置会话标题失败", "错误", err)
 		return "设置会话标题失败：" + err.Error()
@@ -1496,6 +1611,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	session := Session{
 		Key:               key,
 		Title:             req.Title,
+		ManualTitle:       req.ManualTitle,
 		AgentName:         agentName,
 		ACPSessionID:      sessionInfo.SessionID,
 		Cwd:               filepath.Clean(cwd),
@@ -1631,11 +1747,11 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 ) {
 	session, ok := s.findSession(msg)
 	if !ok {
-		created, agent, _, errText := s.createSession(ctx, []string{"/new", "--title", titleFromPrompt(userText)}, msg)
+		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
 		if errText != "" {
 			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
-		session = created
+		session = s.updateAutomaticSessionTitle(ctx, msg, created, userText)
 		text := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, promptTextWithReplyContext(msg, userText))
 		return session, agent, text, "", nil
 	}
@@ -1645,12 +1761,13 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 	}
 	text := promptTextWithReplyContext(msg, userText)
 	if strings.TrimSpace(session.ACPSessionID) == "" {
-		created, _, _, errText := s.createSession(ctx, []string{"/new", session.Cwd, titleFromPrompt(userText)}, msg)
+		created, _, _, errText := s.createSession(ctx, []string{"/new", session.Cwd}, msg)
 		if errText != "" {
 			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
 		session = created
 	}
+	session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
 	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
 	return session, agent, text, "", nil
 }
@@ -3305,8 +3422,9 @@ func promptWithUserMessage(prefixes []string, text string) string {
 }
 
 type newSessionRequest struct {
-	Cwd   string
-	Title string
+	Cwd         string
+	Title       string
+	ManualTitle bool
 }
 
 func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) (newSessionRequest, string, string) {
@@ -3315,17 +3433,21 @@ func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) 
 	if len(args) > 0 {
 		if args[0] == "--title" || args[0] == "-t" {
 			req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
+			req.ManualTitle = req.Title != ""
 		} else {
 			candidate, err := config.ExpandPath(args[0])
 			if err == nil {
 				if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
 					req.Cwd = candidate
 					req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
+					req.ManualTitle = req.Title != ""
 				} else {
 					req.Title = normalizeSessionTitle(strings.Join(args, " "))
+					req.ManualTitle = req.Title != ""
 				}
 			} else {
 				req.Title = normalizeSessionTitle(strings.Join(args, " "))
+				req.ManualTitle = req.Title != ""
 			}
 		}
 	}
@@ -3372,6 +3494,25 @@ func normalizeSessionTitle(title string) string {
 
 func titleFromPrompt(text string) string {
 	return normalizeSessionTitle(text)
+}
+
+func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Message, session Session, userText string) Session {
+	if session.ManualTitle {
+		return session
+	}
+	title := titleFromPrompt(userText)
+	if title == "" || title == session.Title {
+		return session
+	}
+	session.Title = title
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return session
+	}
+	if err := store.Upsert(session); err != nil {
+		slog.WarnContext(ctx, "保存自动会话标题失败", "session", session.ACPSessionID, "错误", err)
+	}
+	return session
 }
 
 func displaySessionTitle(session Session) string {
@@ -3465,6 +3606,10 @@ func sessionLabel(msg feishu.Message) string {
 		return "当前群聊会话"
 	}
 	return "当前话题会话"
+}
+
+func isTopicGroupMessage(msg feishu.Message) bool {
+	return strings.EqualFold(msg.ChatType, "group") && strings.TrimSpace(msg.ThreadID) != ""
 }
 
 func displayBotID(botID string) string {

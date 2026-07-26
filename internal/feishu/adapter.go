@@ -33,6 +33,10 @@ type ModeSelectionHandler interface {
 	HandleModeSelection(context.Context, ModeSelection) (string, error)
 }
 
+type SessionSelectionHandler interface {
+	HandleSessionSelection(context.Context, SessionSelection) (string, error)
+}
+
 type Adapter struct {
 	cfg             config.BotConfig        // Bot配置
 	handler         Handler                 // 消息处理

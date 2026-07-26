@@ -70,6 +70,7 @@ func (s *SessionStore) Load() error {
 			s.upsertHistoryLocked(session)
 		}
 	}
+	s.trimHistoryLocked()
 	return nil
 }
 
@@ -96,6 +97,7 @@ func (s *SessionStore) Upsert(session Session) error {
 	s.sessions[session.Key] = session
 	if session.ACPSessionID != "" {
 		s.upsertHistoryLocked(session)
+		s.trimHistoryLocked()
 	}
 	return s.writeLocked()
 }
@@ -172,6 +174,39 @@ func (s *SessionStore) upsertHistoryLocked(session Session) {
 		}
 	}
 	s.history = append(s.history, session)
+}
+
+func (s *SessionStore) trimHistoryLocked() {
+	if len(s.history) <= maxSessionHistoryPerChat {
+		return
+	}
+	grouped := make(map[ChatKey][]int)
+	for i, session := range s.history {
+		if !session.Key.Valid() || session.ACPSessionID == "" {
+			continue
+		}
+		key := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
+		grouped[key] = append(grouped[key], i)
+	}
+	keep := make([]bool, len(s.history))
+	for _, indexes := range grouped {
+		sort.SliceStable(indexes, func(i, j int) bool {
+			return s.history[indexes[i]].UpdatedAt.After(s.history[indexes[j]].UpdatedAt)
+		})
+		for i, index := range indexes {
+			if i >= maxSessionHistoryPerChat {
+				break
+			}
+			keep[index] = true
+		}
+	}
+	trimmed := s.history[:0]
+	for i, session := range s.history {
+		if keep[i] {
+			trimmed = append(trimmed, session)
+		}
+	}
+	s.history = trimmed
 }
 
 func sameHistorySession(a, b Session) bool {

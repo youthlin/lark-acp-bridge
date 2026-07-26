@@ -43,6 +43,7 @@ type ChatConfig struct {
 type Session struct {
 	Key               SessionKey                `json:"key"`
 	Title             string                    `json:"title,omitempty"`
+	ManualTitle       bool                      `json:"manual_title,omitempty"`
 	AgentName         string                    `json:"agent_name"`
 	ACPSessionID      string                    `json:"acp_session_id,omitempty"`
 	Cwd               string                    `json:"cwd"`

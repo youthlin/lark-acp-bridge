@@ -172,6 +172,8 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 		return a.handleModelSelectionAction(ctx, event)
 	case modeSelectionCardAction:
 		return a.handleModeSelectionAction(ctx, event)
+	case sessionSelectionCardAction:
+		return a.handleSessionSelectionAction(ctx, event)
 	case permissionCardAction:
 	default:
 		return permissionCardToast("error", "未知的卡片操作"), nil

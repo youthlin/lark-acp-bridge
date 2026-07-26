@@ -3,9 +3,11 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
@@ -33,6 +35,9 @@ func TestNewStreamCardJSONStartsWithProcessPanel(t *testing.T) {
 	}
 	if !jsonContainsValue(card, "执行中") {
 		t.Fatalf("initial stream card does not contain running status")
+	}
+	if !jsonElementFieldEquals(card, streamCardStatusElementID, "text_align", "left") {
+		t.Fatalf("initial stream card status bar should align left: %#v", card)
 	}
 	if !jsonContainsValue(card, streamCardProcessPanelID) {
 		t.Fatalf("initial stream card does not contain process panel %q", streamCardProcessPanelID)
@@ -169,6 +174,111 @@ func TestNewStreamCardProcessPanelJSONContainsProcessElements(t *testing.T) {
 	}
 	if jsonContainsValue(elements, "思考与工具调用") {
 		t.Fatalf("process panel JSON should not use old title")
+	}
+}
+
+func TestNewStreamCardJSONFromStateRendersNormalFinalSnapshot(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newStreamCardJSONFromState(
+		"最终回复",
+		"执行过程",
+		"已完成 | 1K, 2K",
+		"```json\n{}\n```",
+		true,
+		true,
+		true,
+		false,
+	)), &card); err != nil {
+		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"最终回复", "执行过程", "已完成 | 1K, 2K", "用量明细"} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("normal final card does not contain %q: %#v", want, card)
+		}
+	}
+	if !jsonContainsSubstring(card, "```json") {
+		t.Fatalf("normal final card does not contain usage detail content: %#v", card)
+	}
+	if !jsonContainsBool(card, "streaming_mode", false) {
+		t.Fatalf("normal final card should disable streaming_mode: %#v", card)
+	}
+	if jsonContainsKey(card, "streaming_config") {
+		t.Fatalf("normal final card should not contain streaming_config: %#v", card)
+	}
+}
+
+func TestSDKStreamCardFullCardJSONIncludesSnapshotPanels(t *testing.T) {
+	card := &sdkStreamCard{
+		text:        "最终回复",
+		process:     "执行过程",
+		status:      "已完成",
+		usageDetail: "usage detail",
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(card.fullCardJSONLocked()), &payload); err != nil {
+		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"最终回复", "执行过程", "已完成", "usage detail", streamCardProcessPanelID, streamCardUsagePanelID} {
+		if !jsonContainsValue(payload, want) {
+			t.Fatalf("full card snapshot does not contain %q: %#v", want, payload)
+		}
+	}
+	if !jsonContainsBool(payload, "streaming_mode", false) {
+		t.Fatalf("full card snapshot should disable streaming_mode: %#v", payload)
+	}
+}
+
+func TestSDKStreamCardFullCardJSONCanOmitHiddenStatusBar(t *testing.T) {
+	card := &sdkStreamCard{
+		text:           "最终回复",
+		processCreated: true,
+		process:        "执行过程",
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(card.fullCardJSONLocked()), &payload); err != nil {
+		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
+	}
+
+	if jsonContainsValue(payload, streamCardStatusElementID) || jsonContainsValue(payload, "执行中") {
+		t.Fatalf("full card snapshot should keep hidden status bar omitted: %#v", payload)
+	}
+	if !jsonContainsValue(payload, streamCardProcessPanelID) {
+		t.Fatalf("full card snapshot should keep process panel: %#v", payload)
+	}
+}
+
+func TestIsStreamCardStreamingClosedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "timeout code text",
+			err:  errors.New("更新飞书流式卡片组件返回错误: code=200850 msg=card streaming timeout"),
+			want: true,
+		},
+		{
+			name: "closed code error",
+			err:  &larkcore.CodeError{Code: 300309, Msg: "streaming mode is closed"},
+			want: true,
+		},
+		{
+			name: "other error",
+			err:  errors.New("code=999999 msg=other"),
+		},
+		{
+			name: "nil",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStreamCardStreamingClosedError(tt.err); got != tt.want {
+				t.Fatalf("isStreamCardStreamingClosedError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -826,6 +936,75 @@ func TestModeSelectionCardActionSetsModeAndReplacesDropdown(t *testing.T) {
 	}
 }
 
+func TestNewSessionSelectionCardJSONContainsDropdownAndCallbackContext(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newSessionSelectionCardJSON(SessionSelectionCard{
+		BotID:               "default",
+		ChatID:              "oc_chat",
+		ThreadID:            "omt_thread",
+		RequesterID:         "ou_requester",
+		CurrentACPSessionID: "session-2",
+		Options: []SessionOption{
+			{ACPSessionID: "session-2", Title: "当前会话", Cwd: "/repo"},
+			{ACPSessionID: "session-1", Title: "旧会话", Cwd: "/old"},
+		},
+	})), &card); err != nil {
+		t.Fatalf("newSessionSelectionCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{
+		"select_static",
+		"当前会话 | /repo",
+		sessionSelectionCardAction,
+		"session-2",
+		"ou_requester",
+	} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("session card does not contain %q: %#v", want, card)
+		}
+	}
+}
+
+func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.T) {
+	handler := &fakeSessionSelectionHandler{display: "旧会话"}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_owner"},
+			Action: &callback.CallBackAction{
+				Tag:    "select_static",
+				Option: "session-1",
+				Value: map[string]interface{}{
+					"action":       sessionSelectionCardAction,
+					"bot_id":       "default",
+					"chat_id":      "oc_chat",
+					"thread_id":    "omt_thread",
+					"requester_id": "ou_requester",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "success" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success card replacement", resp)
+	}
+	if handler.selection.ACPSessionID != "session-1" || handler.selection.OperatorID != "ou_owner" {
+		t.Fatalf("selection = %+v, want selected session and operator", handler.selection)
+	}
+	if jsonContainsValue(resp.Card.Data, "select_static") {
+		t.Fatalf("completed card still contains dropdown: %#v", resp.Card.Data)
+	}
+	completedData, err := json.Marshal(resp.Card.Data)
+	if err != nil {
+		t.Fatalf("marshal completed card: %v", err)
+	}
+	if !strings.Contains(string(completedData), "已恢复 旧会话") {
+		t.Fatalf("completed card = %s, want selected session", completedData)
+	}
+}
+
 type fakeModelSelectionHandler struct {
 	selection ModelSelection
 	display   string
@@ -852,6 +1031,21 @@ func (f *fakeModeSelectionHandler) HandleFeishuMessage(context.Context, Message)
 }
 
 func (f *fakeModeSelectionHandler) HandleModeSelection(ctx context.Context, selection ModeSelection) (string, error) {
+	f.selection = selection
+	return f.display, f.err
+}
+
+type fakeSessionSelectionHandler struct {
+	selection SessionSelection
+	display   string
+	err       error
+}
+
+func (f *fakeSessionSelectionHandler) HandleFeishuMessage(context.Context, Message) (string, error) {
+	return "", nil
+}
+
+func (f *fakeSessionSelectionHandler) HandleSessionSelection(ctx context.Context, selection SessionSelection) (string, error) {
 	f.selection = selection
 	return f.display, f.err
 }
@@ -1023,6 +1217,36 @@ func jsonContainsBool(v any, key string, want bool) bool {
 	case []any:
 		for _, child := range value {
 			if jsonContainsBool(child, key, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jsonElementFieldEquals(v any, elementID string, field string, want string) bool {
+	switch value := v.(type) {
+	case cardJSON:
+		if value["element_id"] == elementID {
+			return value[field] == want
+		}
+		for _, child := range value {
+			if jsonElementFieldEquals(child, elementID, field, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		if value["element_id"] == elementID {
+			return value[field] == want
+		}
+		for _, child := range value {
+			if jsonElementFieldEquals(child, elementID, field, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if jsonElementFieldEquals(child, elementID, field, want) {
 				return true
 			}
 		}

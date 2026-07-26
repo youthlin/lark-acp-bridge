@@ -876,6 +876,7 @@ func TestHandleFeishuMessageShowCommandSurvivesNewSession(t *testing.T) {
 func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	session.Key.ThreadID = ""
 	session.HideStatusBar = true
 	session.HideUsageDetail = true
 	if err := store.Upsert(session); err != nil {
@@ -892,7 +893,6 @@ func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
-		ThreadID: session.Key.ThreadID,
 		ChatType: "group",
 		Text:     "/new",
 		Mentions: []feishu.Mention{testBotMention("智能助手")},
@@ -1844,6 +1844,59 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuTopicThreadRejectsManualNewAndSessionCommands(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{newSessionID: "acp-session-1"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	base := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_group",
+		ChatType: "group",
+		ThreadID: "omt_topic",
+		SenderID: testOwnerOpenID,
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     base.BotID,
+		ChatID:    base.ChatID,
+		ChatType:  base.ChatType,
+		ThreadID:  base.ThreadID,
+		SenderID:  base.SenderID,
+		Mentions:  base.Mentions,
+		MessageID: "om_new",
+		Text:      "@智能助手 /new " + workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic /new) error = %v", err)
+	}
+	if !strings.Contains(reply, "话题群内不支持使用 /new") {
+		t.Fatalf("reply = %q, want topic /new rejection", reply)
+	}
+	if len(rt.newCalls) != 0 {
+		t.Fatalf("newCalls = %+v, want no manual topic session creation", rt.newCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     base.BotID,
+		ChatID:    base.ChatID,
+		ChatType:  base.ChatType,
+		ThreadID:  base.ThreadID,
+		SenderID:  base.SenderID,
+		Mentions:  base.Mentions,
+		MessageID: "om_session",
+		Text:      "@智能助手 /session list",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic /session) error = %v", err)
+	}
+	if !strings.Contains(reply, "话题群内不支持使用 /session") {
+		t.Fatalf("reply = %q, want topic /session rejection", reply)
+	}
+}
+
 func TestHandleFeishuSessionListAndResume(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	firstDir := t.TempDir()
@@ -1929,6 +1982,142 @@ func TestHandleFeishuSessionListAndResume(t *testing.T) {
 	}
 	if got := rt.promptCalls[len(rt.promptCalls)-1].Session.ACPSessionID; got != "acp-session-1" {
 		t.Fatalf("prompt session = %q, want resumed acp-session-1", got)
+	}
+}
+
+func TestHandleFeishuSessionListSendsSelectionCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2", "acp-session-3"}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	base := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_private",
+		ChatType: "p2p",
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     base.BotID,
+			ChatID:    base.ChatID,
+			ChatType:  base.ChatType,
+			MessageID: fmt.Sprintf("om_new_%d", i),
+			Text:      "/new " + t.TempDir() + fmt.Sprintf(" 会话%d", i+1),
+		}); err != nil {
+			t.Fatalf("HandleFeishuMessage(/new %d) error = %v", i, err)
+		}
+	}
+
+	var got feishu.SessionSelectionCard
+	ctx := feishu.WithSessionSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.SessionSelectionCard) error {
+		got = card
+		return nil
+	})
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     base.BotID,
+		ChatID:    base.ChatID,
+		ChatType:  base.ChatType,
+		MessageID: "om_list",
+		Text:      "/session list",
+		SenderID:  testOwnerOpenID,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/session list) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want card-only response", reply)
+	}
+	if got.ChatID != base.ChatID || got.RequesterID != testOwnerOpenID {
+		t.Fatalf("card = %+v, want chat and requester", got)
+	}
+	if len(got.Options) != 3 {
+		t.Fatalf("options = %+v, want 3 sessions", got.Options)
+	}
+	if got.Options[0].ACPSessionID != "acp-session-3" || got.CurrentACPSessionID != "acp-session-3" {
+		t.Fatalf("card = %+v, want newest current first", got)
+	}
+}
+
+func TestHandleFeishuSessionListSelectionOptionsAreLimited(t *testing.T) {
+	items := make([]Session, 0, maxSessionHistoryPerChat+2)
+	for i := 0; i < maxSessionHistoryPerChat+2; i++ {
+		items = append(items, Session{
+			Title:        fmt.Sprintf("会话%d", i),
+			ACPSessionID: fmt.Sprintf("session-%d", i),
+			Cwd:          "/repo",
+		})
+	}
+	options := sessionSelectionOptions(items, maxSessionHistoryPerChat)
+	if len(options) != maxSessionHistoryPerChat {
+		t.Fatalf("len(options) = %d, want %d", len(options), maxSessionHistoryPerChat)
+	}
+	if options[0].ACPSessionID != "session-0" || options[len(options)-1].ACPSessionID != fmt.Sprintf("session-%d", maxSessionHistoryPerChat-1) {
+		t.Fatalf("options = %+v, want first %d items", options, maxSessionHistoryPerChat)
+	}
+}
+
+func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	base := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_private",
+		ChatType: "p2p",
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     base.BotID,
+		ChatID:    base.ChatID,
+		ChatType:  base.ChatType,
+		MessageID: "om_first",
+		Text:      "/new " + firstDir + " 第一个",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new first) error = %v", err)
+	}
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     base.BotID,
+		ChatID:    base.ChatID,
+		ChatType:  base.ChatType,
+		MessageID: "om_second",
+		Text:      "/new " + secondDir + " 第二个",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new second) error = %v", err)
+	}
+
+	display, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
+		BotID:        base.BotID,
+		ChatID:       base.ChatID,
+		OperatorID:   testOwnerOpenID,
+		ACPSessionID: "acp-session-1",
+	})
+	if err != nil {
+		t.Fatalf("HandleSessionSelection(owner) error = %v", err)
+	}
+	if display != "第一个" {
+		t.Fatalf("display = %q, want restored title", display)
+	}
+	session, ok := store.Get(SessionKey{BotID: base.BotID, ChatID: base.ChatID})
+	if !ok {
+		t.Fatalf("current session not found")
+	}
+	if session.ACPSessionID != "acp-session-1" || session.Cwd != firstDir {
+		t.Fatalf("session = %+v, want first session restored", session)
+	}
+	if len(rt.closedKeys) == 0 {
+		t.Fatalf("closedKeys = %+v, want runtime closed before resume", rt.closedKeys)
+	}
+
+	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
+		BotID:        base.BotID,
+		ChatID:       base.ChatID,
+		OperatorID:   "ou_other",
+		ACPSessionID: "acp-session-2",
+	}); err == nil || !strings.Contains(err.Error(), "只有 bot owner") {
+		t.Fatalf("non-owner error = %v, want owner validation", err)
 	}
 }
 
@@ -2168,8 +2357,114 @@ func TestHandleFeishuAutoSessionUsesFirstPromptAsTitle(t *testing.T) {
 	if session.Title == "" || !strings.HasPrefix(session.Title, "请帮我分析这个") {
 		t.Fatalf("session title = %q, want prompt-derived title", session.Title)
 	}
+	if session.ManualTitle {
+		t.Fatalf("auto-created prompt title should not be marked manual")
+	}
 	if len([]rune(strings.TrimSuffix(session.Title, "..."))) > maxSessionTitleRunes {
 		t.Fatalf("session title = %q, want truncated title", session.Title)
+	}
+}
+
+func TestHandleFeishuMessageRefreshesAutomaticSessionTitle(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new " + workDir,
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.Title != "session#1" || session.ManualTitle {
+		t.Fatalf("new session title = %q manual=%v, want automatic session#1", session.Title, session.ManualTitle)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_prompt_1",
+		Text:      "第一次问题",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(first prompt) error = %v", err)
+	}
+	session, ok = store.Get(key)
+	if !ok {
+		t.Fatalf("session not found after first prompt")
+	}
+	if session.Title != "第一次问题" || session.ManualTitle {
+		t.Fatalf("session title after first prompt = %q manual=%v, want automatic prompt title", session.Title, session.ManualTitle)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_prompt_2",
+		Text:      "第二次问题",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(second prompt) error = %v", err)
+	}
+	session, ok = store.Get(key)
+	if !ok {
+		t.Fatalf("session not found after second prompt")
+	}
+	if session.Title != "第二次问题" || session.ManualTitle {
+		t.Fatalf("session title after second prompt = %q manual=%v, want refreshed automatic title", session.Title, session.ManualTitle)
+	}
+}
+
+func TestHandleFeishuMessageKeepsManualSessionTitle(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new " + workDir + " 手动标题",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new title) error = %v", err)
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.Title != "手动标题" || !session.ManualTitle {
+		t.Fatalf("session title = %q manual=%v, want manual title", session.Title, session.ManualTitle)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_prompt",
+		Text:      "普通消息不应覆盖手动标题",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	session, ok = store.Get(key)
+	if !ok {
+		t.Fatalf("session not found after prompt")
+	}
+	if session.Title != "手动标题" || !session.ManualTitle {
+		t.Fatalf("session title after prompt = %q manual=%v, want manual title preserved", session.Title, session.ManualTitle)
 	}
 }
 

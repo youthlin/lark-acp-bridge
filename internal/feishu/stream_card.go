@@ -3,9 +3,11 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
@@ -21,6 +23,13 @@ const (
 	streamCardTextElementID    = "md_stream"
 )
 
+const (
+	streamCardNormalUpdateAfter       = 9*time.Minute + 30*time.Second
+	streamCardNormalUpdateMinInterval = 5 * time.Second
+)
+
+var streamCardNow = time.Now
+
 type cardJSON map[string]any
 
 func newStreamCardJSON() string {
@@ -32,26 +41,39 @@ func newStreamCardJSONWithProcessPanel(includeProcessPanel bool) string {
 }
 
 func newStreamCardJSONWithPanels(includeProcessPanel, includeStatusBar bool) string {
-	elements := []any{cardJSON{"tag": "markdown", "content": "", "element_id": streamCardTextElementID}}
+	return newStreamCardJSONFromState("", "", "执行中", "", includeProcessPanel, includeStatusBar, false, true)
+}
+
+func newStreamCardJSONFromState(text, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
+	elements := []any{cardJSON{"tag": "markdown", "content": text, "element_id": streamCardTextElementID}}
 	if includeProcessPanel {
-		elements = append(elements, streamCardProcessPanel())
+		elements = append(elements, streamCardProcessPanelWithContent(process))
 	}
 	if includeStatusBar {
-		elements = append(elements, streamCardStatusMarkdown("执行中"))
+		if strings.TrimSpace(status) == "" {
+			status = "执行中"
+		}
+		elements = append(elements, streamCardStatusMarkdown(status))
+	}
+	if includeUsagePanel {
+		elements = append(elements, streamCardUsagePanel(usage))
+	}
+	config := cardJSON{
+		"streaming_mode":   streamingMode,
+		"wide_screen_mode": true,
+		"width_mode":       "fill",
+		"summary":          cardJSON{"content": ""},
+	}
+	if streamingMode {
+		config["streaming_config"] = cardJSON{
+			"print_frequency_ms": cardJSON{"default": 70},
+			"print_step":         cardJSON{"default": 2},
+			"print_strategy":     "fast",
+		}
 	}
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
-		"config": cardJSON{
-			"streaming_mode":   true,
-			"wide_screen_mode": true,
-			"width_mode":       "fill",
-			"summary":          cardJSON{"content": ""},
-			"streaming_config": cardJSON{
-				"print_frequency_ms": cardJSON{"default": 70},
-				"print_step":         cardJSON{"default": 2},
-				"print_strategy":     "fast",
-			},
-		},
+		"config": config,
 		"body": cardJSON{
 			"elements": elements,
 		},
@@ -70,6 +92,10 @@ func newStreamCardUsagePanelJSON(content string) string {
 }
 
 func streamCardProcessPanel() cardJSON {
+	return streamCardProcessPanelWithContent("")
+}
+
+func streamCardProcessPanelWithContent(content string) cardJSON {
 	return cardJSON{
 		"tag":              "collapsible_panel",
 		"expanded":         false,
@@ -82,7 +108,7 @@ func streamCardProcessPanel() cardJSON {
 		"vertical_spacing": "4px",
 		"padding":          "8px 12px 8px 12px",
 		"elements": []any{
-			cardJSON{"tag": "markdown", "content": "", "element_id": streamCardProcessElementID},
+			cardJSON{"tag": "markdown", "content": content, "element_id": streamCardProcessElementID},
 		},
 	}
 }
@@ -93,7 +119,7 @@ func streamCardStatusMarkdown(status string) cardJSON {
 		"content":          status,
 		"element_id":       streamCardStatusElementID,
 		"text_size":        "notation",
-		"text_align":       "right",
+		"text_align":       "left",
 		"text_color":       "grey",
 		"margin":           "8px 0 0 0",
 		"vertical_spacing": "4px",
@@ -121,13 +147,21 @@ func streamCardUsagePanel(content string) cardJSON {
 type sdkStreamCard struct {
 	adapter *Adapter
 	cardID  string
+	created time.Time
 
-	mu             sync.Mutex
-	sequence       int
-	closed         bool
-	processCreated bool
-	usageCreated   bool
-	usageTargetID  string
+	mu               sync.Mutex
+	sequence         int
+	closed           bool
+	streamingClosed  bool
+	processCreated   bool
+	statusCreated    bool
+	usageCreated     bool
+	usageTargetID    string
+	lastNormalUpdate time.Time
+	text             string
+	process          string
+	status           string
+	usageDetail      string
 }
 
 func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard, error) {
@@ -155,10 +189,17 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return nil, err
 	}
+	initialStatus := ""
+	if statusBarEnabled {
+		initialStatus = "执行中"
+	}
 	return &sdkStreamCard{
 		adapter:        a,
 		cardID:         cardID,
+		created:        streamCardNow(),
 		processCreated: processPanelEnabled,
+		statusCreated:  statusBarEnabled,
+		status:         initialStatus,
 		usageTargetID:  streamCardUsageTargetID(processPanelEnabled, statusBarEnabled),
 	}, nil
 }
@@ -228,13 +269,19 @@ func (c *sdkStreamCard) UpdateProcess(ctx context.Context, text string) error {
 	if c.closed {
 		return nil
 	}
+	c.process = text
+	if c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		c.processCreated = true
+		return c.updateFullCardLocked(ctx, false)
+	}
 	if !c.processCreated {
 		if err := c.createProcessPanelLocked(ctx); err != nil {
-			return err
+			return c.handleStreamMutationErrorLocked(ctx, err)
 		}
 		c.processCreated = true
 	}
-	return c.updateElementLocked(ctx, streamCardProcessElementID, text)
+	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardProcessElementID, text))
 }
 
 func (c *sdkStreamCard) UpdateStatus(ctx context.Context, text string) error {
@@ -243,7 +290,13 @@ func (c *sdkStreamCard) UpdateStatus(ctx context.Context, text string) error {
 	if c.closed {
 		return nil
 	}
-	return c.updateElementLocked(ctx, streamCardStatusElementID, text)
+	c.status = text
+	if c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		c.statusCreated = true
+		return c.updateFullCardLocked(ctx, false)
+	}
+	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardStatusElementID, text))
 }
 
 func (c *sdkStreamCard) UpdateUsageDetail(ctx context.Context, text string) error {
@@ -252,14 +305,20 @@ func (c *sdkStreamCard) UpdateUsageDetail(ctx context.Context, text string) erro
 	if c.closed {
 		return nil
 	}
+	c.usageDetail = text
+	if c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		c.usageCreated = true
+		return c.updateFullCardLocked(ctx, false)
+	}
 	if !c.usageCreated {
 		if err := c.createUsagePanelLocked(ctx, text); err != nil {
-			return err
+			return c.handleStreamMutationErrorLocked(ctx, err)
 		}
 		c.usageCreated = true
 		return nil
 	}
-	return c.updateElementLocked(ctx, streamCardUsageDetailID, text)
+	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardUsageDetailID, text))
 }
 
 func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
@@ -268,7 +327,12 @@ func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
 	if c.closed {
 		return nil
 	}
-	return c.updateElementLocked(ctx, streamCardTextElementID, text)
+	c.text = text
+	if c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		return c.updateFullCardLocked(ctx, false)
+	}
+	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardTextElementID, text))
 }
 
 func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
@@ -333,13 +397,103 @@ func (c *sdkStreamCard) updateElementLocked(ctx context.Context, elementID strin
 	return nil
 }
 
+func (c *sdkStreamCard) shouldUseNormalUpdateLocked() bool {
+	if c.streamingClosed {
+		return true
+	}
+	if c.created.IsZero() {
+		return false
+	}
+	return !streamCardNow().Before(c.created.Add(streamCardNormalUpdateAfter))
+}
+
+func (c *sdkStreamCard) handleStreamMutationErrorLocked(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if !isStreamCardStreamingClosedError(err) {
+		return err
+	}
+	c.streamingClosed = true
+	if c.process != "" {
+		c.processCreated = true
+	}
+	if c.status != "" {
+		c.statusCreated = true
+	}
+	if c.usageDetail != "" {
+		c.usageCreated = true
+	}
+	if fallbackErr := c.updateFullCardLocked(ctx, true); fallbackErr != nil {
+		return fmt.Errorf("%w；普通卡片更新失败: %v", err, fallbackErr)
+	}
+	return nil
+}
+
+func (c *sdkStreamCard) updateFullCardLocked(ctx context.Context, force bool) error {
+	now := streamCardNow()
+	if !force && !c.lastNormalUpdate.IsZero() && now.Sub(c.lastNormalUpdate) < streamCardNormalUpdateMinInterval {
+		return nil
+	}
+	resp, err := c.adapter.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
+		CardId(c.cardID).
+		Body(larkcardkit.NewUpdateCardReqBodyBuilder().
+			Card(larkcardkit.NewCardBuilder().
+				Type("card_json").
+				Data(c.fullCardJSONLocked()).
+				Build()).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("普通更新飞书卡片: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("普通更新飞书卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	c.lastNormalUpdate = now
+	return nil
+}
+
+func (c *sdkStreamCard) fullCardJSONLocked() string {
+	includeProcess := c.processCreated || strings.TrimSpace(c.process) != ""
+	includeStatus := c.statusCreated || strings.TrimSpace(c.status) != ""
+	includeUsage := c.usageCreated || strings.TrimSpace(c.usageDetail) != ""
+	return newStreamCardJSONFromState(c.text, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false)
+}
+
+func isStreamCardStreamingClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var codeErr *larkcore.CodeError
+	if errors.As(err, &codeErr) && streamCardStreamingClosedCode(codeErr.Code) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "200850") ||
+		strings.Contains(msg, "300309") ||
+		strings.Contains(msg, "card streaming timeout") ||
+		strings.Contains(msg, "streaming mode is closed")
+}
+
+func streamCardStreamingClosedCode(code int) bool {
+	return code == 200850 || code == 300309
+}
+
 func (c *sdkStreamCard) Close(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil
 	}
-	c.closed = true
+	if c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		if err := c.updateFullCardLocked(ctx, true); err != nil {
+			return err
+		}
+		c.closed = true
+		return nil
+	}
 	c.sequence++
 	seq := c.sequence
 
@@ -352,10 +506,29 @@ func (c *sdkStreamCard) Close(ctx context.Context) error {
 			Build()).
 		Build())
 	if err != nil {
-		return fmt.Errorf("关闭飞书流式卡片: %w", err)
+		err = fmt.Errorf("关闭飞书流式卡片: %w", err)
+		if isStreamCardStreamingClosedError(err) {
+			c.streamingClosed = true
+			if fallbackErr := c.updateFullCardLocked(ctx, true); fallbackErr != nil {
+				return fmt.Errorf("%w；普通卡片更新失败: %v", err, fallbackErr)
+			}
+			c.closed = true
+			return nil
+		}
+		return err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("关闭飞书流式卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		err := fmt.Errorf("关闭飞书流式卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		if isStreamCardStreamingClosedError(err) {
+			c.streamingClosed = true
+			if fallbackErr := c.updateFullCardLocked(ctx, true); fallbackErr != nil {
+				return fmt.Errorf("%w；普通卡片更新失败: %v", err, fallbackErr)
+			}
+			c.closed = true
+			return nil
+		}
+		return err
 	}
+	c.closed = true
 	return nil
 }

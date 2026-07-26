@@ -45,6 +45,12 @@ type ModeOption struct {
 	Name  string
 }
 
+type SessionOption struct {
+	ACPSessionID string
+	Title        string
+	Cwd          string
+}
+
 type ModelSelectionCard struct {
 	BotID        string
 	ChatID       string
@@ -65,6 +71,15 @@ type ModeSelectionCard struct {
 	Options      []ModeOption
 }
 
+type SessionSelectionCard struct {
+	BotID               string
+	ChatID              string
+	ThreadID            string
+	RequesterID         string
+	CurrentACPSessionID string
+	Options             []SessionOption
+}
+
 type modelSelectionCardSender func(context.Context, Message, ModelSelectionCard) error
 
 type modelSelectionCardSenderKey struct{}
@@ -72,6 +87,10 @@ type modelSelectionCardSenderKey struct{}
 type modeSelectionCardSender func(context.Context, Message, ModeSelectionCard) error
 
 type modeSelectionCardSenderKey struct{}
+
+type sessionSelectionCardSender func(context.Context, Message, SessionSelectionCard) error
+
+type sessionSelectionCardSenderKey struct{}
 
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
@@ -187,6 +206,21 @@ func WithModeSelectionCardSender(ctx context.Context, sender func(context.Contex
 
 func SendModeSelectionCard(ctx context.Context, msg Message, card ModeSelectionCard) (bool, error) {
 	sender, ok := ctx.Value(modeSelectionCardSenderKey{}).(modeSelectionCardSender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender(ctx, msg, card)
+}
+
+func WithSessionSelectionCardSender(ctx context.Context, sender func(context.Context, Message, SessionSelectionCard) error) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionSelectionCardSenderKey{}, sessionSelectionCardSender(sender))
+}
+
+func SendSessionSelectionCard(ctx context.Context, msg Message, card SessionSelectionCard) (bool, error) {
+	sender, ok := ctx.Value(sessionSelectionCardSenderKey{}).(sessionSelectionCardSender)
 	if !ok || sender == nil {
 		return false, nil
 	}
