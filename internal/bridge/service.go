@@ -35,7 +35,8 @@ type Service struct {
 
 	taskMu          sync.Mutex
 	tasks           map[SessionKey]*runningTask
-	wikiTimers      map[SessionKey]*time.Timer
+	wikiTasks       map[runtimeKey]*runningTask
+	wikiTimers      map[SessionKey]*pendingWikiRun
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
 
@@ -56,9 +57,18 @@ const (
 
 type runningTask struct {
 	kind    taskKind
+	runtime runtimeKey
 	cancel  context.CancelFunc
 	session Session
 	agent   config.AgentConfig
+}
+
+type pendingWikiRun struct {
+	timer      *time.Timer
+	generation int64
+	session    Session
+	agent      config.AgentConfig
+	scheduled  time.Time
 }
 
 type wikiRunStatus struct {
@@ -80,7 +90,8 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		stores:          make(map[string]*SessionStore),
 		runtime:         newRuntimeManager(),
 		tasks:           make(map[SessionKey]*runningTask),
-		wikiTimers:      make(map[SessionKey]*time.Timer),
+		wikiTasks:       make(map[runtimeKey]*runningTask),
+		wikiTimers:      make(map[SessionKey]*pendingWikiRun),
 		wikiGenerations: make(map[SessionKey]int64),
 		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
 		acpUpdateUnsub:  make(map[SessionKey]func()),
@@ -193,6 +204,7 @@ func (s *Service) persistResolvedConfig(ctx context.Context) {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	slog.Info("关闭 ACP 桥接服务")
+	s.cancelAllSessionWork(ctx)
 	for _, adapter := range s.feishu {
 		if err := adapter.Shutdown(ctx); err != nil {
 			return err
@@ -1252,6 +1264,7 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		chat.WikiDisabled = true
 		if session, ok := s.findSession(msg); ok {
 			s.cancelWikiTimer(session.Key)
+			s.cancelWikiTasks(ctx, session.Key)
 		}
 		if err := store.UpsertChat(chat); err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
@@ -1469,10 +1482,14 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	}
 	key := sessionKeyFromMessage(msg)
 	s.migrateSessionShowConfigToChat(ctx, msg)
-	s.cancelSessionWork(ctx, key)
+	pendingWiki, hasPendingWiki := s.takePendingWiki(key)
+	s.cancelRunningSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
 	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
+		if hasPendingWiki {
+			s.restorePendingWiki(pendingWiki)
+		}
 		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
 	}
@@ -1489,8 +1506,14 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		Mode:              sessionInfo.Mode,
 	}
 	if err := store.Upsert(session); err != nil {
+		if hasPendingWiki {
+			s.restorePendingWiki(pendingWiki)
+		}
 		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
 		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
+	}
+	if hasPendingWiki {
+		s.runPendingWikiAsync(pendingWiki)
 	}
 	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd)
 	return session, agent, source, ""
@@ -3510,15 +3533,22 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 	var status wikiRunStatus
 	var timerSet bool
 	var task *runningTask
+	wikiTaskRunning := false
 	if hasSession {
 		status = s.wikiStatuses[session.Key]
 		_, timerSet = s.wikiTimers[session.Key]
 		task = s.tasks[session.Key]
+		for runtime := range s.wikiTasks {
+			if runtime.SessionKey == session.Key {
+				wikiTaskRunning = true
+				break
+			}
+		}
 	}
 	s.taskMu.Unlock()
 	if timerSet {
 		lines = append(lines, "状态：等待定时触发")
-	} else if status.running || (task != nil && task.kind == taskKindWiki) {
+	} else if status.running || wikiTaskRunning || (task != nil && task.kind == taskKindWiki) {
 		lines = append(lines, "状态：正在反思")
 	} else if !status.lastStarted.IsZero() {
 		state := "成功"
@@ -3559,6 +3589,7 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
 		kind:    kind,
+		runtime: currentRuntimeKey(session.Key),
 		cancel:  cancel,
 		session: session,
 		agent:   agent,
@@ -3584,11 +3615,38 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 	}
 }
 
+func (s *Service) startWikiTask(ctx context.Context, session Session, agent config.AgentConfig, runtime runtimeKey) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	task := &runningTask{
+		kind:    taskKindWiki,
+		runtime: runtime,
+		cancel:  cancel,
+		session: session,
+		agent:   agent,
+	}
+
+	s.taskMu.Lock()
+	if s.wikiTasks == nil {
+		s.wikiTasks = make(map[runtimeKey]*runningTask)
+	}
+	s.wikiTasks[runtime] = task
+	s.taskMu.Unlock()
+
+	return ctx, func() {
+		s.taskMu.Lock()
+		if s.wikiTasks[runtime] == task {
+			delete(s.wikiTasks, runtime)
+		}
+		s.taskMu.Unlock()
+		cancel()
+	}
+}
+
 func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
 	if task == nil || strings.TrimSpace(task.session.ACPSessionID) == "" {
 		return
 	}
-	if err := s.runtime.CancelSession(ctx, task.session, task.agent); err != nil {
+	if err := s.runtime.CancelSession(ctx, task.runtime, task.session, task.agent); err != nil {
 		slog.WarnContext(ctx, "取消 ACP session 失败", "session", task.session.ACPSessionID, "kind", task.kind, "错误", err)
 	}
 }
@@ -3607,6 +3665,53 @@ func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) 
 func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {
 	s.cancelWikiTimer(key)
 	s.cancelRunningSessionWork(ctx, key)
+	s.cancelWikiTasks(ctx, key)
+}
+
+func (s *Service) cancelAllSessionWork(ctx context.Context) {
+	s.taskMu.Lock()
+	timerKeys := make([]SessionKey, 0, len(s.wikiTimers))
+	for key := range s.wikiTimers {
+		timerKeys = append(timerKeys, key)
+	}
+	taskKeys := make([]SessionKey, 0, len(s.tasks))
+	for key := range s.tasks {
+		taskKeys = append(taskKeys, key)
+	}
+	wikiTaskKeys := make([]SessionKey, 0, len(s.wikiTasks))
+	seenWikiTaskKeys := make(map[SessionKey]bool, len(s.wikiTasks))
+	for runtime := range s.wikiTasks {
+		if !seenWikiTaskKeys[runtime.SessionKey] {
+			seenWikiTaskKeys[runtime.SessionKey] = true
+			wikiTaskKeys = append(wikiTaskKeys, runtime.SessionKey)
+		}
+	}
+	s.taskMu.Unlock()
+	for _, key := range timerKeys {
+		s.cancelWikiTimer(key)
+	}
+	for _, key := range taskKeys {
+		s.cancelRunningSessionWork(ctx, key)
+	}
+	for _, key := range wikiTaskKeys {
+		s.cancelWikiTasks(ctx, key)
+	}
+}
+
+func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
+	s.taskMu.Lock()
+	tasks := make([]*runningTask, 0)
+	for runtime, task := range s.wikiTasks {
+		if runtime.SessionKey == key {
+			tasks = append(tasks, task)
+			delete(s.wikiTasks, runtime)
+		}
+	}
+	s.taskMu.Unlock()
+	for _, task := range tasks {
+		task.cancel()
+		go s.cancelRuntimeTask(ctx, task)
+	}
 }
 
 func (s *Service) cancelWikiTimer(key SessionKey) {
@@ -3615,11 +3720,11 @@ func (s *Service) cancelWikiTimer(key SessionKey) {
 		s.wikiGenerations = make(map[SessionKey]int64)
 	}
 	s.wikiGenerations[key]++
-	timer := s.wikiTimers[key]
+	pending := s.wikiTimers[key]
 	delete(s.wikiTimers, key)
 	s.taskMu.Unlock()
-	if timer != nil {
-		timer.Stop()
+	if pending != nil && pending.timer != nil {
+		pending.timer.Stop()
 	}
 }
 
@@ -3627,6 +3732,54 @@ func (s *Service) hasWikiTimer(key SessionKey) bool {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	return s.wikiTimers[key] != nil
+}
+
+func (s *Service) takePendingWiki(key SessionKey) (pendingWikiRun, bool) {
+	s.taskMu.Lock()
+	if s.wikiGenerations == nil {
+		s.wikiGenerations = make(map[SessionKey]int64)
+	}
+	s.wikiGenerations[key]++
+	pending := s.wikiTimers[key]
+	delete(s.wikiTimers, key)
+	s.taskMu.Unlock()
+	if pending == nil {
+		return pendingWikiRun{}, false
+	}
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	return *pending, true
+}
+
+func (s *Service) restorePendingWiki(pending pendingWikiRun) {
+	if strings.TrimSpace(pending.session.ACPSessionID) == "" {
+		return
+	}
+	interval := wikiInterval(s.wikiConfigForSession(pending.session))
+	if interval <= 0 {
+		interval = defaultWikiInterval
+	}
+	delay := time.Until(pending.scheduled.Add(interval))
+	if delay <= 0 {
+		delay = time.Millisecond
+	}
+	key := pending.session.Key
+	s.taskMu.Lock()
+	if s.wikiGenerations == nil {
+		s.wikiGenerations = make(map[SessionKey]int64)
+	}
+	s.wikiGenerations[key]++
+	generation := s.wikiGenerations[key]
+	if old := s.wikiTimers[key]; old != nil {
+		old.timer.Stop()
+	}
+	pending.generation = generation
+	pending.timer = time.AfterFunc(delay, func() {
+		s.runWikiTimer(key, generation, pending.session, pending.agent)
+	})
+	s.wikiTimers[key] = &pending
+	s.taskMu.Unlock()
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
@@ -3647,12 +3800,18 @@ func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.Agen
 	s.wikiGenerations[key]++
 	generation := s.wikiGenerations[key]
 	if old := s.wikiTimers[key]; old != nil {
-		old.Stop()
+		old.timer.Stop()
 	}
 	timer := time.AfterFunc(interval, func() {
 		s.runWikiTimer(key, generation, session, agent)
 	})
-	s.wikiTimers[key] = timer
+	s.wikiTimers[key] = &pendingWikiRun{
+		timer:      timer,
+		generation: generation,
+		session:    session,
+		agent:      agent,
+		scheduled:  time.Now(),
+	}
 	s.taskMu.Unlock()
 }
 
@@ -3683,6 +3842,39 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		s.scheduleWikiAfterUserPrompt(session, agent)
 		return
 	}
+	s.taskMu.Unlock()
+
+	ctx, finish := s.startTask(context.Background(), session, agent, taskKindWiki)
+	s.markWikiStarted(key)
+	_, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
+	finish()
+	s.markWikiFinished(key, session, err)
+}
+
+func (s *Service) runPendingWikiAsync(pending pendingWikiRun) {
+	if strings.TrimSpace(pending.session.ACPSessionID) == "" {
+		return
+	}
+	go s.runPendingWikiWithRuntimeKey(pending)
+}
+
+func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
+	key := pending.session.Key
+	runtime := wikiRuntimeKey(key, pending.generation, pending.session.ACPSessionID)
+	ctx, finish := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
+	defer func() {
+		finish()
+		if err := s.runtime.CloseRuntimeKey(runtime); err != nil {
+			slog.Warn("关闭 wiki ACP runtime 失败", "session", pending.session.ACPSessionID, "错误", err)
+		}
+	}()
+	s.markWikiStarted(key)
+	_, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), acp.PromptOptions{})
+	s.markWikiFinished(key, pending.session, err)
+}
+
+func (s *Service) markWikiStarted(key SessionKey) {
+	s.taskMu.Lock()
 	status := s.wikiStatuses[key]
 	status.running = true
 	status.lastStarted = time.Now()
@@ -3691,13 +3883,11 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 	status.lastSuccess = false
 	s.wikiStatuses[key] = status
 	s.taskMu.Unlock()
+}
 
-	ctx, finish := s.startTask(context.Background(), session, agent, taskKindWiki)
-	_, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
-	finish()
-
+func (s *Service) markWikiFinished(key SessionKey, session Session, err error) {
 	s.taskMu.Lock()
-	status = s.wikiStatuses[key]
+	status := s.wikiStatuses[key]
 	status.running = false
 	status.lastEnded = time.Now()
 	if err != nil && !errors.Is(err, context.Canceled) {

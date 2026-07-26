@@ -4522,6 +4522,245 @@ func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 	}
 }
 
+func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{
+		newSessionID:     "acp-session-new",
+		promptReply:      "NoReply",
+		blockWikiRuntime: make(chan struct{}),
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	oldSession := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-old",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(oldSession); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(oldSession, agent)
+	t.Cleanup(func() {
+		svc.cancelWikiTimer(key)
+		close(rt.blockWikiRuntime)
+	})
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	if !strings.Contains(reply, "session：acp-session-new") {
+		t.Fatalf("reply = %q, want new session reply without waiting for wiki runtime", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.wikiRuntimeCallCount() == 1 })
+	rt.mu.Lock()
+	if len(rt.wikiRuntimeCalls) != 1 {
+		t.Fatalf("wikiRuntimeCalls = %+v, want one old wiki reflection", rt.wikiRuntimeCalls)
+	}
+	wikiCall := rt.wikiRuntimeCalls[0]
+	rt.mu.Unlock()
+	if wikiCall.Session.ACPSessionID != "acp-session-old" {
+		t.Fatalf("wiki runtime session = %q, want old acp session", wikiCall.Session.ACPSessionID)
+	}
+	if wikiCall.Runtime.Scope != runtimeScopeWiki {
+		t.Fatalf("wiki runtime scope = %q, want wiki", wikiCall.Runtime.Scope)
+	}
+	if wikiCall.Runtime.SessionKey != key {
+		t.Fatalf("wiki runtime session key = %+v, want %+v", wikiCall.Runtime.SessionKey, key)
+	}
+	if !strings.Contains(wikiCall.Text, "请对刚才的对话进行反思") {
+		t.Fatalf("wiki runtime prompt = %q, want wiki reflection prompt", wikiCall.Text)
+	}
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no normal prompt for wiki runtime", got)
+	}
+	svc.taskMu.Lock()
+	_, hasTimer := svc.wikiTimers[key]
+	status := svc.wikiStatuses[key]
+	svc.taskMu.Unlock()
+	if hasTimer {
+		t.Fatal("pending wiki timer should be consumed by /new")
+	}
+	if !status.running {
+		t.Fatalf("wiki status = %+v, want wiki runtime reflection running while blocked", status)
+	}
+}
+
+func TestNewSessionRuntimeFailureRestoresPendingWiki(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{
+		newSessionError: errors.New("boom"),
+		promptReply:     "NoReply",
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	oldSession := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-old",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(oldSession); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(oldSession, agent)
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	if !strings.Contains(reply, "创建 ACP session 失败") {
+		t.Fatalf("reply = %q, want new session error", reply)
+	}
+	svc.taskMu.Lock()
+	_, hasTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !hasTimer {
+		t.Fatal("failed /new should restore pending wiki timer")
+	}
+	if got := rt.wikiRuntimeCallCount(); got != 0 {
+		t.Fatalf("wiki runtime calls = %d, want none when /new fails", got)
+	}
+}
+
+func TestNewSessionInvalidRequestKeepsPendingWiki(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = ""
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-new", promptReply: "NoReply"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	oldSession := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-old",
+		Cwd:             t.TempDir(),
+		WikiIntervalSec: 60,
+	}
+	svc.scheduleWikiAfterUserPrompt(oldSession, agent)
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new invalid) error = %v", err)
+	}
+	if !strings.Contains(reply, "默认 agent 未配置 default_cwd") {
+		t.Fatalf("reply = %q, want missing cwd warning", reply)
+	}
+	svc.taskMu.Lock()
+	_, hasTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !hasTimer {
+		t.Fatal("invalid /new should keep pending wiki timer")
+	}
+	if got := rt.wikiRuntimeCallCount(); got != 0 {
+		t.Fatalf("wiki runtime calls = %d, want none for invalid /new", got)
+	}
+}
+
+func TestWikiOffCancelsRunningWikiRuntimeReflection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{
+		newSessionID:     "acp-session-new",
+		promptReply:      "NoReply",
+		blockWikiRuntime: make(chan struct{}),
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	oldSession := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-old",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(oldSession); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(oldSession, agent)
+	t.Cleanup(func() {
+		svc.cancelSessionWork(context.Background(), key)
+		close(rt.blockWikiRuntime)
+	})
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.wikiRuntimeCallCount() == 1 })
+	rt.mu.Lock()
+	wikiKey := rt.wikiRuntimeCalls[0].Runtime
+	rt.mu.Unlock()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/wiki off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭当前聊天的自动知识沉淀") {
+		t.Fatalf("reply = %q, want wiki disabled", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() == 1 })
+	rt.mu.Lock()
+	cancelCall := rt.cancelCalls[0]
+	closedKeys := append([]runtimeKey(nil), rt.closedRuntimeKeys...)
+	rt.mu.Unlock()
+	if cancelCall.Runtime != wikiKey {
+		t.Fatalf("cancel runtime = %+v, want %+v", cancelCall.Runtime, wikiKey)
+	}
+	if len(closedKeys) == 0 || closedKeys[0] != wikiKey {
+		t.Fatalf("closed runtime keys = %+v, want first %+v", closedKeys, wikiKey)
+	}
+}
+
 func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
@@ -5228,6 +5467,7 @@ type fakeRuntime struct {
 	newSessionID      string
 	newSessionIDs     []string
 	newSessionInfo    acp.SessionInfo
+	newSessionError   error
 	noDefaultState    bool
 	afterNewSession   func(key SessionKey, sessionID string)
 	promptReply       string
@@ -5243,9 +5483,12 @@ type fakeRuntime struct {
 	configCalls       []fakeConfigCall
 	newCalls          []fakeNewCall
 	promptCalls       []fakePromptCall
+	wikiRuntimeCalls  []fakePromptCall
 	cancelCalls       []fakeCancelCall
+	closedRuntimeKeys []runtimeKey
 	closedKeys        []SessionKey
 	updateHandlers    map[SessionKey][]acp.UpdateHandler
+	blockWikiRuntime  chan struct{}
 }
 
 type fakeNewCall struct {
@@ -5256,11 +5499,13 @@ type fakeNewCall struct {
 }
 
 type fakePromptCall struct {
+	Runtime runtimeKey
 	Session Session
 	Text    string
 }
 
 type fakeCancelCall struct {
+	Runtime runtimeKey
 	Session Session
 	Attrs   map[string]string
 }
@@ -5274,6 +5519,11 @@ type fakeConfigCall struct {
 func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
 	f.mu.Lock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
+	if f.newSessionError != nil {
+		err := f.newSessionError
+		f.mu.Unlock()
+		return acp.SessionInfo{}, err
+	}
 	info := f.newSessionInfo
 	afterNewSession := f.afterNewSession
 	if len(f.newSessionIDs) > 0 {
@@ -5298,13 +5548,27 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 }
 
 func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
+	return f.prompt(ctx, currentRuntimeKey(session.Key), session, text, opts, false)
+}
+
+func (f *fakeRuntime) PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
+	return f.prompt(ctx, key, session, text, opts, key.Scope == runtimeScopeWiki)
+}
+
+func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Session, text string, opts acp.PromptOptions, wiki bool) (acp.PromptResult, error) {
 	f.mu.Lock()
-	f.promptCalls = append(f.promptCalls, fakePromptCall{Session: session, Text: text})
+	call := fakePromptCall{Runtime: key, Session: session, Text: text}
+	if wiki {
+		f.wikiRuntimeCalls = append(f.wikiRuntimeCalls, call)
+	} else {
+		f.promptCalls = append(f.promptCalls, call)
+	}
 	callNumber := len(f.promptCalls)
 	updates := append([]acp.PromptUpdate(nil), f.promptUpdates...)
 	afterUpdates := f.afterUpdates
 	blockPrompt := f.blockPrompt
 	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
+	blockWikiRuntime := f.blockWikiRuntime
 	result := f.promptResult
 	if result.Text == "" {
 		result.Text = f.promptReply
@@ -5329,6 +5593,13 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 		f.permissionOutcome = outcome
 		f.mu.Unlock()
 	}
+	if wiki && blockWikiRuntime != nil {
+		select {
+		case <-ctx.Done():
+			return acp.PromptResult{}, ctx.Err()
+		case <-blockWikiRuntime:
+		}
+	}
 	if blockThisPrompt {
 		select {
 		case <-ctx.Done():
@@ -5342,10 +5613,10 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 	return result, nil
 }
 
-func (f *fakeRuntime) CancelSession(ctx context.Context, session Session, agent config.AgentConfig) error {
+func (f *fakeRuntime) CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Session: session, Attrs: slogAttrsMap(logging.CtxAttrs(ctx))})
+	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Runtime: key, Session: session, Attrs: slogAttrsMap(logging.CtxAttrs(ctx))})
 	return nil
 }
 
@@ -5389,6 +5660,13 @@ func (f *fakeRuntime) dispatchUpdate(key SessionKey, sessionID string, update ac
 	}
 }
 
+func (f *fakeRuntime) CloseRuntimeKey(key runtimeKey) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closedRuntimeKeys = append(f.closedRuntimeKeys, key)
+	return nil
+}
+
 func (f *fakeRuntime) CloseSession(key SessionKey) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -5404,6 +5682,12 @@ func (f *fakeRuntime) promptCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.promptCalls)
+}
+
+func (f *fakeRuntime) wikiRuntimeCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.wikiRuntimeCalls)
 }
 
 func (f *fakeRuntime) cancelCallCount() int {

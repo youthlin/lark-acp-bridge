@@ -122,7 +122,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 
 每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
 
-自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不创建飞书卡片，也不把 agent 输出转发给用户；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新消息进入，会取消旧定时器并在新消息完成后重新计时。
+自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不创建飞书卡片，也不把 agent 输出转发给用户；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新普通消息进入，会取消旧定时器并在新消息完成后重新计时；如果用户发送 `/new` 重开会话，bridge 会取出尚未触发的上一轮 wiki 反思并用独立 wiki runtime key 在后台执行，不阻塞新会话创建和后续消息处理。这个后台 wiki 轮次属于上一轮会话收尾，不会被新会话里的后续普通消息取消；它仍纳入 service/runtime 生命周期，可随 `/wiki off`、会话关闭或服务退出取消并关闭对应 ACP client。
 
 bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名作为 L0 记忆入口。
 
@@ -215,9 +215,9 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/show step|thought|tool on|off`：设置当前会话流式卡片的过程区域展示项。默认三项都开启；`step` 控制 `💬` 过程消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出。三项都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
 - `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
 - `/restart`：仅 bot owner 可用。旧进程会先回复“准备重启”并写入 `$BOT_WORKSPACE/restart_ack.json`，然后执行 `restart_command`；内置后台 daemon 子进程也可在未配置 `restart_command` 时使用内置后台 restart。新进程启动后会向原消息回复“已重启”并删除回执文件。
-- `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。
+- `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问的绝对目录，也可以使用 `~/path`；不传时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。如果旧会话有尚未触发的 wiki 反思轮次，`/new` 会将其放到独立 wiki runtime key 后台执行，不等待反思完成；该后台反思不会被新会话后续普通消息取消。如果新 ACP session 创建或持久化失败，原 pending wiki 定时器会恢复。
 - 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用默认 `default_cwd` 创建，会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
 - 权限卡片：权限选项来自 ACP agent，正文完整展示选项内容，按钮使用短编号文本避免截断。只有 bot owner 可以点击权限卡片；owner 优先来自 `bots[].owner_open_ids`，未配置时启动阶段会尝试从飞书应用所有者、创建者和管理员/开发者协作者自动解析。未解析到 owner 时，无论群聊还是私聊，权限卡片都不能被任何人批准。请求被取消时，bridge 会把卡片更新为已取消/已失效状态并移除按钮。
 
-同一会话里新消息优先级最高。用户重新发送要求、查看状态或重新 `/new` 时，bridge 会取消当前会话正在执行的上一轮 ACP prompt 或 wiki 反思任务，再处理新消息。取消是按 ACP session scope 隔离的，不会影响其他群聊、私聊或其他话题。
+同一会话里新消息优先级最高。用户重新发送普通消息时，bridge 会取消当前会话正在执行的上一轮 ACP prompt 或当前会话 wiki 反思任务，再处理新消息。用户发送 `/new` 时会取消正在执行的上一轮用户 prompt；如果只是存在尚未触发的旧会话 wiki 反思定时器，则把该轮反思移到后台独立 wiki runtime key 执行，避免阻塞新会话。这个旧会话后台 wiki 是 `/new` 的收尾目标，不会被新会话里的后续普通消息取消；取消边界仍按 runtime scope 隔离，不会影响其他群聊、私聊或其他话题。
 
