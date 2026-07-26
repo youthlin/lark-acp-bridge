@@ -41,7 +41,7 @@ func (a *Adapter) SendModelSelectionCard(ctx context.Context, msg Message, card 
 	if cardResp.Data == nil || cardResp.Data.CardId == nil || strings.TrimSpace(*cardResp.Data.CardId) == "" {
 		return fmt.Errorf("创建飞书模型选择卡片未返回 card_id")
 	}
-	if err := a.sendInteractiveCard(ctx, msg, *cardResp.Data.CardId); err != nil {
+	if _, err := a.sendInteractiveCard(ctx, msg, *cardResp.Data.CardId); err != nil {
 		return fmt.Errorf("发送飞书模型选择卡片: %w", err)
 	}
 	return nil

@@ -33,3 +33,58 @@ func TestCtxHandlerAddsContextAttrsToJSONLog(t *testing.T) {
 		}
 	}
 }
+
+func TestLevelFromEnv(t *testing.T) {
+	t.Setenv(LevelEnv, "debug")
+	if got := LevelFromEnv(); got.Level() != slog.LevelDebug {
+		t.Fatalf("LevelFromEnv(debug) = %v, want debug", got.Level())
+	}
+
+	t.Setenv(LevelEnv, "error")
+	if got := LevelFromEnv(); got.Level() != slog.LevelError {
+		t.Fatalf("LevelFromEnv(error) = %v, want error", got.Level())
+	}
+
+	t.Setenv(LevelEnv, "")
+	if got := LevelFromEnv(); got.Level() != slog.LevelInfo {
+		t.Fatalf("LevelFromEnv(empty) = %v, want info", got.Level())
+	}
+}
+
+func TestSetDebug(t *testing.T) {
+	orig := ProgramLevel().Level()
+	t.Cleanup(func() {
+		ProgramLevel().Set(orig)
+	})
+
+	SetDebug(true)
+	if !DebugEnabled() {
+		t.Fatal("DebugEnabled() = false, want true after SetDebug(true)")
+	}
+	if got := ProgramLevel().Level(); got != slog.LevelDebug {
+		t.Fatalf("ProgramLevel() = %v, want debug", got)
+	}
+
+	SetDebug(false)
+	if DebugEnabled() {
+		t.Fatal("DebugEnabled() = true, want false after SetDebug(false)")
+	}
+	if got := ProgramLevel().Level(); got != slog.LevelInfo {
+		t.Fatalf("ProgramLevel() = %v, want info", got)
+	}
+}
+
+func TestSetDebugOffRestoresEnvLevel(t *testing.T) {
+	orig := ProgramLevel().Level()
+	t.Cleanup(func() {
+		ProgramLevel().Set(orig)
+	})
+	t.Setenv(LevelEnv, "warn")
+
+	SetDebug(true)
+	SetDebug(false)
+
+	if got := ProgramLevel().Level(); got != slog.LevelWarn {
+		t.Fatalf("ProgramLevel() = %v, want warn", got)
+	}
+}

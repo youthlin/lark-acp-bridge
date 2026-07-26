@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ const (
 const (
 	streamCardNormalUpdateAfter       = 9*time.Minute + 30*time.Second
 	streamCardNormalUpdateMinInterval = 5 * time.Second
+	streamCardEmptyContent            = "\u200b"
 )
 
 var streamCardNow = time.Now
@@ -186,7 +188,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 		return nil, fmt.Errorf("创建飞书流式卡片未返回 card_id")
 	}
 	cardID := *cardResp.Data.CardId
-	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
+	if _, err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return nil, err
 	}
 	initialStatus := ""
@@ -214,17 +216,17 @@ func streamCardUsageTargetID(processPanelEnabled, statusBarEnabled bool) string 
 	return streamCardTextElementID
 }
 
-func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID string) error {
+func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID string) (SentMessage, error) {
 	content, err := json.Marshal(map[string]any{
 		"type": "card",
 		"data": map[string]string{"card_id": cardID},
 	})
 	if err != nil {
-		return fmt.Errorf("编码飞书卡片消息内容: %w", err)
+		return SentMessage{}, fmt.Errorf("编码飞书卡片消息内容: %w", err)
 	}
 	if msg.IsPrivateChat() && strings.TrimSpace(msg.MessageID) == "" {
 		if msg.ChatID == "" {
-			return fmt.Errorf("飞书 chat_id 为空")
+			return SentMessage{}, fmt.Errorf("飞书 chat_id 为空")
 		}
 		resp, err := a.client.Im.V1.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
@@ -235,15 +237,15 @@ func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID s
 				Build()).
 			Build())
 		if err != nil {
-			return fmt.Errorf("发送飞书流式卡片消息: %w", err)
+			return SentMessage{}, fmt.Errorf("发送飞书流式卡片消息: %w", err)
 		}
 		if !resp.Success() {
-			return fmt.Errorf("发送飞书流式卡片消息返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+			return SentMessage{}, fmt.Errorf("发送飞书流式卡片消息返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 		}
-		return nil
+		return sentMessageFromCreateResp(resp, msg.ChatID, msg.ChatType), nil
 	}
 	if msg.MessageID == "" {
-		return fmt.Errorf("飞书 message_id 为空")
+		return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
 	}
 	replyInThread := replyInThreadForMessage(msg)
 	resp, err := a.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
@@ -255,12 +257,12 @@ func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID s
 		}).
 		Build())
 	if err != nil {
-		return fmt.Errorf("回复飞书流式卡片消息: %w", err)
+		return SentMessage{}, fmt.Errorf("回复飞书流式卡片消息: %w", err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("回复飞书流式卡片消息返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		return SentMessage{}, fmt.Errorf("回复飞书流式卡片消息返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
-	return nil
+	return sentMessageFromReplyResp(resp, msg), nil
 }
 
 func (c *sdkStreamCard) UpdateProcess(ctx context.Context, text string) error {
@@ -336,14 +338,14 @@ func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
 }
 
 func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
-	c.sequence++
-	seq := c.sequence
+	seq := c.nextSequenceLocked()
+	elements := newStreamCardProcessPanelJSON()
 	resp, err := c.adapter.client.Cardkit.V1.CardElement.Create(ctx, larkcardkit.NewCreateCardElementReqBuilder().
 		CardId(c.cardID).
 		Body(larkcardkit.NewCreateCardElementReqBodyBuilder().
 			Type(larkcardkit.TypeInsertAfter).
 			TargetElementId(streamCardTextElementID).
-			Elements(newStreamCardProcessPanelJSON()).
+			Elements(elements).
 			Sequence(seq).
 			Build()).
 		Build())
@@ -351,20 +353,25 @@ func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
 		return fmt.Errorf("创建飞书流式卡片过程组件: %w", err)
 	}
 	if !resp.Success() {
+		logCardKitFailure(ctx, "CardElement.Create", c.cardID, streamCardProcessPanelID, seq, cardJSON{
+			"type":              larkcardkit.TypeInsertAfter,
+			"target_element_id": streamCardTextElementID,
+			"elements":          elements,
+		}, resp.ApiResp, resp.Code, resp.Msg)
 		return fmt.Errorf("创建飞书流式卡片过程组件返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
 
 func (c *sdkStreamCard) createUsagePanelLocked(ctx context.Context, text string) error {
-	c.sequence++
-	seq := c.sequence
+	seq := c.nextSequenceLocked()
+	elements := newStreamCardUsagePanelJSON(text)
 	resp, err := c.adapter.client.Cardkit.V1.CardElement.Create(ctx, larkcardkit.NewCreateCardElementReqBuilder().
 		CardId(c.cardID).
 		Body(larkcardkit.NewCreateCardElementReqBodyBuilder().
 			Type(larkcardkit.TypeInsertAfter).
 			TargetElementId(c.usageTargetID).
-			Elements(newStreamCardUsagePanelJSON(text)).
+			Elements(elements).
 			Sequence(seq).
 			Build()).
 		Build())
@@ -372,19 +379,24 @@ func (c *sdkStreamCard) createUsagePanelLocked(ctx context.Context, text string)
 		return fmt.Errorf("创建飞书流式卡片用量明细组件: %w", err)
 	}
 	if !resp.Success() {
+		logCardKitFailure(ctx, "CardElement.Create", c.cardID, streamCardUsagePanelID, seq, cardJSON{
+			"type":              larkcardkit.TypeInsertAfter,
+			"target_element_id": c.usageTargetID,
+			"elements":          elements,
+		}, resp.ApiResp, resp.Code, resp.Msg)
 		return fmt.Errorf("创建飞书流式卡片用量明细组件返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
 
 func (c *sdkStreamCard) updateElementLocked(ctx context.Context, elementID string, text string) error {
-	c.sequence++
-	seq := c.sequence
+	seq := c.nextSequenceLocked()
+	content := streamCardUpdateContent(text)
 	resp, err := c.adapter.client.Cardkit.V1.CardElement.Content(ctx, larkcardkit.NewContentCardElementReqBuilder().
 		CardId(c.cardID).
 		ElementId(elementID).
 		Body(larkcardkit.NewContentCardElementReqBodyBuilder().
-			Content(text).
+			Content(content).
 			Sequence(seq).
 			Build()).
 		Build())
@@ -392,6 +404,9 @@ func (c *sdkStreamCard) updateElementLocked(ctx context.Context, elementID strin
 		return fmt.Errorf("更新飞书流式卡片组件: %w", err)
 	}
 	if !resp.Success() {
+		logCardKitFailure(ctx, "CardElement.Content", c.cardID, elementID, seq, cardJSON{
+			"content": content,
+		}, resp.ApiResp, resp.Code, resp.Msg)
 		return fmt.Errorf("更新飞书流式卡片组件返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
@@ -435,19 +450,25 @@ func (c *sdkStreamCard) updateFullCardLocked(ctx context.Context, force bool) er
 	if !force && !c.lastNormalUpdate.IsZero() && now.Sub(c.lastNormalUpdate) < streamCardNormalUpdateMinInterval {
 		return nil
 	}
+	seq := c.nextSequenceLocked()
+	data := c.fullCardJSONLocked()
 	resp, err := c.adapter.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
 		CardId(c.cardID).
 		Body(larkcardkit.NewUpdateCardReqBodyBuilder().
 			Card(larkcardkit.NewCardBuilder().
 				Type("card_json").
-				Data(c.fullCardJSONLocked()).
+				Data(data).
 				Build()).
+			Sequence(seq).
 			Build()).
 		Build())
 	if err != nil {
 		return fmt.Errorf("普通更新飞书卡片: %w", err)
 	}
 	if !resp.Success() {
+		logCardKitFailure(ctx, "Card.Update", c.cardID, "", seq, cardJSON{
+			"card": cardJSON{"type": "card_json", "data": data},
+		}, resp.ApiResp, resp.Code, resp.Msg)
 		return fmt.Errorf("普通更新飞书卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	c.lastNormalUpdate = now
@@ -459,6 +480,60 @@ func (c *sdkStreamCard) fullCardJSONLocked() string {
 	includeStatus := c.statusCreated || strings.TrimSpace(c.status) != ""
 	includeUsage := c.usageCreated || strings.TrimSpace(c.usageDetail) != ""
 	return newStreamCardJSONFromState(c.text, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false)
+}
+
+func (c *sdkStreamCard) nextSequenceLocked() int {
+	c.sequence++
+	return c.sequence
+}
+
+func streamCardUpdateContent(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return streamCardEmptyContent
+	}
+	return text
+}
+
+func logCardKitFailure(ctx context.Context, operation string, cardID string, elementID string, sequence int, request any, resp *larkcore.ApiResp, code int, msg string) {
+	attrs := []any{
+		"operation", operation,
+		"card_id", cardID,
+		"element_id", elementID,
+		"sequence", sequence,
+		"code", code,
+		"msg", msg,
+		"request", truncateCardKitLogValue(request),
+	}
+	if resp != nil {
+		attrs = append(attrs,
+			"request_id", resp.RequestId(),
+			"status_code", resp.StatusCode,
+			"response_body", truncateCardKitLogValue(string(resp.RawBody)),
+		)
+	}
+	slog.WarnContext(ctx, "飞书 CardKit 操作失败详情", attrs...)
+}
+
+func truncateCardKitLogValue(v any) string {
+	var text string
+	switch value := v.(type) {
+	case string:
+		text = value
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			text = fmt.Sprint(value)
+		} else {
+			text = string(data)
+		}
+	}
+	text = strings.TrimSpace(text)
+	const max = 2000
+	if len([]rune(text)) <= max {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:max]) + "...<truncated>"
 }
 
 func isStreamCardStreamingClosedError(err error) bool {
@@ -494,8 +569,7 @@ func (c *sdkStreamCard) Close(ctx context.Context) error {
 		c.closed = true
 		return nil
 	}
-	c.sequence++
-	seq := c.sequence
+	seq := c.nextSequenceLocked()
 
 	settings, _ := json.Marshal(cardJSON{"config": cardJSON{"streaming_mode": false}})
 	resp, err := c.adapter.client.Cardkit.V1.Card.Settings(ctx, larkcardkit.NewSettingsCardReqBuilder().
@@ -519,6 +593,9 @@ func (c *sdkStreamCard) Close(ctx context.Context) error {
 	}
 	if !resp.Success() {
 		err := fmt.Errorf("关闭飞书流式卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		logCardKitFailure(ctx, "Card.Settings", c.cardID, "", seq, cardJSON{
+			"settings": string(settings),
+		}, resp.ApiResp, resp.Code, resp.Msg)
 		if isStreamCardStreamingClosedError(err) {
 			c.streamingClosed = true
 			if fallbackErr := c.updateFullCardLocked(ctx, true); fallbackErr != nil {

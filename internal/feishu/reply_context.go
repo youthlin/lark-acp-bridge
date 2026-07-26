@@ -18,6 +18,33 @@ type messageUpdater func(context.Context, string, string) error
 
 type messageUpdaterKey struct{}
 
+// LoopStatusCard 表示 /loop 启动后用于展示整体状态的卡片。
+type LoopStatusCard interface {
+	Message() SentMessage
+	Update(context.Context, string) error
+	Finish(context.Context, string) error
+}
+
+type LoopStatusCardRequest struct {
+	BotID        string
+	ChatID       string
+	ThreadID     string
+	ACPSessionID string
+	Text         string
+}
+
+type LoopCancel struct {
+	BotID        string
+	ChatID       string
+	ThreadID     string
+	ACPSessionID string
+	OperatorID   string
+}
+
+type loopStatusCardSender func(context.Context, Message, LoopStatusCardRequest) (LoopStatusCard, error)
+
+type loopStatusCardSenderKey struct{}
+
 // StreamCard 表示一张可流式更新的飞书卡片。
 type StreamCard interface {
 	UpdateProcess(context.Context, string) error
@@ -144,6 +171,22 @@ func UpdateMessageText(ctx context.Context, messageID string, text string) (bool
 		return false, nil
 	}
 	return true, updater(ctx, messageID, text)
+}
+
+func WithLoopStatusCardSender(ctx context.Context, sender func(context.Context, Message, LoopStatusCardRequest) (LoopStatusCard, error)) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, loopStatusCardSenderKey{}, loopStatusCardSender(sender))
+}
+
+func SendLoopStatusCard(ctx context.Context, msg Message, request LoopStatusCardRequest) (LoopStatusCard, bool, error) {
+	sender, ok := ctx.Value(loopStatusCardSenderKey{}).(loopStatusCardSender)
+	if !ok || sender == nil {
+		return nil, false, nil
+	}
+	card, err := sender(ctx, msg, request)
+	return card, true, err
 }
 
 func WithStreamCardStarter(ctx context.Context, starter func(context.Context, Message) (StreamCard, error)) context.Context {

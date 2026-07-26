@@ -208,6 +208,109 @@ func TestNewStreamCardJSONFromStateRendersNormalFinalSnapshot(t *testing.T) {
 	}
 }
 
+func TestNewLoopStatusCardJSONUsesUpdatableNonStreamingElement(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newLoopStatusCardJSON(LoopStatusCardRequest{
+		BotID:        "default",
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_thread",
+		ACPSessionID: "session-1",
+		Text:         "已启动 loop。",
+	}, false)), &card); err != nil {
+		t.Fatalf("newLoopStatusCardJSON() is not valid JSON: %v", err)
+	}
+
+	if !jsonContainsValue(card, loopStatusCardTextElementID) {
+		t.Fatalf("loop status card does not contain updatable element %q: %#v", loopStatusCardTextElementID, card)
+	}
+	if !jsonContainsValue(card, "已启动 loop。") {
+		t.Fatalf("loop status card does not contain initial text: %#v", card)
+	}
+	for _, want := range []string{loopStatusCardAction, "取消 loop", "session-1"} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("loop status card does not contain %q: %#v", want, card)
+		}
+	}
+	if jsonContainsKey(card, "streaming_mode") {
+		t.Fatalf("loop status card should be a normal non-streaming card: %#v", card)
+	}
+	if jsonContainsKey(card, "streaming_config") {
+		t.Fatalf("loop status card should not contain streaming_config: %#v", card)
+	}
+}
+
+func TestNewLoopStatusCardJSONFinishedHidesCancelButton(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newLoopStatusCardJSON(LoopStatusCardRequest{
+		BotID:        "default",
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_thread",
+		ACPSessionID: "session-1",
+		Text:         "loop 已结束。",
+	}, true)), &card); err != nil {
+		t.Fatalf("newLoopStatusCardJSON(finished) is not valid JSON: %v", err)
+	}
+	for _, want := range []string{"Loop 已结束", "loop 已结束。", loopStatusCardTextElementID} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("finished loop status card does not contain %q: %#v", want, card)
+		}
+	}
+	if jsonContainsTaggedElement(card, "button") || jsonContainsValue(card, loopStatusCardAction) {
+		t.Fatalf("finished loop status card should hide cancel button: %#v", card)
+	}
+}
+
+func TestLoopStatusCardTextPatchJSONOnlyUpdatesContent(t *testing.T) {
+	var patch map[string]any
+	if err := json.Unmarshal([]byte(loopStatusCardTextPatchJSON("第 1 轮运行中")), &patch); err != nil {
+		t.Fatalf("loopStatusCardTextPatchJSON() is not valid JSON: %v", err)
+	}
+	if got := patch["content"]; got != "第 1 轮运行中" {
+		t.Fatalf("content = %v, want updated loop status", got)
+	}
+	if _, ok := patch["tag"]; ok {
+		t.Fatalf("patch should not include tag: %#v", patch)
+	}
+	if _, ok := patch["element_id"]; ok {
+		t.Fatalf("patch should not include element_id: %#v", patch)
+	}
+}
+
+func TestStreamCardUpdateContentNeverEmpty(t *testing.T) {
+	if got := streamCardUpdateContent("  \n\t"); strings.TrimSpace(got) == "" {
+		t.Fatalf("streamCardUpdateContent(empty) = %q, want non-empty content for Feishu field validation", got)
+	}
+	if got := streamCardUpdateContent("回复内容"); got != "回复内容" {
+		t.Fatalf("streamCardUpdateContent(non-empty) = %q, want original text", got)
+	}
+}
+
+func TestTruncateCardKitLogValue(t *testing.T) {
+	if got := truncateCardKitLogValue(cardJSON{"content": "hello"}); !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("truncateCardKitLogValue(map) = %q, want JSON content", got)
+	}
+
+	got := truncateCardKitLogValue(strings.Repeat("你", 2001))
+	if !strings.HasSuffix(got, "...<truncated>") {
+		t.Fatalf("truncateCardKitLogValue(long) = %q, want truncated suffix", got)
+	}
+	if runes := len([]rune(strings.TrimSuffix(got, "...<truncated>"))); runes != 2000 {
+		t.Fatalf("truncated rune count = %d, want 2000", runes)
+	}
+}
+
+func TestCardSequencesIncrease(t *testing.T) {
+	stream := &sdkStreamCard{}
+	if got := []int{stream.nextSequenceLocked(), stream.nextSequenceLocked(), stream.nextSequenceLocked()}; got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("stream sequence = %v, want 1,2,3", got)
+	}
+
+	loop := &sdkLoopStatusCard{}
+	if got := []int{loop.nextSequenceLocked(), loop.nextSequenceLocked()}; got[0] != 1 || got[1] != 2 {
+		t.Fatalf("loop sequence = %v, want 1,2", got)
+	}
+}
+
 func TestSDKStreamCardFullCardJSONIncludesSnapshotPanels(t *testing.T) {
 	card := &sdkStreamCard{
 		text:        "最终回复",
@@ -1050,6 +1153,40 @@ func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.
 	}
 }
 
+func TestLoopStatusCardActionCancelsLoopAndHidesButton(t *testing.T) {
+	handler := &fakeLoopCancelHandler{display: "loop 已结束。"}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_owner"},
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{
+					"action":         loopStatusCardAction,
+					"bot_id":         "default",
+					"chat_id":        "oc_chat",
+					"thread_id":      "omt_thread",
+					"acp_session_id": "session-1",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "success" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success card replacement", resp)
+	}
+	if handler.cancel.OperatorID != "ou_owner" || handler.cancel.ACPSessionID != "session-1" {
+		t.Fatalf("cancel = %+v, want callback context", handler.cancel)
+	}
+	if !jsonContainsValue(resp.Card.Data, "loop 已结束。") {
+		t.Fatalf("completed loop card does not contain finished text: %#v", resp.Card.Data)
+	}
+	if jsonContainsTaggedElement(resp.Card.Data, "button") || jsonContainsValue(resp.Card.Data, loopStatusCardAction) {
+		t.Fatalf("completed loop card should hide cancel button: %#v", resp.Card.Data)
+	}
+}
+
 type fakeModelSelectionHandler struct {
 	selection ModelSelection
 	display   string
@@ -1092,6 +1229,21 @@ func (f *fakeSessionSelectionHandler) HandleFeishuMessage(context.Context, Messa
 
 func (f *fakeSessionSelectionHandler) HandleSessionSelection(ctx context.Context, selection SessionSelection) (string, error) {
 	f.selection = selection
+	return f.display, f.err
+}
+
+type fakeLoopCancelHandler struct {
+	cancel  LoopCancel
+	display string
+	err     error
+}
+
+func (f *fakeLoopCancelHandler) HandleFeishuMessage(context.Context, Message) (string, error) {
+	return "", nil
+}
+
+func (f *fakeLoopCancelHandler) HandleLoopCancel(ctx context.Context, cancel LoopCancel) (string, error) {
+	f.cancel = cancel
 	return f.display, f.err
 }
 

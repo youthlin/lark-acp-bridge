@@ -48,6 +48,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = WithIntermediateReplySender(ctx, a.SendText)
 	ctx = WithSentMessageSender(ctx, a.SendTextMessage)
 	ctx = WithMessageUpdater(ctx, a.UpdateText)
+	ctx = WithLoopStatusCardSender(ctx, a.SendLoopStatusCard)
 	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
 	ctx = WithPermissionRequester(ctx, a.RequestPermission)
 	ctx = WithProcessingReactionStarter(ctx, a.StartProcessingReaction)

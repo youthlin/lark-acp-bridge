@@ -40,7 +40,7 @@ func (a *Adapter) SendSessionSelectionCard(ctx context.Context, msg Message, car
 	if cardResp.Data == nil || cardResp.Data.CardId == nil || strings.TrimSpace(*cardResp.Data.CardId) == "" {
 		return fmt.Errorf("创建飞书会话选择卡片未返回 card_id")
 	}
-	if err := a.sendInteractiveCard(ctx, msg, *cardResp.Data.CardId); err != nil {
+	if _, err := a.sendInteractiveCard(ctx, msg, *cardResp.Data.CardId); err != nil {
 		return fmt.Errorf("发送飞书会话选择卡片: %w", err)
 	}
 	return nil

@@ -18,6 +18,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 type Handler interface {
@@ -35,6 +36,10 @@ type ModeSelectionHandler interface {
 
 type SessionSelectionHandler interface {
 	HandleSessionSelection(context.Context, SessionSelection) (string, error)
+}
+
+type LoopCancelHandler interface {
+	HandleLoopCancel(context.Context, LoopCancel) (string, error)
 }
 
 type Adapter struct {
@@ -131,11 +136,14 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 	}
 
-	a.client = lark.NewClient(
-		a.cfg.AppID,
-		a.cfg.AppSecret,
-		lark.WithLogger(NewLogger("lark-sdk")),
-	)
+	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger("lark-sdk"))}
+	if logging.DebugEnabled() {
+		clientOptions = append(clientOptions,
+			lark.WithLogLevel(larkcore.LogLevelDebug),
+			lark.WithLogReqAtDebug(true),
+		)
+	}
+	a.client = lark.NewClient(a.cfg.AppID, a.cfg.AppSecret, clientOptions...)
 	if a.reaction == nil {
 		a.reaction = larkReactionClient{client: a.client}
 	}

@@ -20,7 +20,9 @@ import (
 var version string
 
 func main() {
-	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, nil))))
+	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logging.ProgramLevel(),
+	}))))
 	if err := run(); err != nil {
 		os.Exit(1)
 	}

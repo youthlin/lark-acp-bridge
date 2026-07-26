@@ -80,6 +80,31 @@ func TestReplyInThreadForMessage(t *testing.T) {
 			msg:  Message{ChatType: "group", MessageID: "om_topic", ThreadID: "omt_topic"},
 			want: true,
 		},
+		{
+			name: "private chat root id does not force topic reply",
+			msg:  Message{ChatType: "p2p", MessageID: "om_private_reply", RootID: "om_root"},
+			want: false,
+		},
+		{
+			name: "private chat thread id does not force topic reply",
+			msg:  Message{ChatType: "p2p", MessageID: "om_private_thread", ThreadID: "omt_thread"},
+			want: false,
+		},
+		{
+			name: "unknown chat type thread id keeps legacy topic behavior",
+			msg:  Message{MessageID: "om_unknown_thread", ThreadID: "omt_thread"},
+			want: true,
+		},
+		{
+			name: "unknown chat type root id does not force topic reply",
+			msg:  Message{MessageID: "om_unknown_reply", RootID: "om_root"},
+			want: false,
+		},
+		{
+			name: "group root id without thread id does not imply topic mode",
+			msg:  Message{ChatType: "group", MessageID: "om_topic_reply", RootID: "om_root"},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

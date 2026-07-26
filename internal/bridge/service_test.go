@@ -71,12 +71,17 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 }
 
 type fakeSentMessageClient struct {
-	mu        sync.Mutex
-	nextID    string
-	sent      []string
-	msgs      []feishu.Message
-	updates   []string
-	updateIDs []string
+	mu            sync.Mutex
+	nextID        string
+	sent          []string
+	msgs          []feishu.Message
+	updates       []string
+	updateIDs     []string
+	finishes      []string
+	finishIDs     []string
+	loopRequests  []feishu.LoopStatusCardRequest
+	textUpdates   []string
+	textUpdateIDs []string
 }
 
 func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
@@ -104,8 +109,71 @@ func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, te
 func (f *fakeSentMessageClient) update(ctx context.Context, messageID string, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.updateIDs = append(f.updateIDs, messageID)
-	f.updates = append(f.updates, text)
+	f.textUpdateIDs = append(f.textUpdateIDs, messageID)
+	f.textUpdates = append(f.textUpdates, text)
+	return nil
+}
+
+func (f *fakeSentMessageClient) sendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := strings.TrimSpace(f.nextID)
+	if id == "" {
+		id = "om_loop_start"
+	}
+	sent := feishu.SentMessage{
+		MessageID: id,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		ThreadID:  msg.ThreadID,
+		RootID:    id,
+	}
+	f.sent = append(f.sent, request.Text)
+	f.msgs = append(f.msgs, msg)
+	f.loopRequests = append(f.loopRequests, request)
+	return &fakeLoopStatusCard{client: f, message: sent}, nil
+}
+
+type fakeLoopStatusCard struct {
+	client                *fakeSentMessageClient
+	message               feishu.SentMessage
+	failOnCanceledContext bool
+}
+
+func (f *fakeLoopStatusCard) Message() feishu.SentMessage {
+	if f == nil {
+		return feishu.SentMessage{}
+	}
+	return f.message
+}
+
+func (f *fakeLoopStatusCard) Update(ctx context.Context, text string) error {
+	if f == nil || f.client == nil {
+		return nil
+	}
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	f.client.mu.Lock()
+	defer f.client.mu.Unlock()
+	f.client.updateIDs = append(f.client.updateIDs, f.message.MessageID)
+	f.client.updates = append(f.client.updates, text)
+	return nil
+}
+
+func (f *fakeLoopStatusCard) Finish(ctx context.Context, text string) error {
+	if f == nil || f.client == nil {
+		return nil
+	}
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	f.client.mu.Lock()
+	defer f.client.mu.Unlock()
+	f.client.updateIDs = append(f.client.updateIDs, f.message.MessageID)
+	f.client.updates = append(f.client.updates, text)
+	f.client.finishIDs = append(f.client.finishIDs, f.message.MessageID)
+	f.client.finishes = append(f.client.finishes, text)
 	return nil
 }
 
@@ -127,9 +195,34 @@ func (f *fakeSentMessageClient) updateIDsSnapshot() []string {
 	return append([]string(nil), f.updateIDs...)
 }
 
+func (f *fakeSentMessageClient) finishesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.finishes...)
+}
+
+func (f *fakeSentMessageClient) loopRequestsSnapshot() []feishu.LoopStatusCardRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]feishu.LoopStatusCardRequest(nil), f.loopRequests...)
+}
+
+func (f *fakeSentMessageClient) messagesSnapshot() []feishu.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]feishu.Message(nil), f.msgs...)
+}
+
+func (f *fakeSentMessageClient) textUpdatesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.textUpdates...)
+}
+
 func withFakeSentMessageClient(ctx context.Context, client *fakeSentMessageClient) context.Context {
 	ctx = feishu.WithSentMessageSender(ctx, client.send)
-	return feishu.WithMessageUpdater(ctx, client.update)
+	ctx = feishu.WithMessageUpdater(ctx, client.update)
+	return feishu.WithLoopStatusCardSender(ctx, client.sendLoopStatusCard)
 }
 
 func ensureTestOwner(t *testing.T, svc *Service, botID string) {
@@ -283,6 +376,9 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	if !strings.Contains(reply, "/status") {
 		t.Fatalf("reply = %q, want status help", reply)
 	}
+	if !strings.Contains(reply, "/debug status|on|off") {
+		t.Fatalf("reply = %q, want debug help", reply)
+	}
 }
 
 func TestHandleFeishuMessageSlashCommandRequiresConfiguredOwner(t *testing.T) {
@@ -321,6 +417,51 @@ func TestHandleFeishuMessageSlashCommandRejectsNonOwner(t *testing.T) {
 	}
 	if reply != "只有 bot owner 可以执行斜杠命令。" {
 		t.Fatalf("reply = %q, want non-owner warning", reply)
+	}
+}
+
+func TestHandleFeishuMessageDebugCommandTogglesProgramLevel(t *testing.T) {
+	orig := logging.ProgramLevel().Level()
+	t.Cleanup(func() {
+		logging.ProgramLevel().Set(orig)
+	})
+	logging.SetDebug(false)
+
+	svc := newTestService(config.Default(), nil)
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		Text: "/debug on",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/debug on) error = %v", err)
+	}
+	if !logging.DebugEnabled() {
+		t.Fatal("DebugEnabled() = false, want true after /debug on")
+	}
+	if !strings.Contains(reply, "已开启 bridge debug 日志") || !strings.Contains(reply, "开启") {
+		t.Fatalf("reply = %q, want debug enabled reply", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		Text: "/debug status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/debug status) error = %v", err)
+	}
+	if !strings.Contains(reply, "开启") {
+		t.Fatalf("reply = %q, want debug status on", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		Text: "/debug off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/debug off) error = %v", err)
+	}
+	if logging.DebugEnabled() {
+		t.Fatal("DebugEnabled() = true, want false after /debug off")
+	}
+	if !strings.Contains(reply, "已关闭 bridge debug 日志") || !strings.Contains(reply, "关闭") {
+		t.Fatalf("reply = %q, want debug disabled reply", reply)
 	}
 }
 
@@ -5473,7 +5614,32 @@ func TestParseLoopRequest(t *testing.T) {
 	}
 }
 
-func TestLoopCommandRunsUntilDoneAndUpdatesStartMessage(t *testing.T) {
+func TestLoopDone(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "plain", text: "DONE", want: true},
+		{name: "space", text: " \nDONE\t", want: true},
+		{name: "inline code not accepted", text: "`DONE`"},
+		{name: "plain fenced not accepted", text: "```\nDONE\n```"},
+		{name: "typed fenced not accepted", text: "```text\nDONE\n```"},
+		{name: "lowercase not accepted", text: "done"},
+		{name: "extra text not accepted", text: "DONE\n继续"},
+		{name: "sentence not accepted", text: "DONE，已完成"},
+		{name: "typed fenced extra text not accepted", text: "```text\nDONE\n继续\n```"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := loopDone(tt.text); got != tt.want {
+				t.Fatalf("loopDone(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoopCommandRunsUntilDoneAndUpdatesStartCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "继续"}, {Text: "DONE"}}}
 	svc := newTestService(config.Default(), store)
@@ -5528,8 +5694,11 @@ func TestLoopCommandRunsUntilDoneAndUpdatesStartMessage(t *testing.T) {
 	}
 	for _, id := range client.updateIDsSnapshot() {
 		if id != "om_loop_start" {
-			t.Fatalf("update message id = %q, want loop start message", id)
+			t.Fatalf("update message id = %q, want loop start card message", id)
 		}
+	}
+	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
+		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
 	}
 	rt.mu.Lock()
 	calls := append([]fakePromptCall(nil), rt.promptCalls...)
@@ -5605,14 +5774,95 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	if len(intermediate) != 0 {
 		t.Fatalf("intermediate = %#v, want no separate finish reply", intermediate)
 	}
-	if len(streamMsgs) != 1 || streamMsgs[0].MessageID != "om_loop_start" {
-		t.Fatalf("stream messages = %+v, want card reply to loop start message", streamMsgs)
+	if len(streamMsgs) != 1 || streamMsgs[0].MessageID != "om_loop_start" || !streamMsgs[0].ForceReplyInThread {
+		t.Fatalf("stream messages = %+v, want thread reply to loop start message", streamMsgs)
+	}
+	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
+		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
 	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
 	svc.taskMu.Unlock()
 	if status.running || status.round != 1 || status.reason != "agent 返回 DONE" {
 		t.Fatalf("loop status = %+v, want completed at round 1 by streamed DONE", status)
+	}
+}
+
+func TestLoopCommandStopsWhenFinalCardTextIsDoneAfterProcessMessages(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "先检查。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Run tests",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "DONE"},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	var cards []*fakeStreamCard
+	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	if reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/loop -n 3 -i 1ms 等待流式 DONE",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	} else if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
+	}
+
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "结束原因：agent 返回 DONE")
+	})
+	svc.taskMu.Lock()
+	status := svc.loopStatuses[key]
+	svc.taskMu.Unlock()
+	if status.running || status.round != 1 || status.reason != "agent 返回 DONE" {
+		t.Fatalf("loop status = %+v, want completed at round 1 by final card DONE", status)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	textUpdates := cards[0].textUpdatesSnapshot()
+	if len(textUpdates) == 0 || textUpdates[len(textUpdates)-1] != "DONE" {
+		t.Fatalf("textUpdates = %+v, want final card text DONE", textUpdates)
 	}
 }
 
@@ -5661,12 +5911,43 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 	if reply != "" {
 		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
 	}
+	startMsgs := client.messagesSnapshot()
+	if len(startMsgs) != 1 {
+		t.Fatalf("start messages = %+v, want one loop start card message", startMsgs)
+	}
+	if startMsgs[0].ForceReplyInThread {
+		t.Fatalf("start message = %+v, want loop start card to reply normally to user message", startMsgs[0])
+	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 	if len(streamMsgs) != 1 {
 		t.Fatalf("stream messages = %+v, want one card", streamMsgs)
 	}
 	if streamMsgs[0].MessageID != "om_loop_start" || !streamMsgs[0].ForceReplyInThread {
 		t.Fatalf("stream message = %+v, want card reply to loop start message in thread", streamMsgs[0])
+	}
+}
+
+func TestUpdateLoopAnchorIgnoresCanceledParentContext(t *testing.T) {
+	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+	client := newFakeSentMessageClient("om_loop_start")
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	anchor := loopAnchor{
+		message: feishu.Message{MessageID: "om_loop_start"},
+		request: loopRequest{Prompt: "持续推进", Interval: time.Second},
+		card: &fakeLoopStatusCard{
+			client:                client,
+			message:               feishu.SentMessage{MessageID: "om_loop_start"},
+			failOnCanceledContext: true,
+		},
+	}
+
+	if !svc.updateLoopAnchor(parent, anchor, loopProgressFinished, 0, "agent 返回 DONE") {
+		t.Fatal("updateLoopAnchor() = false, want update with detached context")
+	}
+	finishes := client.finishesSnapshot()
+	if len(finishes) != 1 || !strings.Contains(finishes[0], "状态：已完成") || !strings.Contains(finishes[0], "结束原因：agent 返回 DONE") {
+		t.Fatalf("finishes = %#v, want completed finish update", finishes)
 	}
 }
 
@@ -5707,6 +5988,9 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 	})
 	if len(intermediate) != 0 {
 		t.Fatalf("intermediate = %#v, want no separate finish reply", intermediate)
+	}
+	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
+		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
 	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
@@ -5773,6 +6057,9 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已取消") {
 		t.Fatalf("updates = %#v, want cancelled loop start message update", updates)
 	}
+	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
+		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
+	}
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
 	svc.taskMu.Unlock()
@@ -5830,6 +6117,9 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已手动停止") {
 		t.Fatalf("updates = %#v, want manual stop update", updates)
 	}
+	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
+		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
+	}
 	close(rt.blockPrompt)
 
 	statusReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -5843,6 +6133,101 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 	}
 	if !strings.Contains(statusReply, "状态：已结束") || !strings.Contains(statusReply, "原因：已手动停止") {
 		t.Fatalf("status reply = %q, want manual stop status", statusReply)
+	}
+}
+
+func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	taskCtx, finish := svc.startTask(context.Background(), session, config.AgentConfig{}, taskKindLoop)
+	defer finish()
+	svc.taskMu.Lock()
+	svc.loopStatuses[key] = loopRunStatus{running: true, started: time.Now()}
+	svc.taskMu.Unlock()
+
+	display, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
+		BotID:        "bot-a",
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_thread",
+		ACPSessionID: "acp-session-1",
+		OperatorID:   testOwnerOpenID,
+	})
+	if err != nil {
+		t.Fatalf("HandleLoopCancel() error = %v", err)
+	}
+	if !strings.Contains(display, "loop 已结束") || !strings.Contains(display, "结束原因：已通过卡片取消") {
+		t.Fatalf("display = %q, want finished cancel text", display)
+	}
+	select {
+	case <-taskCtx.Done():
+	default:
+		t.Fatal("loop task context was not cancelled")
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	svc.taskMu.Lock()
+	status := svc.loopStatuses[key]
+	_, stillRunning := svc.tasks[key]
+	svc.taskMu.Unlock()
+	if stillRunning || status.running || status.reason != "已通过卡片取消" {
+		t.Fatalf("task stillRunning=%v status=%+v, want cancelled loop", stillRunning, status)
+	}
+}
+
+func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	_, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
+		BotID:        "bot-a",
+		ChatID:       "oc_chat",
+		ACPSessionID: "acp-session-1",
+		OperatorID:   "ou_other",
+	})
+	if err == nil || !strings.Contains(err.Error(), "只有 bot owner 可以取消 loop") {
+		t.Fatalf("HandleLoopCancel(non-owner) error = %v, want owner-only error", err)
+	}
+}
+
+func TestHandleLoopCancelRejectsExpiredCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-current",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	_, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
+		BotID:        "bot-a",
+		ChatID:       "oc_chat",
+		ACPSessionID: "acp-session-old",
+		OperatorID:   testOwnerOpenID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "该 loop 卡片已过期") {
+		t.Fatalf("HandleLoopCancel(expired) error = %v, want expired-card error", err)
 	}
 }
 

@@ -117,7 +117,7 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 		groupChat:    !msg.IsPrivateChat(),
 	})
 	defer a.permissionCards.remove(requestID)
-	if err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
+	if _, err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return acp.PermissionOutcome{}, err
 	}
 	select {
@@ -174,6 +174,8 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 		return a.handleModeSelectionAction(ctx, event)
 	case sessionSelectionCardAction:
 		return a.handleSessionSelectionAction(ctx, event)
+	case loopStatusCardAction:
+		return a.handleLoopCancelAction(ctx, event)
 	case permissionCardAction:
 	default:
 		return permissionCardToast("error", "未知的卡片操作"), nil

@@ -20,6 +20,7 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 // Service 本项目核心服务
@@ -108,6 +109,7 @@ const (
 type loopAnchor struct {
 	message feishu.Message
 	request loopRequest
+	card    feishu.LoopStatusCard
 }
 
 type preparedPrompt struct {
@@ -386,6 +388,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/mode <mode> - 设置当前会话模式",
 			"/show step|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
 			"/at status|on|off - 查看或设置当前群聊是否需要 at 才响应",
+			"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志",
 			"/restart - 重启 bridge 服务，重启完成后自动回复确认",
 			"/status - 查看服务状态",
 			"",
@@ -415,6 +418,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleShowCommand(ctx, msg, text)
 	case "/at":
 		return s.handleAtCommand(ctx, msg, text)
+	case "/debug":
+		return s.handleDebugCommand(ctx, text)
 	case "/restart":
 		return s.handleRestartCommand(ctx, msg)
 	case "/status":
@@ -422,6 +427,35 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 	default:
 		return "暂不支持这个命令。发送 /help 查看当前支持的命令。"
 	}
+}
+
+func (s *Service) handleDebugCommand(ctx context.Context, text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 1 || len(fields) == 2 && strings.EqualFold(fields[1], "status") {
+		return formatDebugStatus()
+	}
+	if len(fields) != 2 {
+		return "请使用 /debug status、/debug on 或 /debug off。"
+	}
+	switch strings.ToLower(strings.TrimSpace(fields[1])) {
+	case "on":
+		logging.SetDebug(true)
+		slog.InfoContext(ctx, "已开启 bridge debug 日志")
+		return "已开启 bridge debug 日志。\n" + formatDebugStatus()
+	case "off":
+		logging.SetDebug(false)
+		slog.InfoContext(ctx, "已关闭 bridge debug 日志")
+		return "已关闭 bridge debug 日志。\n" + formatDebugStatus()
+	default:
+		return "请使用 /debug status、/debug on 或 /debug off。"
+	}
+}
+
+func formatDebugStatus() string {
+	if logging.DebugEnabled() {
+		return "当前 bridge debug 日志：开启。"
+	}
+	return "当前 bridge debug 日志：关闭。"
 }
 
 func (s *Service) handleRestartCommand(ctx context.Context, msg feishu.Message) string {
@@ -1380,10 +1414,17 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	s.subscribeACPStateUpdates(ctx, msg, prepared.session.Key)
 	session := s.updateAutomaticSessionTitle(ctx, msg, prepared.session, req.Prompt)
 	startText := loopAnchorText(req, loopProgressStarted, 0, "", time.Now())
-	if sent, ok, err := feishu.SendMessage(ctx, msg, startText); err != nil {
+	cardReq := feishu.LoopStatusCardRequest{
+		BotID:        session.Key.BotID,
+		ChatID:       session.Key.ChatID,
+		ThreadID:     session.Key.ThreadID,
+		ACPSessionID: session.ACPSessionID,
+		Text:         startText,
+	}
+	if card, ok, err := feishu.SendLoopStatusCard(ctx, msg, cardReq); err != nil {
 		return "启动 loop 失败：" + err.Error()
 	} else if ok {
-		anchor := loopAnchor{message: loopAnchorMessage(msg, sent), request: req}
+		anchor := loopAnchor{message: loopAnchorMessage(msg, card.Message()), request: req, card: card}
 		s.startLoop(ctx, msg, anchor, session, prepared.agent, req)
 		return ""
 	}
@@ -1512,7 +1553,7 @@ func loopRoundMessage(original feishu.Message, anchor loopAnchor) feishu.Message
 	msg.Workspace = firstNonEmptyString(msg.Workspace, original.Workspace)
 	msg.SenderID = original.SenderID
 	msg.SenderType = original.SenderType
-	msg.ForceReplyInThread = !msg.IsPrivateChat()
+	msg.ForceReplyInThread = true
 	return msg
 }
 
@@ -1526,16 +1567,21 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func (s *Service) updateLoopAnchor(ctx context.Context, anchor loopAnchor, state loopProgressState, round int, reason string) bool {
-	messageID := strings.TrimSpace(anchor.message.MessageID)
-	if messageID == "" {
+	if anchor.card == nil {
 		return false
 	}
 	text := loopAnchorText(anchor.request, state, round, reason, time.Now())
-	if ok, err := feishu.UpdateMessageText(ctx, messageID, text); err != nil {
-		slog.WarnContext(ctx, "更新 loop 启动消息失败", "message_id", messageID, "错误", err)
-		return false
-	} else if !ok {
-		slog.InfoContext(ctx, "当前上下文不支持更新 loop 启动消息", "message_id", messageID)
+	cardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	var err error
+	if state == loopProgressFinished {
+		err = anchor.card.Finish(cardCtx, text)
+	} else {
+		err = anchor.card.Update(cardCtx, text)
+	}
+	if err != nil {
+		messageID := strings.TrimSpace(anchor.message.MessageID)
+		slog.WarnContext(ctx, "更新 loop 启动卡片失败", "message_id", messageID, "错误", err)
 		return false
 	}
 	return true
@@ -1547,6 +1593,20 @@ func loopAnchorText(req loopRequest, state loopProgressState, round int, reason 
 		formatLoopRequest(req),
 		"",
 		"状态：" + loopProgressText(state, round),
+	}
+	if strings.TrimSpace(reason) != "" {
+		lines = append(lines, "结束原因："+strings.TrimSpace(reason))
+	}
+	if !now.IsZero() {
+		lines = append(lines, "更新时间："+now.Format(time.RFC3339))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func loopFinishedText(reason string, now time.Time) string {
+	lines := []string{
+		"loop 已结束。",
+		"状态：" + loopProgressText(loopProgressFinished, 0),
 	}
 	if strings.TrimSpace(reason) != "" {
 		lines = append(lines, "结束原因："+strings.TrimSpace(reason))
@@ -1625,15 +1685,42 @@ func (s *Service) updateLoopFinished(ctx context.Context, msg feishu.Message, an
 	if errors.Is(err, context.Canceled) {
 		return
 	}
-	if s.updateLoopAnchor(ctx, anchor, loopProgressFinished, 0, reason) {
-		return
+	s.updateLoopAnchor(ctx, anchor, loopProgressFinished, 0, reason)
+}
+
+func (s *Service) HandleLoopCancel(ctx context.Context, cancel feishu.LoopCancel) (string, error) {
+	msg := feishu.Message{
+		BotID:    strings.TrimSpace(cancel.BotID),
+		ChatID:   strings.TrimSpace(cancel.ChatID),
+		ThreadID: strings.TrimSpace(cancel.ThreadID),
+		SenderID: strings.TrimSpace(cancel.OperatorID),
 	}
-	text := "loop 已结束：" + reason
-	if ok, sendErr := feishu.SendIntermediateReply(ctx, msg, text); sendErr != nil {
-		slog.WarnContext(ctx, "发送 loop 结束消息失败", "错误", sendErr)
-	} else if !ok {
-		slog.InfoContext(ctx, "当前上下文不支持发送 loop 结束消息", "reason", reason)
+	if !s.slashCommandAllowed(msg) {
+		if len(s.ownerOpenIDs(cancel.BotID)) == 0 {
+			return "", fmt.Errorf("未配置 bot owner，不能取消 loop")
+		}
+		return "", fmt.Errorf("只有 bot owner 可以取消 loop")
 	}
+	key := SessionKey{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: msg.ThreadID}
+	store := s.storeForMessage(msg)
+	if store != nil {
+		session, ok := store.Get(key)
+		if !ok && key.ThreadID != "" {
+			session, ok = store.Get(SessionKey{BotID: msg.BotID, ChatID: msg.ChatID})
+		}
+		if !ok {
+			return "", fmt.Errorf("该 loop 会话不存在或已过期")
+		}
+		if strings.TrimSpace(cancel.ACPSessionID) != "" && strings.TrimSpace(session.ACPSessionID) != strings.TrimSpace(cancel.ACPSessionID) {
+			return "", fmt.Errorf("该 loop 卡片已过期")
+		}
+		key = session.Key
+	}
+	reason := "已通过卡片取消"
+	if s.cancelLoopTask(ctx, key, reason) {
+		return loopFinishedText(reason, time.Now()), nil
+	}
+	return "", fmt.Errorf("当前会话没有正在运行的 loop")
 }
 
 func (s *Service) cancelLoopTask(ctx context.Context, key SessionKey, reason string) bool {
@@ -2518,7 +2605,7 @@ func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.M
 	result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
 	rawResult := result
 	chunks.close()
-	streamedReply := chunks.replyText()
+	streamedReply := chunks.finalText()
 	if stream.hasStarted() {
 		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() && finalReply != streamedReply {
 			stream.updateText(finalReply)
@@ -2685,6 +2772,15 @@ func (a *promptChunkAccumulator) close() {
 func (a *promptChunkAccumulator) replyText() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return strings.TrimSpace(a.reply.String())
+}
+
+func (a *promptChunkAccumulator) finalText() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if text := strings.TrimSpace(a.finalCandidate.String()); text != "" {
+		return text
+	}
 	return strings.TrimSpace(a.reply.String())
 }
 
@@ -4122,7 +4218,7 @@ func sessionLabel(msg feishu.Message) string {
 }
 
 func isTopicGroupMessage(msg feishu.Message) bool {
-	return strings.EqualFold(msg.ChatType, "group") && strings.TrimSpace(msg.ThreadID) != ""
+	return strings.EqualFold(msg.ChatType, "group") && msg.IsTopicThread()
 }
 
 func displayBotID(botID string) string {
