@@ -1738,7 +1738,7 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 	if errText != "" {
 		return errText, nil
 	}
-	return s.promptSession(ctx, msg, session, agent, promptText)
+	return s.promptSession(ctx, msg, session, agent, promptText, text)
 }
 
 func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (
@@ -1751,9 +1751,8 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		if errText != "" {
 			return Session{}, config.AgentConfig{}, "", errText, nil
 		}
-		session = s.updateAutomaticSessionTitle(ctx, msg, created, userText)
-		text := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, promptTextWithReplyContext(msg, userText))
-		return session, agent, text, "", nil
+		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		return created, agent, text, "", nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
@@ -1767,7 +1766,6 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		}
 		session = created
 	}
-	session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
 	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
 	return session, agent, text, "", nil
 }
@@ -1896,7 +1894,7 @@ func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text s
 	}, text)
 }
 
-func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (string, error) {
+func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	result, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
 	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
@@ -1908,6 +1906,9 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		result, sentProgress, err = s.runUserPrompt(ctx, msg, session, agent, text)
 	}
 	reply := result.Text
+	if !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
+		session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", nil
@@ -3508,6 +3509,10 @@ func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Me
 	store := s.storeForMessage(msg)
 	if store == nil {
 		return session
+	}
+	if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
+		session = latest
+		session.Title = title
 	}
 	if err := store.Upsert(session); err != nil {
 		slog.WarnContext(ctx, "保存自动会话标题失败", "session", session.ACPSessionID, "错误", err)

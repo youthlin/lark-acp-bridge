@@ -1178,6 +1178,28 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 	if updated.ACPSessionID != "new-acp-session" {
 		t.Fatalf("persisted session = %q, want new-acp-session", updated.ACPSessionID)
 	}
+	if updated.Title != "继续" {
+		t.Fatalf("persisted title = %q, want final session title", updated.Title)
+	}
+	items := store.ListByChat("", "oc_chat")
+	if len(items) != 2 {
+		t.Fatalf("history = %+v, want old and refreshed sessions", items)
+	}
+	var oldItem, newItem Session
+	for _, item := range items {
+		switch item.ACPSessionID {
+		case "old-acp-session":
+			oldItem = item
+		case "new-acp-session":
+			newItem = item
+		}
+	}
+	if oldItem.ACPSessionID == "" || oldItem.Title != "old session" {
+		t.Fatalf("old history item = %+v, want original title retained", oldItem)
+	}
+	if newItem.ACPSessionID == "" || newItem.Title != "继续" {
+		t.Fatalf("new history item = %+v, want prompt title on refreshed session", newItem)
+	}
 }
 
 func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
@@ -5276,6 +5298,13 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	if !cards[0].isClosed() {
 		t.Fatal("cancelled old card should be closed")
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found after cancellation")
+	}
+	if session.Title != "改成做这个" {
+		t.Fatalf("session title = %q, want second prompt title", session.Title)
 	}
 }
 
