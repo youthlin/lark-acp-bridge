@@ -829,11 +829,13 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 			ID:           "model",
 			Name:         "Model",
 			Category:     "model",
+			Description:  "Choose which model TRAE CLI should use",
 			Type:         "select",
 			CurrentValue: "gpt-5.5",
 			Options: []acp.SessionConfigOptionValue{
-				{Value: "gpt-5.5", Name: "GPT-5.5"},
-				{Value: "gpt-5.6", Name: "GPT-5.6"},
+				{Value: "Doubao-Seed-2.1-Pro", Name: "Doubao-Seed-2.1-Pro", Description: "184K context window, support reasoning."},
+				{Value: "gpt-5.5", Name: "GPT-5.5", Description: "support reasoning, beta."},
+				{Value: "Doubao_1_6", Name: "Doubao-Seed-Code", Description: "."},
 			},
 		},
 		{
@@ -901,15 +903,18 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
-		Text:     "/config reasoning",
+		Text:     "/config model",
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(/config reasoning) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(/config model) error = %v", err)
 	}
-	for _, want := range []string{"ACP 配置项：reasoning", "名称：Reasoning Effort", "当前值：medium", "high - High", "/config reasoning <value>"} {
+	for _, want := range []string{"ACP 配置项：model", "名称：Model", "说明：Choose which model TRAE CLI should use", "当前值：gpt-5.5", "   1. Doubao-Seed-2.1-Pro", "      184K context window, support reasoning.", "*  2. GPT-5.5（gpt-5.5）", "      support reasoning, beta.", "   3. Doubao-Seed-Code（Doubao_1_6）", "/config model <value>"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
+	}
+	if strings.Contains(reply, "：.") {
+		t.Fatalf("reply = %q, should not render dot-only description", reply)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{

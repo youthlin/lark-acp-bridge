@@ -1070,27 +1070,39 @@ func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
 	lines = append(lines, "当前值："+current)
 	if len(opt.Options) > 0 {
 		lines = append(lines, "", "可选值：")
+		optionIndex := 0
 		for _, option := range opt.Options {
 			value := strings.TrimSpace(option.Value)
 			if value == "" {
 				continue
 			}
-			marker := ""
+			optionIndex++
+			marker := "  "
 			if value == configOptionValueString(opt.CurrentValue) {
-				marker = " *"
+				marker = "* "
 			}
-			label := value
-			if name := strings.TrimSpace(option.Name); name != "" && name != value {
-				label += " - " + name
+			label := configOptionDisplayName(opt, value)
+			if label == "" {
+				label = value
 			}
-			if description := strings.TrimSpace(option.Description); description != "" {
-				label += "：" + description
+			lines = append(lines, fmt.Sprintf("%s%2d. %s", marker, optionIndex, label))
+			if description := cleanConfigOptionDescription(option.Description); description != "" {
+				lines = append(lines, "      "+description)
 			}
-			lines = append(lines, marker+" "+label)
 		}
 	}
 	lines = append(lines, "", "设置配置项：/config "+id+" <value>")
 	return strings.Join(lines, "\n")
+}
+
+func cleanConfigOptionDescription(description string) string {
+	description = strings.TrimSpace(description)
+	switch description {
+	case "", ".", "。":
+		return ""
+	default:
+		return description
+	}
 }
 
 func currentModeDisplay(session Session) string {
