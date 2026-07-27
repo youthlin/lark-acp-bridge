@@ -315,6 +315,25 @@ func TestTruncateCardKitLogValue(t *testing.T) {
 	}
 }
 
+func TestCardNameForError(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "chinese", in: "流式", want: "流式"},
+		{name: "ascii", in: "loop 状态", want: " loop 状态"},
+		{name: "blank", in: " \t\n", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cardNameForError(tt.in); got != tt.want {
+				t.Fatalf("cardNameForError(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizedCardIDTrimsAndRejectsBlank(t *testing.T) {
 	if got := normalizedCardID(nil); got != "" {
 		t.Fatalf("normalizedCardID(nil) = %q, want empty", got)

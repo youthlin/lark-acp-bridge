@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
-	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
 )
 
 const modelSelectionCardAction = "acp_model_selection"
@@ -26,27 +25,8 @@ func (a *Adapter) SendModelSelectionCard(ctx context.Context, msg Message, card 
 	if a.client == nil {
 		return fmt.Errorf("飞书客户端未初始化")
 	}
-	cardResp, err := a.client.Cardkit.V1.Card.Create(ctx, larkcardkit.NewCreateCardReqBuilder().
-		Body(larkcardkit.NewCreateCardReqBodyBuilder().
-			Type("card_json").
-			Data(newModelSelectionCardJSON(card)).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("创建飞书模型选择卡片: %w", err)
-	}
-	if !cardResp.Success() {
-		return fmt.Errorf("创建飞书模型选择卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
-	}
-	cardID := ""
-	if cardResp.Data != nil {
-		cardID = normalizedCardID(cardResp.Data.CardId)
-	}
-	if cardID == "" {
-		return fmt.Errorf("创建飞书模型选择卡片未返回 card_id")
-	}
-	if _, err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
-		return fmt.Errorf("发送飞书模型选择卡片: %w", err)
+	if _, _, err := a.createAndSendCardJSON(ctx, msg, newModelSelectionCardJSON(card), "模型选择"); err != nil {
+		return err
 	}
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
-	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
@@ -91,24 +90,9 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 	if requestID == "" {
 		return acp.PermissionOutcome{Outcome: "cancelled"}, nil
 	}
-	cardResp, err := a.client.Cardkit.V1.Card.Create(ctx, larkcardkit.NewCreateCardReqBuilder().
-		Body(larkcardkit.NewCreateCardReqBodyBuilder().
-			Type("card_json").
-			Data(newPermissionCardJSON(requestID, req, "")).
-			Build()).
-		Build())
+	cardID, err := a.createCardJSON(ctx, newPermissionCardJSON(requestID, req, ""), "权限")
 	if err != nil {
-		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片: %w", err)
-	}
-	if !cardResp.Success() {
-		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
-	}
-	cardID := ""
-	if cardResp.Data != nil {
-		cardID = normalizedCardID(cardResp.Data.CardId)
-	}
-	if cardID == "" {
-		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片未返回 card_id")
+		return acp.PermissionOutcome{}, err
 	}
 	waiter := newPermissionCardWaiter()
 	a.permissionCards.add(requestID, permissionCardEntry{
@@ -120,7 +104,7 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 		groupChat:    !msg.IsPrivateChat(),
 	})
 	defer a.permissionCards.remove(requestID)
-	if _, err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
+	if _, err := a.sendInteractiveCard(ctx, msg, cardID, "权限"); err != nil {
 		return acp.PermissionOutcome{}, err
 	}
 	select {
@@ -147,22 +131,11 @@ func (a *Adapter) markPermissionCardCancelled(requestID string, entry permission
 }
 
 func (a *Adapter) updatePermissionCard(ctx context.Context, cardID string, data string) error {
-	resp, err := a.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
-		CardId(cardID).
-		Body(larkcardkit.NewUpdateCardReqBodyBuilder().
-			Card(larkcardkit.NewCardBuilder().
-				Type("card_json").
-				Data(data).
-				Build()).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("更新飞书权限卡片: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("更新飞书权限卡片返回错误: code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	return a.updateCardJSON(ctx, cardUpdateRequest{
+		cardID: cardID,
+		data:   data,
+		action: "更新飞书权限卡片",
+	})
 }
 
 func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {

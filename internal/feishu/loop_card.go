@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
-	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
 )
 
 const (
@@ -34,28 +33,9 @@ func (a *Adapter) SendLoopStatusCard(ctx context.Context, msg Message, request L
 		return nil, fmt.Errorf("飞书客户端未初始化")
 	}
 	request.Text = strings.TrimSpace(request.Text)
-	cardResp, err := a.client.Cardkit.V1.Card.Create(ctx, larkcardkit.NewCreateCardReqBuilder().
-		Body(larkcardkit.NewCreateCardReqBodyBuilder().
-			Type("card_json").
-			Data(newLoopStatusCardJSON(request, false)).
-			Build()).
-		Build())
+	cardID, sent, err := a.createAndSendCardJSON(ctx, msg, newLoopStatusCardJSON(request, false), "loop 状态")
 	if err != nil {
-		return nil, fmt.Errorf("创建飞书 loop 状态卡片: %w", err)
-	}
-	if !cardResp.Success() {
-		return nil, fmt.Errorf("创建飞书 loop 状态卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
-	}
-	cardID := ""
-	if cardResp.Data != nil {
-		cardID = normalizedCardID(cardResp.Data.CardId)
-	}
-	if cardID == "" {
-		return nil, fmt.Errorf("创建飞书 loop 状态卡片未返回 card_id")
-	}
-	sent, err := a.sendInteractiveCard(ctx, msg, cardID)
-	if err != nil {
-		return nil, fmt.Errorf("发送飞书 loop 状态卡片: %w", err)
+		return nil, err
 	}
 	return &sdkLoopStatusCard{
 		adapter: a,
@@ -110,43 +90,12 @@ func (c *sdkLoopStatusCard) Finish(ctx context.Context, text string) error {
 func (c *sdkLoopStatusCard) patchTextLocked(ctx context.Context) error {
 	seq := c.nextSequenceLocked()
 	partial := loopStatusCardTextPatchJSON(c.text)
-	resp, err := c.adapter.client.Cardkit.V1.CardElement.Patch(ctx, larkcardkit.NewPatchCardElementReqBuilder().
-		CardId(c.cardID).
-		ElementId(loopStatusCardTextElementID).
-		Body(larkcardkit.NewPatchCardElementReqBodyBuilder().
-			PartialElement(partial).
-			Sequence(seq).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("更新飞书 loop 状态卡片文本: %w", err)
-	}
-	if !resp.Success() {
-		logCardKitFailure(ctx, "CardElement.Patch", c.cardID, loopStatusCardTextElementID, seq, cardJSON{
-			"partial_element": partial,
-		}, resp.ApiResp, resp.Code, resp.Msg)
-		return fmt.Errorf("更新飞书 loop 状态卡片文本返回错误: code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	return c.adapter.patchCardElement(ctx, c.cardID, loopStatusCardTextElementID, partial, seq, "更新飞书 loop 状态卡片文本")
 }
 
 func (c *sdkLoopStatusCard) deleteActionLocked(ctx context.Context) error {
 	seq := c.nextSequenceLocked()
-	resp, err := c.adapter.client.Cardkit.V1.CardElement.Delete(ctx, larkcardkit.NewDeleteCardElementReqBuilder().
-		CardId(c.cardID).
-		ElementId(loopStatusCardActionID).
-		Body(larkcardkit.NewDeleteCardElementReqBodyBuilder().
-			Sequence(seq).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("移除飞书 loop 状态卡片按钮: %w", err)
-	}
-	if !resp.Success() {
-		logCardKitFailure(ctx, "CardElement.Delete", c.cardID, loopStatusCardActionID, seq, nil, resp.ApiResp, resp.Code, resp.Msg)
-		return fmt.Errorf("移除飞书 loop 状态卡片按钮返回错误: code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	return c.adapter.deleteCardElement(ctx, c.cardID, loopStatusCardActionID, seq, "移除飞书 loop 状态卡片按钮")
 }
 
 func (c *sdkLoopStatusCard) nextSequenceLocked() int {
