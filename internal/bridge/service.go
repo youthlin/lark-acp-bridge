@@ -386,6 +386,9 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",
+			"/config - 查看 ACP server 上报的配置项",
+			"/config <id> - 查看指定配置项",
+			"/config <id> <value> - 设置指定配置项",
 			"/model - 打开模型选择卡片",
 			"/model <model> - 设置当前会话模型",
 			"/mode - 打开模式选择卡片",
@@ -414,6 +417,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleLoopCommand(ctx, text, msg)
 	case "/cmds":
 		return s.handleCommandsCommand(ctx, text, msg)
+	case "/config":
+		return s.handleConfigCommand(ctx, text, msg)
 	case "/model":
 		return s.handleModelCommand(ctx, text, msg)
 	case "/mode":
@@ -1004,6 +1009,90 @@ func formatModeStatus(session Session) string {
 	return strings.Join(lines, "\n")
 }
 
+func formatConfigStatus(session Session) string {
+	lines := []string{"当前 ACP 配置项："}
+	if len(session.ConfigOptions) == 0 {
+		lines = append(lines, "当前 ACP server 还没有上报可配置项。")
+		return strings.Join(lines, "\n")
+	}
+	for _, opt := range session.ConfigOptions {
+		if strings.TrimSpace(opt.ID) == "" {
+			continue
+		}
+		lines = append(lines, " "+formatConfigOptionSummary(opt))
+	}
+	if len(lines) == 1 {
+		lines = append(lines, "当前 ACP server 还没有上报可配置项。")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "", "查看配置项：/config <id>", "设置配置项：/config <id> <value>")
+	return strings.Join(lines, "\n")
+}
+
+func formatConfigOptionSummary(opt acp.SessionConfigOption) string {
+	label := strings.TrimSpace(opt.ID)
+	name := strings.TrimSpace(opt.Name)
+	if name != "" && name != label {
+		label += " - " + name
+	}
+	current := configOptionValueString(opt.CurrentValue)
+	if current == "" {
+		current = "未知"
+	}
+	optionType := strings.TrimSpace(opt.Type)
+	if optionType == "" {
+		optionType = "unknown"
+	}
+	return fmt.Sprintf("%s [%s] = %s", label, optionType, current)
+}
+
+func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
+	id := strings.TrimSpace(opt.ID)
+	lines := []string{"ACP 配置项：" + id}
+	if name := strings.TrimSpace(opt.Name); name != "" && name != id {
+		lines = append(lines, "名称："+name)
+	}
+	if category := strings.TrimSpace(opt.Category); category != "" {
+		lines = append(lines, "分类："+category)
+	}
+	if description := strings.TrimSpace(opt.Description); description != "" {
+		lines = append(lines, "说明："+description)
+	}
+	optionType := strings.TrimSpace(opt.Type)
+	if optionType == "" {
+		optionType = "unknown"
+	}
+	lines = append(lines, "类型："+optionType)
+	current := configOptionValueString(opt.CurrentValue)
+	if current == "" {
+		current = "未知"
+	}
+	lines = append(lines, "当前值："+current)
+	if len(opt.Options) > 0 {
+		lines = append(lines, "", "可选值：")
+		for _, option := range opt.Options {
+			value := strings.TrimSpace(option.Value)
+			if value == "" {
+				continue
+			}
+			marker := ""
+			if value == configOptionValueString(opt.CurrentValue) {
+				marker = " *"
+			}
+			label := value
+			if name := strings.TrimSpace(option.Name); name != "" && name != value {
+				label += " - " + name
+			}
+			if description := strings.TrimSpace(option.Description); description != "" {
+				label += "：" + description
+			}
+			lines = append(lines, marker+" "+label)
+		}
+	}
+	lines = append(lines, "", "设置配置项：/config "+id+" <value>")
+	return strings.Join(lines, "\n")
+}
+
 func currentModeDisplay(session Session) string {
 	if modeOpt, ok := findModeConfigOption(session); ok {
 		current := configOptionValueString(modeOpt.CurrentValue)
@@ -1028,6 +1117,29 @@ func currentModelDisplay(session Session) string {
 		return strings.TrimSpace(session.Models.CurrentModelID)
 	}
 	return ""
+}
+
+func findConfigOption(session Session, id string) (acp.SessionConfigOption, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return acp.SessionConfigOption{}, false
+	}
+	for _, opt := range session.ConfigOptions {
+		if opt.ID == id || strings.EqualFold(opt.ID, id) {
+			return opt, true
+		}
+	}
+	for _, opt := range session.ConfigOptions {
+		if opt.Category == id || strings.EqualFold(opt.Category, id) {
+			return opt, true
+		}
+	}
+	for _, opt := range session.ConfigOptions {
+		if opt.Name == id || strings.EqualFold(opt.Name, id) {
+			return opt, true
+		}
+	}
+	return acp.SessionConfigOption{}, false
 }
 
 func findModeConfigOption(session Session) (acp.SessionConfigOption, bool) {
@@ -1072,6 +1184,17 @@ func resolveModeValue(opt acp.SessionConfigOption, target string) (string, bool)
 	return resolveConfigOptionValue(opt, target)
 }
 
+func resolveBooleanConfigOptionValue(target string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "true", "on", "yes", "y", "1", "enable", "enabled":
+		return true, true
+	case "false", "off", "no", "n", "0", "disable", "disabled":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 func resolveLegacyModeValue(state *acp.SessionModeState, target string) (string, bool) {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -1104,6 +1227,84 @@ func configOptionValueString(value any) string {
 	default:
 		return strings.TrimSpace(fmt.Sprint(v))
 	}
+}
+
+func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feishu.Message) string {
+	fields := strings.Fields(text)
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前会话还没有 ACP session，发送普通文本或 /new 后再查看或设置配置项。"
+	}
+	if len(fields) == 1 {
+		return formatConfigStatus(session)
+	}
+	configID := strings.TrimSpace(fields[1])
+	opt, ok := findConfigOption(session, configID)
+	if !ok {
+		return "未知配置项：" + configID + "\n\n" + formatConfigStatus(session)
+	}
+	if len(fields) == 2 {
+		return formatConfigOptionDetail(opt)
+	}
+	target := commandRemainder(text, 2)
+	if target == "" {
+		return "请使用 /config <id> <value> 设置配置项。"
+	}
+	value, display, err := s.setSessionConfigOption(ctx, msg, session, opt, target)
+	if err != nil {
+		if errors.Is(err, errUnknownConfigValue) {
+			return "配置项 " + opt.ID + " 不支持该值：" + target + "\n\n" + formatConfigOptionDetail(opt)
+		}
+		return err.Error()
+	}
+	if display == "" {
+		display = configOptionValueString(value)
+	}
+	return "已设置配置项 " + opt.ID + "：" + display
+}
+
+var errUnknownConfigValue = errors.New("未知配置项取值")
+
+func (s *Service) setSessionConfigOption(ctx context.Context, msg feishu.Message, session Session, opt acp.SessionConfigOption, target string) (any, string, error) {
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return nil, "", fmt.Errorf("未找到 agent 配置：%s", session.AgentName)
+	}
+	var value any
+	var display string
+	switch strings.TrimSpace(opt.Type) {
+	case "select":
+		resolved, ok := resolveConfigOptionValue(opt, target)
+		if !ok {
+			return nil, "", fmt.Errorf("%w：%s", errUnknownConfigValue, target)
+		}
+		value = resolved
+		display = configOptionDisplayName(opt, resolved)
+	case "boolean":
+		resolved, ok := resolveBooleanConfigOptionValue(target)
+		if !ok {
+			return nil, "", fmt.Errorf("%w：%s", errUnknownConfigValue, target)
+		}
+		value = resolved
+		display = strconv.FormatBool(resolved)
+	default:
+		return nil, "", fmt.Errorf("当前 bridge 不支持设置 %s 类型的配置项：%s", opt.Type, opt.ID)
+	}
+	options, err := s.runtime.SetConfigOption(ctx, session, agent, opt.ID, value)
+	if err != nil {
+		slog.ErrorContext(ctx, "设置 ACP config option 失败", "config_id", opt.ID, "value", value, "错误", err)
+		return nil, "", fmt.Errorf("设置配置项失败：%w", err)
+	}
+	session.ConfigOptions = options
+	if updated, ok := findConfigOption(session, opt.ID); ok {
+		if strings.TrimSpace(updated.Type) == "boolean" {
+			display = configOptionValueString(updated.CurrentValue)
+		} else {
+			display = configOptionDisplayName(updated, configOptionValueString(updated.CurrentValue))
+		}
+	}
+	s.saveSessionState(ctx, msg, session)
+	return value, display, nil
 }
 
 func (s *Service) handleModelCommand(ctx context.Context, text string, msg feishu.Message) string {

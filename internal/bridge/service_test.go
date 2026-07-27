@@ -821,6 +821,238 @@ func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+		{
+			ID:           "brave_mode",
+			Name:         "Brave Mode",
+			Description:  "Allow bolder actions",
+			Type:         "boolean",
+			CurrentValue: false,
+		},
+		{
+			ID:           "reasoning",
+			Name:         "Reasoning Effort",
+			Type:         "select",
+			CurrentValue: "medium",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "low", Name: "Low"},
+				{Value: "medium", Name: "Medium"},
+				{Value: "high", Name: "High"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "reasoning",
+				Name:         "Reasoning Effort",
+				Type:         "select",
+				CurrentValue: "high",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "low", Name: "Low"},
+					{Value: "medium", Name: "Medium"},
+					{Value: "high", Name: "High"},
+				},
+			},
+			{
+				ID:           "brave_mode",
+				Name:         "Brave Mode",
+				Type:         "boolean",
+				CurrentValue: false,
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config) error = %v", err)
+	}
+	for _, want := range []string{"当前 ACP 配置项", "model - Model [select] = gpt-5.5", "brave_mode - Brave Mode [boolean] = false", "reasoning - Reasoning Effort [select] = medium", "/config <id> <value>"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config reasoning",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config reasoning) error = %v", err)
+	}
+	for _, want := range []string{"ACP 配置项：reasoning", "名称：Reasoning Effort", "当前值：medium", "high - High", "/config reasoning <value>"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config reasoning High",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config reasoning High) error = %v", err)
+	}
+	if reply != "已设置配置项 reasoning：High（high）" {
+		t.Fatalf("reply = %q, want reasoning set confirmation", reply)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "reasoning" || rt.configCalls[0].Value != "high" {
+		t.Fatalf("configCalls = %+v, want reasoning high", rt.configCalls)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	reasoningOpt, ok := findConfigOption(updated, "reasoning")
+	if !ok || configOptionValueString(reasoningOpt.CurrentValue) != "high" {
+		t.Fatalf("updated config options = %+v, want reasoning high", updated.ConfigOptions)
+	}
+}
+
+func TestHandleFeishuMessageConfigSetsBooleanOption(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "brave_mode",
+			Name:         "Brave Mode",
+			Type:         "boolean",
+			CurrentValue: false,
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "brave_mode",
+				Name:         "Brave Mode",
+				Type:         "boolean",
+				CurrentValue: true,
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config brave_mode on",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config brave_mode on) error = %v", err)
+	}
+	if reply != "已设置配置项 brave_mode：true" {
+		t.Fatalf("reply = %q, want boolean set confirmation", reply)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "brave_mode" || rt.configCalls[0].Value != true {
+		t.Fatalf("configCalls = %+v, want brave_mode true", rt.configCalls)
+	}
+}
+
+func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "reasoning",
+			Name:         "Reasoning Effort",
+			Type:         "select",
+			CurrentValue: "medium",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "low", Name: "Low"},
+				{Value: "medium", Name: "Medium"},
+				{Value: "high", Name: "High"},
+			},
+		},
+		{
+			ID:           "brave_mode",
+			Name:         "Brave Mode",
+			Type:         "boolean",
+			CurrentValue: false,
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config missing",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config missing) error = %v", err)
+	}
+	if !strings.Contains(reply, "未知配置项：missing") || !strings.Contains(reply, "reasoning - Reasoning Effort") {
+		t.Fatalf("reply = %q, want unknown config with status", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config reasoning extreme",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config reasoning extreme) error = %v", err)
+	}
+	if !strings.Contains(reply, "配置项 reasoning 不支持该值：extreme") || !strings.Contains(reply, "可选值") {
+		t.Fatalf("reply = %q, want unsupported select value", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config brave_mode maybe",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config brave_mode maybe) error = %v", err)
+	}
+	if !strings.Contains(reply, "配置项 brave_mode 不支持该值：maybe") {
+		t.Fatalf("reply = %q, want unsupported boolean value", reply)
+	}
+	if len(rt.configCalls) != 0 {
+		t.Fatalf("configCalls = %+v, want no config call for invalid values", rt.configCalls)
+	}
+}
+
 func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)

@@ -208,6 +208,9 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。
 - `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
+- `/config`：查看当前 ACP server 上报的配置项。
+- `/config <id>`：查看指定配置项的类型、当前值和可选值。
+- `/config <id> <value>`：通过 ACP `session/set_config_option` 设置指定配置项。当前支持 `select` 和 `boolean` 类型；布尔值可用 `true/false`、`on/off`、`yes/no`、`1/0`。
 - `/model`：打开飞书模型选择卡片，通过下拉列表设置当前会话模型。
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/mode`：打开飞书模式选择卡片，通过下拉列表设置当前会话模式。
