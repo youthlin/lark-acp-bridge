@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/youthlin/lark-acp-bridge/internal/arg"
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
+
+const maxIncomingMessageAge = 10 * time.Minute
 
 // handleMessage 处理Bot消息
 func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -31,6 +34,13 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
 	if strings.TrimSpace(msg.MessageID) == "" {
 		slog.WarnContext(ctx, "跳过缺少 message_id 的飞书消息")
+		return nil
+	}
+	if isStaleIncomingMessage(msg.CreatedAt, time.Now(), maxIncomingMessageAge) {
+		slog.InfoContext(ctx, "跳过过旧飞书消息",
+			"message_create_time", msg.CreatedAt.Format(time.RFC3339Nano),
+			"max_age", maxIncomingMessageAge.String(),
+		)
 		return nil
 	}
 	if a.deduper != nil {
@@ -73,6 +83,13 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	slog.InfoContext(ctx, "回复飞书消息成功")
 	return nil
+}
+
+func isStaleIncomingMessage(createdAt, now time.Time, maxAge time.Duration) bool {
+	if createdAt.IsZero() || maxAge <= 0 {
+		return false
+	}
+	return createdAt.Before(now.Add(-maxAge))
 }
 
 func (a *Adapter) withReplyContext(ctx context.Context, msg Message) Message {

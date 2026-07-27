@@ -3,6 +3,7 @@ package feishu
 import (
 	"strings"
 	"testing"
+	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -22,6 +23,7 @@ func TestParseMessageTextWithMention(t *testing.T) {
 				ThreadId:    ptr("omt_1"),
 				RootId:      ptr("om_root"),
 				ParentId:    ptr("om_parent"),
+				CreateTime:  ptr("1700000000123"),
 				MessageType: ptr("text"),
 				Content:     ptr(`{"text":"你好 @_user_1 继续测试"}`),
 				Mentions: []*larkim.MentionEvent{
@@ -47,6 +49,9 @@ func TestParseMessageTextWithMention(t *testing.T) {
 	}
 	if msg.RootID != "om_root" || msg.ParentID != "om_parent" {
 		t.Fatalf("unexpected reply ids: %+v", msg)
+	}
+	if !msg.CreatedAt.Equal(time.UnixMilli(1700000000123)) {
+		t.Fatalf("CreatedAt = %s, want parsed message create_time", msg.CreatedAt)
 	}
 	if msg.SenderID != "ou_sender" {
 		t.Fatalf("SenderID = %q, want ou_sender", msg.SenderID)

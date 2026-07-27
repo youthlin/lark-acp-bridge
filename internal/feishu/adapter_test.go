@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -283,6 +284,23 @@ func TestAdapterSkipsMessageWithoutMessageID(t *testing.T) {
 	}
 	if handler.count != 0 {
 		t.Fatalf("handler count = %d, want message without id skipped", handler.count)
+	}
+}
+
+func TestAdapterSkipsStaleMessage(t *testing.T) {
+	handler := &countingHandler{}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	event := textEvent("om_stale", "oc_1", "hello")
+	setEventCreateTime(event, time.Now().Add(-maxIncomingMessageAge-time.Second))
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.count != 0 {
+		t.Fatalf("handler count = %d, want stale message skipped", handler.count)
+	}
+	if allowed, err := adapter.deduper.Allow("bot-a", "om_stale"); err != nil || !allowed {
+		t.Fatalf("stale message should not be recorded in deduper, Allow = %v, %v", allowed, err)
 	}
 }
 
@@ -799,6 +817,13 @@ func textEvent(messageID, chatID, text string) *larkim.P2MessageReceiveV1 {
 			},
 		},
 	}
+}
+
+func setEventCreateTime(event *larkim.P2MessageReceiveV1, t time.Time) {
+	if event == nil || event.Event == nil || event.Event.Message == nil {
+		return
+	}
+	event.Event.Message.CreateTime = ptr(strconv.FormatInt(t.UnixMilli(), 10))
 }
 
 func imageEvent(messageID, chatID, imageKey string) *larkim.P2MessageReceiveV1 {

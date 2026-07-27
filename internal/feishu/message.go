@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -19,6 +21,7 @@ type Message struct {
 	ThreadID   string
 	RootID     string
 	ParentID   string
+	CreatedAt  time.Time
 	SenderID   string
 	SenderType string
 	MsgType    string
@@ -85,6 +88,7 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 		ThreadID:  value(raw.ThreadId),
 		RootID:    value(raw.RootId),
 		ParentID:  value(raw.ParentId),
+		CreatedAt: parseMessageCreateTime(value(raw.CreateTime)),
 		MsgType:   value(raw.MessageType),
 	}
 	if event.Event.Sender != nil && event.Event.Sender.SenderId != nil {
@@ -125,6 +129,18 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 	}
 	msg.Text = replaceMentionKeys(msg.Text, msg.Mentions)
 	return msg, nil
+}
+
+func parseMessageCreateTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	millis, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || millis <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(millis)
 }
 
 func (m Message) PromptText() string {
