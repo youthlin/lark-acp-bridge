@@ -1143,6 +1143,38 @@ func TestNewSessionSelectionCardJSONContainsDropdownAndCallbackContext(t *testin
 	}
 }
 
+func TestNewConfigDetailCardJSONContainsConfigFieldsAndOptions(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newConfigDetailCardJSON(ConfigDetailCard{
+		ID:           "model",
+		Name:         "Model",
+		Category:     "model",
+		Description:  "Choose which model TRAE CLI should use",
+		Type:         "select",
+		CurrentValue: "gpt-5.5",
+		Options: []ConfigOptionValue{
+			{Value: "Doubao-Seed-2.1-Pro", Name: "Doubao-Seed-2.1-Pro", Description: "184K context window, support reasoning."},
+			{Value: "gpt-5.5", Name: "GPT-5.5", Description: "support reasoning, beta.", Current: true},
+		},
+		SetCommand: "/config model <value>",
+	})), &card); err != nil {
+		t.Fatalf("newConfigDetailCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{
+		"ACP 配置项：model",
+		"Model | model | select",
+		"Choose which model TRAE CLI should use",
+		"GPT-5.5（gpt-5.5）",
+		"**当前**",
+		"/config model <value>",
+	} {
+		if !jsonContainsSubstring(card, want) {
+			t.Fatalf("config detail card does not contain %q: %#v", want, card)
+		}
+	}
+}
+
 func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.T) {
 	handler := &fakeSessionSelectionHandler{display: "旧会话"}
 	adapter := &Adapter{handler: handler}

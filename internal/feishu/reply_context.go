@@ -86,6 +86,24 @@ type SessionOption struct {
 	Cwd          string
 }
 
+type ConfigOptionValue struct {
+	Value       string
+	Name        string
+	Description string
+	Current     bool
+}
+
+type ConfigDetailCard struct {
+	ID           string
+	Name         string
+	Category     string
+	Description  string
+	Type         string
+	CurrentValue string
+	Options      []ConfigOptionValue
+	SetCommand   string
+}
+
 type ModelSelectionCard struct {
 	BotID        string
 	ChatID       string
@@ -126,6 +144,10 @@ type modeSelectionCardSenderKey struct{}
 type sessionSelectionCardSender func(context.Context, Message, SessionSelectionCard) error
 
 type sessionSelectionCardSenderKey struct{}
+
+type configDetailCardSender func(context.Context, Message, ConfigDetailCard) error
+
+type configDetailCardSenderKey struct{}
 
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
@@ -303,6 +325,21 @@ func WithSessionSelectionCardSender(ctx context.Context, sender func(context.Con
 
 func SendSessionSelectionCard(ctx context.Context, msg Message, card SessionSelectionCard) (bool, error) {
 	sender, ok := ctx.Value(sessionSelectionCardSenderKey{}).(sessionSelectionCardSender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender(ctx, msg, card)
+}
+
+func WithConfigDetailCardSender(ctx context.Context, sender func(context.Context, Message, ConfigDetailCard) error) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, configDetailCardSenderKey{}, configDetailCardSender(sender))
+}
+
+func SendConfigDetailCard(ctx context.Context, msg Message, card ConfigDetailCard) (bool, error) {
+	sender, ok := ctx.Value(configDetailCardSenderKey{}).(configDetailCardSender)
 	if !ok || sender == nil {
 		return false, nil
 	}

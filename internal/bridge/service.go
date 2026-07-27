@@ -1094,6 +1094,41 @@ func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
 	return strings.Join(lines, "\n")
 }
 
+func configDetailCard(opt acp.SessionConfigOption) feishu.ConfigDetailCard {
+	id := strings.TrimSpace(opt.ID)
+	optionType := strings.TrimSpace(opt.Type)
+	if optionType == "" {
+		optionType = "unknown"
+	}
+	current := configOptionValueString(opt.CurrentValue)
+	if current == "" {
+		current = "未知"
+	}
+	options := make([]feishu.ConfigOptionValue, 0, len(opt.Options))
+	for _, option := range opt.Options {
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		options = append(options, feishu.ConfigOptionValue{
+			Value:       value,
+			Name:        strings.TrimSpace(option.Name),
+			Description: cleanConfigOptionDescription(option.Description),
+			Current:     value == configOptionValueString(opt.CurrentValue),
+		})
+	}
+	return feishu.ConfigDetailCard{
+		ID:           id,
+		Name:         strings.TrimSpace(opt.Name),
+		Category:     strings.TrimSpace(opt.Category),
+		Description:  strings.TrimSpace(opt.Description),
+		Type:         optionType,
+		CurrentValue: current,
+		Options:      options,
+		SetCommand:   "/config " + id + " <value>",
+	}
+}
+
 func cleanConfigOptionDescription(description string) string {
 	description = strings.TrimSpace(description)
 	switch description {
@@ -1255,7 +1290,7 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 		return "未知配置项：" + configID + "\n\n" + formatConfigStatus(session)
 	}
 	if len(fields) == 2 {
-		return formatConfigOptionDetail(opt)
+		return s.sendConfigDetailCard(ctx, msg, opt)
 	}
 	target := commandRemainder(text, 2)
 	if target == "" {
@@ -1272,6 +1307,18 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 		display = configOptionValueString(value)
 	}
 	return "已设置配置项 " + opt.ID + "：" + display
+}
+
+func (s *Service) sendConfigDetailCard(ctx context.Context, msg feishu.Message, opt acp.SessionConfigOption) string {
+	sent, err := feishu.SendConfigDetailCard(ctx, msg, configDetailCard(opt))
+	if err != nil {
+		slog.ErrorContext(ctx, "发送配置项详情卡片失败", "错误", err)
+		return "发送配置项详情卡片失败：" + err.Error()
+	}
+	if !sent {
+		return formatConfigOptionDetail(opt)
+	}
+	return ""
 }
 
 var errUnknownConfigValue = errors.New("未知配置项取值")

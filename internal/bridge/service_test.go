@@ -942,6 +942,63 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Description:  "Choose which model TRAE CLI should use",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "Doubao-Seed-2.1-Pro", Name: "Doubao-Seed-2.1-Pro", Description: "184K context window, support reasoning."},
+				{Value: "gpt-5.5", Name: "GPT-5.5", Description: "support reasoning, beta."},
+				{Value: "Doubao_1_6", Name: "Doubao-Seed-Code", Description: "."},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := newTestService(config.Default(), store)
+	var got feishu.ConfigDetailCard
+	ctx := feishu.WithConfigDetailCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ConfigDetailCard) error {
+		got = card
+		return nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/config model",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config model) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending config detail card", reply)
+	}
+	if got.ID != "model" || got.Name != "Model" || got.Category != "model" || got.Type != "select" || got.CurrentValue != "gpt-5.5" {
+		t.Fatalf("card = %+v, want model config detail", got)
+	}
+	if got.Description != "Choose which model TRAE CLI should use" || got.SetCommand != "/config model <value>" {
+		t.Fatalf("card = %+v, want description and set command", got)
+	}
+	if len(got.Options) != 3 {
+		t.Fatalf("card options = %+v, want 3 options", got.Options)
+	}
+	if got.Options[1].Value != "gpt-5.5" || got.Options[1].Name != "GPT-5.5" || !got.Options[1].Current {
+		t.Fatalf("current option = %+v, want GPT-5.5 current", got.Options[1])
+	}
+	if got.Options[2].Description != "" {
+		t.Fatalf("dot-only description = %q, want empty", got.Options[2].Description)
+	}
+}
+
 func TestHandleFeishuMessageConfigSetsBooleanOption(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)

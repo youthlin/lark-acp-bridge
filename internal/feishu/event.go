@@ -69,6 +69,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	ctx = WithModelSelectionCardSender(ctx, a.SendModelSelectionCard)
 	ctx = WithModeSelectionCardSender(ctx, a.SendModeSelectionCard)
 	ctx = WithSessionSelectionCardSender(ctx, a.SendSessionSelectionCard)
+	ctx = WithConfigDetailCardSender(ctx, a.SendConfigDetailCard)
 
 	reply, err := a.handler.HandleFeishuMessage(ctx, msg)
 	if err != nil {
