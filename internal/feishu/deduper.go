@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,10 @@ func (d *messageDeduper) Load() error {
 	data, err := os.ReadFile(d.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			d.mu.Lock()
+			d.seen = make(map[string]time.Time)
+			d.nextSweep = time.Time{}
+			d.mu.Unlock()
 			return nil
 		}
 		return fmt.Errorf("读取消息去重文件: %w", err)
@@ -142,6 +147,12 @@ func (d *messageDeduper) writeLocked() error {
 			ExpiresAt: expiresAt,
 		})
 	}
+	sort.Slice(file.Messages, func(i, j int) bool {
+		if file.Messages[i].BotID != file.Messages[j].BotID {
+			return file.Messages[i].BotID < file.Messages[j].BotID
+		}
+		return file.Messages[i].MessageID < file.Messages[j].MessageID
+	})
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("编码消息去重文件: %w", err)

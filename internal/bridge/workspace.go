@@ -3,6 +3,7 @@ package bridge
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,7 +11,8 @@ import (
 )
 
 const (
-	workspaceBootstrapFile = "Bootstrap.md"
+	workspaceBootstrapFile             = "Bootstrap.md"
+	workspaceContextFileMaxBytes int64 = 64 * 1024
 )
 
 type WorkspaceStatus struct {
@@ -22,12 +24,12 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 	if strings.TrimSpace(path) == "" {
 		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
 	}
+	if err := ensureWorkspaceRoot(path); err != nil {
+		return WorkspaceStatus{}, err
+	}
 	hadManagedFiles, err := workspaceHasManagedFiles(path)
 	if err != nil {
 		return WorkspaceStatus{}, err
-	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return WorkspaceStatus{}, fmt.Errorf("创建 bot workspace: %w", err)
 	}
 	status := WorkspaceStatus{Path: path}
 	for _, file := range workspaceFiles(botID) {
@@ -58,6 +60,23 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 		status.CreatedFiles = append(status.CreatedFiles, workspaceBootstrapFile)
 	}
 	return status, nil
+}
+
+func ensureWorkspaceRoot(path string) error {
+	info, err := os.Stat(path)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("workspace 路径不是目录: %s", path)
+		}
+		return nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("检查 bot workspace: %w", err)
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("创建 bot workspace: %w", err)
+	}
+	return nil
 }
 
 func workspaceGuide(status WorkspaceStatus) string {
@@ -159,11 +178,11 @@ func workspaceContextPrompt(workspace string) string {
 	var fileSections []string
 	for _, name := range files {
 		path := filepath.Join(workspace, name)
-		data, err := os.ReadFile(path)
-		if err != nil || strings.TrimSpace(string(data)) == "" {
+		content, ok := readWorkspaceContextFile(path)
+		if !ok {
 			continue
 		}
-		fileSections = append(fileSections, fmt.Sprintf("<file path=%q>\n%s\n</file>", path, string(data)))
+		fileSections = append(fileSections, fmt.Sprintf("<file path=%q>\n%s\n</file>", path, content))
 	}
 	if len(fileSections) == 0 {
 		return ""
@@ -175,6 +194,39 @@ func workspaceContextPrompt(workspace string) string {
 	}
 	sections = append(sections, fileSections...)
 	return strings.Join(sections, "\n\n")
+}
+
+func readWorkspaceContextFile(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	if info.Size() <= workspaceContextFileMaxBytes {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", false
+		}
+		content := string(data)
+		if strings.TrimSpace(content) == "" {
+			return "", false
+		}
+		return content, true
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, workspaceContextFileMaxBytes))
+	if err != nil {
+		return "", false
+	}
+	content := strings.ToValidUTF8(string(data), "")
+	if strings.TrimSpace(content) == "" {
+		return "", false
+	}
+	content += fmt.Sprintf("\n\n[文件超过 %d 字节，已截断]", workspaceContextFileMaxBytes)
+	return content, true
 }
 
 func workspaceMemoryPolicyPrompt(workspace string) string {

@@ -32,6 +32,7 @@ func (s *SessionInfo) UnmarshalJSON(data []byte) error {
 	if s.Mode == nil {
 		s.Mode = aux.LegacyModes
 	}
+	s.AvailableCommands = normalizeAvailableCommands(s.AvailableCommands)
 	s.ConfigOptions = filterSupportedConfigOptions(s.ConfigOptions)
 	return nil
 }
@@ -44,6 +45,20 @@ type AvailableCommand struct {
 
 type AvailableCommandInput struct {
 	Hint string `json:"hint"`
+}
+
+func normalizeAvailableCommands(commands []AvailableCommand) []AvailableCommand {
+	if len(commands) == 0 {
+		return commands
+	}
+	for i := range commands {
+		commands[i].Name = strings.TrimSpace(commands[i].Name)
+		commands[i].Description = strings.TrimSpace(commands[i].Description)
+		if commands[i].Input != nil {
+			commands[i].Input.Hint = strings.TrimSpace(commands[i].Input.Hint)
+		}
+	}
+	return commands
 }
 
 type SessionConfigOption struct {
@@ -68,11 +83,23 @@ func filterSupportedConfigOptions(options []SessionConfigOption) []SessionConfig
 	}
 	filtered := options[:0]
 	for _, opt := range options {
+		opt = normalizeConfigOption(opt)
 		if isSupportedConfigOptionType(opt.Type) {
 			filtered = append(filtered, opt)
 		}
 	}
 	return filtered
+}
+
+func normalizeConfigOption(opt SessionConfigOption) SessionConfigOption {
+	opt.ID = strings.TrimSpace(opt.ID)
+	opt.Category = strings.TrimSpace(opt.Category)
+	opt.Type = strings.TrimSpace(opt.Type)
+	for i := range opt.Options {
+		opt.Options[i].Value = strings.TrimSpace(opt.Options[i].Value)
+		opt.Options[i].Name = strings.TrimSpace(opt.Options[i].Name)
+	}
+	return opt
 }
 
 func isSupportedConfigOptionType(optionType string) bool {
@@ -89,10 +116,41 @@ type SessionModelState struct {
 	AvailableModels []SessionModel `json:"availableModels,omitempty"`
 }
 
+func (s *SessionModelState) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var parsed struct {
+		CurrentModelID  string         `json:"currentModelId"`
+		AvailableModels []SessionModel `json:"availableModels,omitempty"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	s.CurrentModelID = strings.TrimSpace(parsed.CurrentModelID)
+	s.AvailableModels = append([]SessionModel(nil), parsed.AvailableModels...)
+	return nil
+}
+
 type SessionModel struct {
 	ModelID     string `json:"modelId"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+}
+
+func (m *SessionModel) UnmarshalJSON(data []byte) error {
+	var parsed struct {
+		ModelID     string `json:"modelId"`
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	m.ModelID = strings.TrimSpace(parsed.ModelID)
+	m.Name = strings.TrimSpace(parsed.Name)
+	m.Description = strings.TrimSpace(parsed.Description)
+	return nil
 }
 
 type SessionModeState struct {

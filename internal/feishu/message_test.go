@@ -59,6 +59,62 @@ func TestParseMessageTextWithMention(t *testing.T) {
 	}
 }
 
+func TestParseMessageTrimsEventStringFields(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					OpenId: ptr(" ou_sender "),
+				},
+				SenderType: ptr(" user "),
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   ptr(" om_1 "),
+				ChatId:      ptr(" oc_1 "),
+				ChatType:    ptr(" p2p "),
+				ThreadId:    ptr(" omt_1 "),
+				RootId:      ptr(" om_root "),
+				ParentId:    ptr(" om_parent "),
+				MessageType: ptr(" text "),
+				Content:     ptr(`{"text":"你好 @_user_1"}`),
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key: ptr(" @_user_1 "),
+						Id: &larkim.UserId{
+							OpenId: ptr(" ou_bot "),
+						},
+						Name:          ptr(" 智能助手 "),
+						MentionedType: ptr(" bot "),
+					},
+				},
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.MessageID != "om_1" || msg.ChatID != "oc_1" || msg.ChatType != "p2p" || msg.MsgType != "text" {
+		t.Fatalf("message ids/types = %+v, want trimmed fields", msg)
+	}
+	if msg.ThreadID != "omt_1" || msg.RootID != "om_root" || msg.ParentID != "om_parent" {
+		t.Fatalf("thread/reply ids = %+v, want trimmed fields", msg)
+	}
+	if msg.SenderID != "ou_sender" || msg.SenderType != "user" {
+		t.Fatalf("sender = %+v, want trimmed fields", msg)
+	}
+	if !msg.IsPrivateChat() {
+		t.Fatalf("IsPrivateChat() = false, want true for trimmed p2p")
+	}
+	if msg.Text != "你好 @智能助手" {
+		t.Fatalf("Text = %q, want mention replaced with trimmed name", msg.Text)
+	}
+	if len(msg.Mentions) != 1 || msg.Mentions[0].Key != "@_user_1" || msg.Mentions[0].ID != "ou_bot" || msg.Mentions[0].Name != "智能助手" || msg.Mentions[0].Type != "bot" {
+		t.Fatalf("Mentions = %+v, want trimmed mention fields", msg.Mentions)
+	}
+}
+
 func TestReplyInThreadForMessage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -171,6 +227,26 @@ func TestParseMessagePostWithTopLevelContentAndImage(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PromptText() = %q, want %q", prompt, want)
 		}
+	}
+}
+
+func TestParseMessageImagesUsesStableStructuralOrder(t *testing.T) {
+	images := parseMessageImages(`{
+  "z_extra": {"image_key": "img_extra"},
+  "content": [
+    [{"tag": "img", "image_key": "img_content_1"}],
+    [{"tag": "img", "image_key": "img_content_2"}]
+  ],
+  "a_extra": {"image_key": "img_alpha"},
+  "content_v2": [[{"tag": "img", "image_key": "img_content_2"}]]
+}`)
+	got := make([]string, 0, len(images))
+	for _, image := range images {
+		got = append(got, image.ImageKey)
+	}
+	want := []string{"img_content_1", "img_content_2", "img_alpha", "img_extra"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("image keys = %#v, want %#v", got, want)
 	}
 }
 

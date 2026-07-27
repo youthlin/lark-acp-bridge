@@ -312,6 +312,17 @@ func TestEnsureWorkspaceRejectsEmptyPath(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkspaceRejectsFilePath(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.WriteFile(workspace, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(workspace) error = %v", err)
+	}
+
+	if _, err := ensureWorkspace(workspace, "bot-a"); err == nil || !strings.Contains(err.Error(), "workspace 路径不是目录") {
+		t.Fatalf("ensureWorkspace(file) error = %v, want not directory error", err)
+	}
+}
+
 func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if _, err := ensureWorkspace(workspace, "default"); err != nil {
@@ -362,6 +373,25 @@ func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
 	}
 	if got := promptTextWithWorkspaceContext("", feishu.Message{}, "hello"); got != "hello" {
 		t.Fatalf("promptTextWithWorkspaceContext(empty) = %q, want user text only", got)
+	}
+}
+
+func TestWorkspaceContextPromptTruncatesLargeFiles(t *testing.T) {
+	workspace := t.TempDir()
+	largeContent := strings.Repeat("a", int(workspaceContextFileMaxBytes)+32) + "TAIL_SHOULD_NOT_APPEAR"
+	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte(largeContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
+	}
+
+	prompt := workspaceContextPrompt(workspace)
+	if !strings.Contains(prompt, "Workspace Context") {
+		t.Fatalf("prompt = %q, want workspace context", prompt)
+	}
+	if !strings.Contains(prompt, "已截断") {
+		t.Fatalf("prompt = %q, want truncation notice", prompt)
+	}
+	if strings.Contains(prompt, "TAIL_SHOULD_NOT_APPEAR") {
+		t.Fatalf("prompt contains truncated tail")
 	}
 }
 
@@ -761,6 +791,33 @@ func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
 	}
 	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Text != "/review 快速检查" {
 		t.Fatalf("promptCalls = %+v, want double slash forwarded as single slash", rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptReply: "should not run"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/cmds /",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/cmds /) error = %v", err)
+	}
+	if !strings.Contains(reply, "ACP command 名称不能为空") {
+		t.Fatalf("reply = %q, want empty command name error", reply)
+	}
+	if len(rt.promptCalls) != 0 {
+		t.Fatalf("promptCalls = %+v, want no ACP prompt", rt.promptCalls)
 	}
 }
 
@@ -1364,6 +1421,18 @@ func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
 	}
 
 	selection.OperatorID = selection.RequesterID
+	selection.RequesterID = ""
+	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
+	}
+
+	selection.RequesterID = "ou_requester"
+	selection.OperatorID = ""
+	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
+	}
+
+	selection.OperatorID = selection.RequesterID
 	selection.ACPSessionID = "stale-session"
 	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "已过期") {
 		t.Fatalf("stale card error = %v, want expired validation", err)
@@ -1430,6 +1499,18 @@ func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
 	selection.OperatorID = "ou_other"
 	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "只有发起") {
 		t.Fatalf("other user error = %v, want requester validation", err)
+	}
+
+	selection.OperatorID = selection.RequesterID
+	selection.RequesterID = ""
+	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
+	}
+
+	selection.RequesterID = "ou_requester"
+	selection.OperatorID = ""
+	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
 	}
 
 	selection.OperatorID = selection.RequesterID
@@ -2148,11 +2229,11 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 		MessageID: "om_off",
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
-		Text:      "@智能助手 /at off",
+		Text:      "@智能助手 /at OFF",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(@bot /at off) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(@bot /at OFF) error = %v", err)
 	}
 	if !strings.Contains(reply, "无需 at") {
 		t.Fatalf("reply = %q, want mention optional confirmation", reply)
@@ -2160,6 +2241,20 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
 	if !ok || !chat.MentionOptional || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
 		t.Fatalf("chat config = %+v, %v; want mention optional without clearing other chat options", chat, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_status_upper",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at STATUS",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at STATUS) error = %v", err)
+	}
+	if !strings.Contains(reply, "无需 at") {
+		t.Fatalf("reply = %q, want case-insensitive status", reply)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2561,6 +2656,7 @@ func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
 	display, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:        base.BotID,
 		ChatID:       base.ChatID,
+		RequesterID:  testOwnerOpenID,
 		OperatorID:   testOwnerOpenID,
 		ACPSessionID: "acp-session-1",
 	})
@@ -2584,10 +2680,39 @@ func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
 	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:        base.BotID,
 		ChatID:       base.ChatID,
+		RequesterID:  testOwnerOpenID,
+		OperatorID:   "ou_other",
+		ACPSessionID: "acp-session-2",
+	}); err == nil || !strings.Contains(err.Error(), "只有发起") {
+		t.Fatalf("other requester error = %v, want requester validation", err)
+	}
+
+	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
+		BotID:        base.BotID,
+		ChatID:       base.ChatID,
+		RequesterID:  "ou_other",
 		OperatorID:   "ou_other",
 		ACPSessionID: "acp-session-2",
 	}); err == nil || !strings.Contains(err.Error(), "只有 bot owner") {
 		t.Fatalf("non-owner error = %v, want owner validation", err)
+	}
+
+	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
+		BotID:        base.BotID,
+		ChatID:       base.ChatID,
+		OperatorID:   testOwnerOpenID,
+		ACPSessionID: "acp-session-2",
+	}); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
+	}
+
+	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
+		BotID:        base.BotID,
+		ChatID:       base.ChatID,
+		RequesterID:  testOwnerOpenID,
+		ACPSessionID: "acp-session-2",
+	}); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
+		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
 	}
 }
 
@@ -2637,6 +2762,28 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	if !strings.Contains(reply, "已设置当前会话标题：新标题") {
 		t.Fatalf("reply = %q, want title confirmation", reply)
 	}
+	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	if !ok || session.Title != "新标题" || !session.ManualTitle {
+		t.Fatalf("session = %+v, %v; want manual title 新标题", session, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		MessageID: "om_title_spaced",
+		Text:      "/session   title   多空格标题",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/session title spaced) error = %v", err)
+	}
+	if !strings.Contains(reply, "已设置当前会话标题：多空格标题") {
+		t.Fatalf("reply = %q, want spaced title confirmation", reply)
+	}
+	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	if !ok || session.Title != "多空格标题" || !session.ManualTitle {
+		t.Fatalf("session = %+v, %v; want manual title 多空格标题", session, ok)
+	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
@@ -2656,13 +2803,27 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 		BotID:     msg.BotID,
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
+		MessageID: "om_slash_title",
+		Text:      "/new bug/fix",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new slash title) error = %v", err)
+	}
+	if !strings.Contains(reply, "标题：bug/fix") || !strings.Contains(reply, "cwd 来源：当前会话已有会话") {
+		t.Fatalf("reply = %q, want slash title to reuse cwd instead of being parsed as cwd", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
 		MessageID: "om_list",
 		Text:      "/session list",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/session list) error = %v", err)
 	}
-	if !strings.Contains(reply, "标题：只指定标题") || !strings.Contains(reply, "标题：新标题") {
+	if !strings.Contains(reply, "标题：bug/fix") || !strings.Contains(reply, "标题：多空格标题") {
 		t.Fatalf("reply = %q, want titles in list", reply)
 	}
 }
@@ -5187,6 +5348,130 @@ func TestHandleFeishuMessageNewWithoutCwdReusesCurrentSessionCwd(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageNewRelativeCwd(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rootDir := t.TempDir()
+	currentDir := filepath.Join(rootDir, "current")
+	siblingDir := filepath.Join(rootDir, "sibling")
+	defaultDir := filepath.Join(rootDir, "default")
+	for _, dir := range []string{currentDir, siblingDir, defaultDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("Mkdir(%s) error = %v", dir, err)
+		}
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = defaultDir
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(&fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2", "acp-session-3"}})
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_current",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/new " + currentDir,
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new current) error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_relative_current",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/new ../sibling 相对路径标题",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new relative current) error = %v", err)
+	}
+	wantSibling := filepath.Clean(siblingDir)
+	if !strings.Contains(reply, "cwd："+wantSibling) || !strings.Contains(reply, "cwd 来源：命令参数") || !strings.Contains(reply, "标题：相对路径标题") {
+		t.Fatalf("reply = %q, want relative cwd resolved from current session", reply)
+	}
+
+	otherReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_relative_default",
+		ChatID:    "oc_other",
+		ChatType:  msg.ChatType,
+		Text:      "/new ../default",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new relative default) error = %v", err)
+	}
+	if !strings.Contains(otherReply, "cwd："+defaultDir) || !strings.Contains(otherReply, "cwd 来源：命令参数") {
+		t.Fatalf("reply = %q, want relative cwd resolved from default cwd", otherReply)
+	}
+}
+
+func TestHandleFeishuMessageNewRejectsMissingExplicitCwd(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_missing",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/new " + missing,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new missing) error = %v", err)
+	}
+	if !strings.Contains(reply, "工作目录不可访问") {
+		t.Fatalf("reply = %q, want missing cwd rejection", reply)
+	}
+	if len(rt.newCalls) != 0 {
+		t.Fatalf("newCalls = %+v, want no ACP session", rt.newCalls)
+	}
+}
+
+func TestHandleFeishuMessageNewRejectsExplicitCwdFile(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	rt := &fakeRuntime{newSessionID: "acp-session-1"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	cwd := filepath.Join(t.TempDir(), "repo.txt")
+	if err := os.WriteFile(cwd, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cwd) error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_file",
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		Text:      "/new " + cwd,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new file) error = %v", err)
+	}
+	if !strings.Contains(reply, "工作目录不是目录") {
+		t.Fatalf("reply = %q, want file cwd rejection", reply)
+	}
+	if len(rt.newCalls) != 0 {
+		t.Fatalf("newCalls = %+v, want no ACP session", rt.newCalls)
+	}
+}
+
 func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
@@ -5306,6 +5591,28 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"})
 	if !ok || !chat.WikiDisabled || chat.WikiIntervalSec != 1 {
 		t.Fatalf("chat config = %+v, %v; want wiki disabled and interval persisted", chat, ok)
+	}
+}
+
+func TestHandleWikiCommandRejectsSubSecondInterval(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		Text:      "/wiki interval 1ms",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki interval 1ms) error = %v", err)
+	}
+	if !strings.Contains(reply, "不能小于 1s") {
+		t.Fatalf("reply = %q, want sub-second rejection", reply)
+	}
+	if chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"}); ok || chat.WikiIntervalSec != 0 {
+		t.Fatalf("chat config = %+v, %v; want interval not persisted", chat, ok)
 	}
 }
 
@@ -5926,6 +6233,14 @@ func TestParseLoopRequest(t *testing.T) {
 	}
 	if req.MaxDuration != 0 || req.MaxRounds != 0 || req.Interval != defaultLoopInterval || req.Prompt != "默认间隔" {
 		t.Fatalf("request = %+v, want unlimited with default interval", req)
+	}
+
+	req, err = parseLoopRequest("/loop -n 1 请保留  多空格\n以及换行")
+	if err != nil {
+		t.Fatalf("parseLoopRequest(spaced prompt) error = %v", err)
+	}
+	if req.Prompt != "请保留  多空格\n以及换行" {
+		t.Fatalf("prompt = %q, want original spacing", req.Prompt)
 	}
 
 	if _, err := parseLoopRequest("/loop -i 0 提示词"); err == nil || !strings.Contains(err.Error(), "-i 必须大于 0") {
@@ -6887,6 +7202,51 @@ func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(restartAckPath(workspace)); statErr != nil {
 		t.Fatalf("restart ack file should remain after send failure, stat err = %v", statErr)
+	}
+}
+
+func TestConsumeRestartAckRemovesInvalidJSONFile(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(restartAckPath(workspace), []byte("{invalid json"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	sender := &fakeRestartAckSender{}
+
+	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
+		t.Fatalf("consumeRestartAck() error = %v", err)
+	}
+	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart ack file err = %v, want removed", err)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("sent messages = %+v, want none for invalid ack", sender.messages)
+	}
+}
+
+func TestConsumeRestartAckRemovesMissingTargetFile(t *testing.T) {
+	workspace := t.TempDir()
+	ack := newRestartAck(feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "group",
+	})
+	data, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(restartAckPath(workspace), data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	sender := &fakeRestartAckSender{}
+
+	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
+		t.Fatalf("consumeRestartAck() error = %v", err)
+	}
+	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart ack file err = %v, want removed", err)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("sent messages = %+v, want none for ack without message target", sender.messages)
 	}
 }
 

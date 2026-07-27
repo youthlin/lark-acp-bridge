@@ -49,6 +49,14 @@ func TestChildArgsDropsMode(t *testing.T) {
 	}
 }
 
+func TestChildArgsKeepsDoubleDashConfigValue(t *testing.T) {
+	args := childArgs([]string{"--config", modeRestart, modeRestart})
+	want := []string{"-daemon-child", "--config", modeRestart}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("childArgs() = %#v, want %#v", args, want)
+	}
+}
+
 func TestReadRunningPIDRemovesStaleKernelPID(t *testing.T) {
 	if _, err := os.Stat("/proc/1/environ"); err != nil {
 		t.Skip("requires /proc")

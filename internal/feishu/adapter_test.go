@@ -2,9 +2,12 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -267,6 +270,19 @@ func TestAdapterSkipsDuplicateMessageID(t *testing.T) {
 	}
 	if handler.count != 1 {
 		t.Fatalf("handler count = %d, want 1", handler.count)
+	}
+}
+
+func TestAdapterSkipsMessageWithoutMessageID(t *testing.T) {
+	handler := &countingHandler{}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	event := textEvent("", "oc_1", "hello")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.count != 0 {
+		t.Fatalf("handler count = %d, want message without id skipped", handler.count)
 	}
 }
 
@@ -659,6 +675,40 @@ func TestMessageDeduperPersistsProcessedMessages(t *testing.T) {
 	}
 }
 
+func TestMessageDeduperPersistsMessagesInStableOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "processed_messages.json")
+	deduper := newMessageDeduper(time.Minute, 100).WithPath(path)
+	for _, item := range []struct {
+		botID     string
+		messageID string
+	}{
+		{botID: "bot-b", messageID: "om_2"},
+		{botID: "bot-a", messageID: "om_2"},
+		{botID: "bot-a", messageID: "om_1"},
+	} {
+		if allowed, err := deduper.Allow(item.botID, item.messageID); err != nil || !allowed {
+			t.Fatalf("Allow(%s, %s) = %v, %v; want true, nil", item.botID, item.messageID, allowed, err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(processed messages) error = %v", err)
+	}
+	var file processedMessageFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("Unmarshal(processed messages) error = %v", err)
+	}
+	got := make([]string, 0, len(file.Messages))
+	for _, item := range file.Messages {
+		got = append(got, item.BotID+"/"+item.MessageID)
+	}
+	want := []string{"bot-a/om_1", "bot-a/om_2", "bot-b/om_2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("message order = %+v, want %+v", got, want)
+	}
+}
+
 func TestMessageDeduperSkipsExpiredPersistedMessages(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "processed_messages.json")
 	expired := newMessageDeduper(time.Millisecond, 100).WithPath(path)
@@ -693,6 +743,23 @@ func TestMessageDeduperLoadMissingFile(t *testing.T) {
 	}
 	if allowed, err := deduper.Allow("bot-a", "om_1"); err != nil || !allowed {
 		t.Fatalf("Allow(after missing load) = %v, %v; want true, nil", allowed, err)
+	}
+}
+
+func TestMessageDeduperLoadMissingFileClearsState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "processed_messages.json")
+	deduper := newMessageDeduper(time.Minute, 100).WithPath(path)
+	if allowed, err := deduper.Allow("bot-a", "om_1"); err != nil || !allowed {
+		t.Fatalf("Allow(first) = %v, %v; want true, nil", allowed, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove(processed messages) error = %v", err)
+	}
+	if err := deduper.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if allowed, err := deduper.Allow("bot-a", "om_1"); err != nil || !allowed {
+		t.Fatalf("Allow(after missing reload) = %v, %v; want true, nil", allowed, err)
 	}
 }
 

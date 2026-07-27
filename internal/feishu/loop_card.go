@@ -46,10 +46,13 @@ func (a *Adapter) SendLoopStatusCard(ctx context.Context, msg Message, request L
 	if !cardResp.Success() {
 		return nil, fmt.Errorf("创建飞书 loop 状态卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
 	}
-	if cardResp.Data == nil || cardResp.Data.CardId == nil || strings.TrimSpace(*cardResp.Data.CardId) == "" {
+	cardID := ""
+	if cardResp.Data != nil {
+		cardID = normalizedCardID(cardResp.Data.CardId)
+	}
+	if cardID == "" {
 		return nil, fmt.Errorf("创建飞书 loop 状态卡片未返回 card_id")
 	}
-	cardID := strings.TrimSpace(*cardResp.Data.CardId)
 	sent, err := a.sendInteractiveCard(ctx, msg, cardID)
 	if err != nil {
 		return nil, fmt.Errorf("发送飞书 loop 状态卡片: %w", err)
@@ -226,7 +229,7 @@ func newLoopStatusCardData(request LoopStatusCardRequest, finished bool) map[str
 			},
 		},
 	}
-	if !finished {
+	if !finished && loopStatusCardCanCancel(request) {
 		elements = append(elements, loopStatusCardActions(request))
 	}
 	template := "blue"
@@ -260,6 +263,10 @@ func newLoopStatusCardData(request LoopStatusCardRequest, finished bool) map[str
 	}
 }
 
+func loopStatusCardCanCancel(request LoopStatusCardRequest) bool {
+	return strings.TrimSpace(request.ChatID) != "" && strings.TrimSpace(request.ACPSessionID) != ""
+}
+
 func loopStatusCardActions(request LoopStatusCardRequest) any {
 	return cardJSON{
 		"tag":                "column_set",
@@ -281,10 +288,10 @@ func loopStatusCardActions(request LoopStatusCardRequest) any {
 								"type": "callback",
 								"value": cardJSON{
 									"action":         loopStatusCardAction,
-									"bot_id":         request.BotID,
-									"chat_id":        request.ChatID,
-									"thread_id":      request.ThreadID,
-									"acp_session_id": request.ACPSessionID,
+									"bot_id":         strings.TrimSpace(request.BotID),
+									"chat_id":        strings.TrimSpace(request.ChatID),
+									"thread_id":      strings.TrimSpace(request.ThreadID),
+									"acp_session_id": strings.TrimSpace(request.ACPSessionID),
 								},
 							},
 						},

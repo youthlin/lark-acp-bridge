@@ -186,6 +186,8 @@ func (u *SessionUpdate) UnmarshalJSON(data []byte) error {
 	if u.Mode == nil {
 		u.Mode = aux.LegacyModes
 	}
+	u.ToolCallID = strings.TrimSpace(u.ToolCallID)
+	u.AvailableCommands = normalizeAvailableCommands(u.AvailableCommands)
 	u.ConfigOptions = filterSupportedConfigOptions(u.ConfigOptions)
 	if u.SessionUpdate == "tool_call" && strings.TrimSpace(u.Status) == "" {
 		u.Status = "pending"
@@ -355,23 +357,23 @@ type SessionCapabilities struct {
 }
 
 func (c SessionCapabilities) SupportsResume() bool {
-	return c.Resume != nil
+	return capabilityEnabled(c.Resume)
 }
 
 func (c SessionCapabilities) SupportsClose() bool {
-	return c.Close != nil
+	return capabilityEnabled(c.Close)
 }
 
 func (c SessionCapabilities) SupportsDelete() bool {
-	return c.Delete != nil
+	return capabilityEnabled(c.Delete)
 }
 
 func (c SessionCapabilities) SupportsList() bool {
-	return c.List != nil
+	return capabilityEnabled(c.List)
 }
 
 func (c SessionCapabilities) SupportsAdditionalDirectories() bool {
-	return c.AdditionalDirectories != nil
+	return capabilityEnabled(c.AdditionalDirectories)
 }
 
 type AuthCapabilities struct {
@@ -379,7 +381,18 @@ type AuthCapabilities struct {
 }
 
 func (c AuthCapabilities) SupportsLogout() bool {
-	return c.Logout != nil
+	return capabilityEnabled(c.Logout)
+}
+
+func capabilityEnabled(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	default:
+		return true
+	}
 }
 
 type ImplementationInfo struct {
@@ -1020,7 +1033,8 @@ func (c *Client) handleSessionUpdate(msg Message) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		return
 	}
-	if strings.TrimSpace(params.SessionID) == "" {
+	params.SessionID = strings.TrimSpace(params.SessionID)
+	if params.SessionID == "" {
 		return
 	}
 	if len(params.Update) == 0 {
@@ -1142,6 +1156,7 @@ func (c *Client) handleRequestPermission(id *RequestID, raw json.RawMessage) (an
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("解析 session/request_permission 参数: %w", err)
 	}
+	req = normalizePermissionRequest(req)
 	if id != nil {
 		req.RequestID = id.Key()
 	}
@@ -1195,11 +1210,25 @@ func permissionOptionExists(options []PermissionOption, optionID string) bool {
 		return false
 	}
 	for _, option := range options {
-		if option.OptionID == optionID {
+		if strings.TrimSpace(option.OptionID) == optionID {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizePermissionRequest(req PermissionRequest) PermissionRequest {
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.ToolCall.ToolCallID = strings.TrimSpace(req.ToolCall.ToolCallID)
+	req.ToolCall.Title = strings.TrimSpace(req.ToolCall.Title)
+	req.ToolCall.Kind = strings.TrimSpace(req.ToolCall.Kind)
+	req.ToolCall.Status = strings.TrimSpace(req.ToolCall.Status)
+	for i := range req.Options {
+		req.Options[i].OptionID = strings.TrimSpace(req.Options[i].OptionID)
+		req.Options[i].Name = strings.TrimSpace(req.Options[i].Name)
+		req.Options[i].Kind = strings.TrimSpace(req.Options[i].Kind)
+	}
+	return req
 }
 
 func (c *Client) trackAgentRequest(parent context.Context, id *RequestID) (context.Context, func()) {
@@ -1328,7 +1357,9 @@ func (c *Client) rememberToolCallUpdate(sessionID string, raw json.RawMessage) {
 	if update.SessionUpdate != "tool_call" && update.SessionUpdate != "tool_call_update" {
 		return
 	}
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(update.ToolCallID) == "" {
+	sessionID = strings.TrimSpace(sessionID)
+	update.ToolCallID = strings.TrimSpace(update.ToolCallID)
+	if sessionID == "" || update.ToolCallID == "" {
 		return
 	}
 	generation := c.currentPermissionGeneration(sessionID)

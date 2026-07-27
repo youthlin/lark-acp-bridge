@@ -184,10 +184,13 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	if !cardResp.Success() {
 		return nil, fmt.Errorf("创建飞书流式卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
 	}
-	if cardResp.Data == nil || cardResp.Data.CardId == nil || *cardResp.Data.CardId == "" {
+	cardID := ""
+	if cardResp.Data != nil {
+		cardID = normalizedCardID(cardResp.Data.CardId)
+	}
+	if cardID == "" {
 		return nil, fmt.Errorf("创建飞书流式卡片未返回 card_id")
 	}
-	cardID := *cardResp.Data.CardId
 	if _, err := a.sendInteractiveCard(ctx, msg, cardID); err != nil {
 		return nil, err
 	}

@@ -119,6 +119,40 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
+func TestLoadTrimsBotID(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmp, "home"))
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": " main ",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/main"
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Bots[0].ID; got != "main" {
+		t.Fatalf("Bot ID = %q, want trimmed main", got)
+	}
+}
+
 func TestLoadNormalizesBotOwnerOpenIDs(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -235,6 +269,43 @@ func TestLoadRejectsDuplicateBotID(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsDuplicateBotIDAfterTrim(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmp, "home"))
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": " same ",
+      "app_id": "cli_a",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/a"
+    },
+    {
+      "id": "same",
+      "app_id": "cli_b",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/b"
+    }
+  ],
+  "agents": {
+    "traex": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "bot id 重复") {
+		t.Fatalf("Load() error = %v, want duplicate bot id after trim", err)
+	}
+}
+
 func TestLoadRejectsDuplicateBotWorkspace(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -270,6 +341,79 @@ func TestLoadRejectsDuplicateBotWorkspace(t *testing.T) {
 	_, err := Load(configPath)
 	if err == nil || !strings.Contains(err.Error(), "bot workspace 重复") {
 		t.Fatalf("Load() error = %v, want duplicate bot workspace", err)
+	}
+}
+
+func TestLoadTrimsAgentName(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_a",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+    }
+  ],
+  "agents": {
+    " traex ": {
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if _, ok := cfg.Agents["traex"]; !ok {
+		t.Fatalf("Agents = %#v, want trimmed traex key", cfg.Agents)
+	}
+	if _, ok := cfg.Agents[" traex "]; ok {
+		t.Fatalf("Agents = %#v, want raw agent key removed", cfg.Agents)
+	}
+}
+
+func TestLoadRejectsDuplicateAgentNameAfterTrim(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_a",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+    }
+  ],
+  "agents": {
+    " same ": {
+      "command": "traex",
+      "args": ["acp", "serve"]
+    },
+    "same": {
+      "command": "other",
+      "args": ["acp", "serve"]
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "agent 名称重复") {
+		t.Fatalf("Load() error = %v, want duplicate agent name after trim", err)
 	}
 }
 
@@ -332,6 +476,24 @@ func TestValidateAgentCommandsRejectsEmptyCommand(t *testing.T) {
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "empty" 启动命令为空`) {
 		t.Fatalf("ValidateAgentCommands() error = %v, want empty command", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsBlankAgentName(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"  ": {Command: command},
+		},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), "agent 名称不能为空") {
+		t.Fatalf("ValidateAgentCommands() error = %v, want blank agent name rejection", err)
 	}
 }
 
@@ -500,6 +662,21 @@ func TestWriteResolvedBotFieldsDoesNotOverwriteConfiguredFields(t *testing.T) {
 	}
 }
 
+func TestWriteCleansTemporaryFileWhenAtomicReplaceFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("Mkdir(config path) error = %v", err)
+	}
+
+	err := Write(path, Default())
+	if err == nil {
+		t.Fatal("Write() error = nil, want replace failure")
+	}
+	if _, statErr := os.Stat(path + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatalf("temporary config file still exists or stat failed: %v", statErr)
+	}
+}
+
 func TestValidateAgentCommandsRejectsDirectoryPath(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
@@ -529,5 +706,165 @@ func TestValidateAgentCommandsRejectsNonExecutablePath(t *testing.T) {
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "fake" 启动命令不可执行`) {
 		t.Fatalf("ValidateAgentCommands() error = %v, want non-executable command", err)
+	}
+}
+
+func TestValidateAgentCommandsAcceptsDefaultCwdDirectory(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cwd := filepath.Join(dir, "repo")
+	if err := os.Mkdir(cwd, 0o755); err != nil {
+		t.Fatalf("Mkdir(default cwd) error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command, DefaultCwd: cwd},
+		},
+	}
+
+	if err := cfg.ValidateAgentCommands(); err != nil {
+		t.Fatalf("ValidateAgentCommands() error = %v", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsMissingDefaultCwd(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command, DefaultCwd: filepath.Join(dir, "missing")},
+		},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), `agent "fake" 默认工作目录不可访问`) {
+		t.Fatalf("ValidateAgentCommands() error = %v, want missing default cwd", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsDefaultCwdFile(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(command) error = %v", err)
+	}
+	cwd := filepath.Join(dir, "repo.txt")
+	if err := os.WriteFile(cwd, []byte("not a dir\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(default cwd) error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command, DefaultCwd: cwd},
+		},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), `agent "fake" 默认工作目录不是目录`) {
+		t.Fatalf("ValidateAgentCommands() error = %v, want default cwd file rejection", err)
+	}
+}
+
+func TestValidateAgentCommandsAcceptsRestartCommandPath(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "restart-bridge")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command},
+		},
+		RestartCommand: []string{command},
+	}
+
+	if err := cfg.ValidateAgentCommands(); err != nil {
+		t.Fatalf("ValidateAgentCommands() error = %v", err)
+	}
+}
+
+func TestValidateAgentCommandsAcceptsRestartCommandPathLookup(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "restart-bridge")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", dir)
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: "restart-bridge"},
+		},
+		RestartCommand: []string{"restart-bridge"},
+	}
+
+	if err := cfg.ValidateAgentCommands(); err != nil {
+		t.Fatalf("ValidateAgentCommands() error = %v", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsMissingRestartCommand(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", dir)
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command},
+		},
+		RestartCommand: []string{"missing-restart-command"},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令不存在") {
+		t.Fatalf("ValidateAgentCommands() error = %v, want missing restart command", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsRestartCommandDirectoryPath(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: command},
+		},
+		RestartCommand: []string{dir},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令是目录") {
+		t.Fatalf("ValidateAgentCommands() error = %v, want restart command directory", err)
+	}
+}
+
+func TestValidateAgentCommandsRejectsNonExecutableRestartCommandPath(t *testing.T) {
+	dir := t.TempDir()
+	agentCommand := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(agentCommand, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(agentCommand) error = %v", err)
+	}
+	restartCommand := filepath.Join(dir, "restart-bridge")
+	if err := os.WriteFile(restartCommand, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(restartCommand) error = %v", err)
+	}
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"fake": {Command: agentCommand},
+		},
+		RestartCommand: []string{restartCommand},
+	}
+
+	err := cfg.ValidateAgentCommands()
+	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令不可执行") {
+		t.Fatalf("ValidateAgentCommands() error = %v, want non-executable restart command", err)
 	}
 }

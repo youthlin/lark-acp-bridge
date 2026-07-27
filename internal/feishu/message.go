@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -226,11 +227,26 @@ func collectImageKeys(value any, keys []string) []string {
 				keys = appendImageKey(keys, key)
 			}
 		}
-		for _, child := range v {
-			if _, isString := child.(string); isString {
+		visited := make(map[string]struct{}, len(v))
+		for _, childKey := range []string{"body", "header", "title", "text", "content", "content_v2", "elements", "fields", "columns", "children", "items", "zh_cn", "en_us"} {
+			if child, ok := v[childKey]; ok {
+				keys = collectImageKeysValue(child, keys)
+				visited[childKey] = struct{}{}
+			}
+		}
+		remaining := make([]string, 0, len(v))
+		for childKey := range v {
+			if _, ok := visited[childKey]; ok {
 				continue
 			}
-			keys = collectImageKeys(child, keys)
+			if childKey == "image_key" || childKey == "imageKey" {
+				continue
+			}
+			remaining = append(remaining, childKey)
+		}
+		slices.Sort(remaining)
+		for _, childKey := range remaining {
+			keys = collectImageKeysValue(v[childKey], keys)
 		}
 	case []any:
 		for _, item := range v {
@@ -238,6 +254,13 @@ func collectImageKeys(value any, keys []string) []string {
 		}
 	}
 	return keys
+}
+
+func collectImageKeysValue(value any, keys []string) []string {
+	if _, isString := value.(string); isString {
+		return keys
+	}
+	return collectImageKeys(value, keys)
 }
 
 func appendImageKey(keys []string, key string) []string {
@@ -312,5 +335,5 @@ func value(p *string) string {
 	if p == nil {
 		return ""
 	}
-	return *p
+	return strings.TrimSpace(*p)
 }

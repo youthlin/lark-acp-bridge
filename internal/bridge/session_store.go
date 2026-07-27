@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,9 @@ func (s *SessionStore) Load() error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.sessions = make(map[SessionKey]Session)
+			s.chats = make(map[ChatKey]ChatConfig)
+			s.history = nil
 			return nil
 		}
 		return fmt.Errorf("读取会话映射文件: %w", err)
@@ -47,12 +51,14 @@ func (s *SessionStore) Load() error {
 	s.sessions = make(map[SessionKey]Session, len(file.Sessions))
 	s.chats = make(map[ChatKey]ChatConfig, len(file.Chats))
 	for _, session := range file.Sessions {
+		session = normalizeSessionForStore(session)
 		if !session.Key.Valid() {
 			continue
 		}
 		s.sessions[session.Key] = session
 	}
 	for _, chat := range file.Chats {
+		chat = normalizeChatForStore(chat)
 		if !chat.Key.Valid() {
 			continue
 		}
@@ -60,6 +66,7 @@ func (s *SessionStore) Load() error {
 	}
 	s.history = s.history[:0]
 	for _, session := range file.History {
+		session = normalizeSessionForStore(session)
 		if !session.Key.Valid() || session.ACPSessionID == "" {
 			continue
 		}
@@ -78,6 +85,7 @@ func (s *SessionStore) Upsert(session Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	session = normalizeSessionForStore(session)
 	if !session.Key.Valid() {
 		return fmt.Errorf("会话 key 不能为空")
 	}
@@ -90,6 +98,7 @@ func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	session = normalizeSessionForStore(session)
 	if !session.Key.Valid() {
 		return Session{}, fmt.Errorf("会话 key 不能为空")
 	}
@@ -142,6 +151,7 @@ func (s *SessionStore) upsertSessionLocked(session Session, now time.Time) {
 func (s *SessionStore) Get(key SessionKey) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key = normalizeSessionKey(key)
 	session, ok := s.sessions[key]
 	return session, ok
 }
@@ -149,6 +159,7 @@ func (s *SessionStore) Get(key SessionKey) (Session, bool) {
 func (s *SessionStore) GetChat(key ChatKey) (ChatConfig, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key = normalizeChatKey(key)
 	chat, ok := s.chats[key]
 	return chat, ok
 }
@@ -157,6 +168,7 @@ func (s *SessionStore) UpsertChat(chat ChatConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	chat = normalizeChatForStore(chat)
 	if !chat.Key.Valid() {
 		return fmt.Errorf("chat key 不能为空")
 	}
@@ -182,6 +194,8 @@ func (s *SessionStore) Count() int {
 func (s *SessionStore) ListByChat(botID, chatID string) []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	botID = strings.TrimSpace(botID)
+	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
 		return nil
 	}
@@ -262,10 +276,16 @@ func (s *SessionStore) writeLocked() error {
 	for _, session := range s.sessions {
 		file.Sessions = append(file.Sessions, session)
 	}
+	sort.Slice(file.Sessions, func(i, j int) bool {
+		return sessionKeyLess(file.Sessions[i].Key, file.Sessions[j].Key)
+	})
 	file.History = append(file.History, s.history...)
 	for _, chat := range s.chats {
 		file.Chats = append(file.Chats, chat)
 	}
+	sort.Slice(file.Chats, func(i, j int) bool {
+		return chatKeyLess(file.Chats[i].Key, file.Chats[j].Key)
+	})
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("编码会话映射文件: %w", err)
@@ -283,6 +303,50 @@ func (s *SessionStore) writeLocked() error {
 		return fmt.Errorf("替换会话映射文件: %w", err)
 	}
 	return nil
+}
+
+func sessionKeyLess(a, b SessionKey) bool {
+	if a.BotID != b.BotID {
+		return a.BotID < b.BotID
+	}
+	if a.ChatID != b.ChatID {
+		return a.ChatID < b.ChatID
+	}
+	return a.ThreadID < b.ThreadID
+}
+
+func chatKeyLess(a, b ChatKey) bool {
+	if a.BotID != b.BotID {
+		return a.BotID < b.BotID
+	}
+	return a.ChatID < b.ChatID
+}
+
+func normalizeSessionForStore(session Session) Session {
+	session.Key = normalizeSessionKey(session.Key)
+	session.AgentName = strings.TrimSpace(session.AgentName)
+	session.ACPSessionID = strings.TrimSpace(session.ACPSessionID)
+	return session
+}
+
+func normalizeChatForStore(chat ChatConfig) ChatConfig {
+	chat.Key = normalizeChatKey(chat.Key)
+	return chat
+}
+
+func normalizeSessionKey(key SessionKey) SessionKey {
+	return SessionKey{
+		BotID:    strings.TrimSpace(key.BotID),
+		ChatID:   strings.TrimSpace(key.ChatID),
+		ThreadID: strings.TrimSpace(key.ThreadID),
+	}
+}
+
+func normalizeChatKey(key ChatKey) ChatKey {
+	return ChatKey{
+		BotID:  strings.TrimSpace(key.BotID),
+		ChatID: strings.TrimSpace(key.ChatID),
+	}
 }
 
 type sessionFile struct {

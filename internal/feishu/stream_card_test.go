@@ -260,6 +260,22 @@ func TestNewLoopStatusCardJSONFinishedHidesCancelButton(t *testing.T) {
 	}
 }
 
+func TestNewLoopStatusCardJSONHidesCancelButtonWithoutCallbackTarget(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newLoopStatusCardJSON(LoopStatusCardRequest{
+		BotID: "default",
+		Text:  "已启动 loop。",
+	}, false)), &card); err != nil {
+		t.Fatalf("newLoopStatusCardJSON(missing target) is not valid JSON: %v", err)
+	}
+	if !jsonContainsValue(card, "已启动 loop。") {
+		t.Fatalf("loop status card should still contain status text: %#v", card)
+	}
+	if jsonContainsTaggedElement(card, "button") || jsonContainsValue(card, loopStatusCardAction) {
+		t.Fatalf("loop status card without callback target should hide cancel button: %#v", card)
+	}
+}
+
 func TestLoopStatusCardTextPatchJSONOnlyUpdatesContent(t *testing.T) {
 	var patch map[string]any
 	if err := json.Unmarshal([]byte(loopStatusCardTextPatchJSON("第 1 轮运行中")), &patch); err != nil {
@@ -296,6 +312,20 @@ func TestTruncateCardKitLogValue(t *testing.T) {
 	}
 	if runes := len([]rune(strings.TrimSuffix(got, "...<truncated>"))); runes != 2000 {
 		t.Fatalf("truncated rune count = %d, want 2000", runes)
+	}
+}
+
+func TestNormalizedCardIDTrimsAndRejectsBlank(t *testing.T) {
+	if got := normalizedCardID(nil); got != "" {
+		t.Fatalf("normalizedCardID(nil) = %q, want empty", got)
+	}
+	blank := " \t\n "
+	if got := normalizedCardID(&blank); got != "" {
+		t.Fatalf("normalizedCardID(blank) = %q, want empty", got)
+	}
+	cardID := "  card-1 \n"
+	if got := normalizedCardID(&cardID); got != "card-1" {
+		t.Fatalf("normalizedCardID() = %q, want trimmed card id", got)
 	}
 }
 

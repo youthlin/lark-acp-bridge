@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -55,6 +56,7 @@ const (
 	taskKindLoop taskKind = "loop"
 
 	defaultWikiInterval        = 5 * time.Minute
+	minWikiInterval            = time.Second
 	defaultLoopInterval        = 10 * time.Second
 	promptCardFinalUpdateLimit = 15 * time.Second
 	newSessionStateWait        = 600 * time.Millisecond
@@ -367,7 +369,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return "" // text以/开头才会进来 这里不可能走到
 	}
 	if strings.HasPrefix(fields[0], "//") && len(fields[0]) > 2 {
-		return s.forwardACPCommand(ctx, "/"+strings.TrimPrefix(text, "//"), msg)
+		return s.forwardACPCommand(ctx, "/"+strings.TrimPrefix(commandRemainder(text, 0), "//"), msg)
 	}
 	switch fields[0] {
 	case "/help":
@@ -733,11 +735,15 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 		return "会话持久化未初始化。"
 	}
 	fields := strings.Fields(text)
-	if len(fields) < 2 || fields[1] == "status" {
+	action := ""
+	if len(fields) >= 2 {
+		action = strings.ToLower(strings.TrimSpace(fields[1]))
+	}
+	if action == "" || action == "status" {
 		return s.formatAtStatus(msg)
 	}
 	chat := s.chatConfigForMessage(msg)
-	switch fields[1] {
+	switch action {
 	case "on":
 		chat.MentionOptional = false
 	case "off":
@@ -786,7 +792,7 @@ func (s *Service) handleSessionCommand(ctx context.Context, text string, msg fei
 		}
 		return s.resumeSession(ctx, msg, index)
 	case "title":
-		title := strings.TrimSpace(strings.TrimPrefix(text, strings.Join(fields[:2], " ")))
+		title := commandRemainder(text, 2)
 		if title == "" {
 			return "请使用 /session title <title> 设置当前会话标题。"
 		}
@@ -796,10 +802,39 @@ func (s *Service) handleSessionCommand(ctx context.Context, text string, msg fei
 	}
 }
 
+func commandRemainder(text string, skipFields int) string {
+	if skipFields <= 0 {
+		return strings.TrimSpace(text)
+	}
+	i := 0
+	skipped := 0
+	for i < len(text) && skipped < skipFields {
+		for i < len(text) {
+			r, size := utf8.DecodeRuneInString(text[i:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		if i >= len(text) {
+			return ""
+		}
+		for i < len(text) {
+			r, size := utf8.DecodeRuneInString(text[i:])
+			if unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		skipped++
+	}
+	return strings.TrimSpace(text[i:])
+}
+
 func (s *Service) handleCommandsCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) >= 2 {
-		command := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+		command := commandRemainder(text, 1)
 		return s.forwardACPCommand(ctx, command, msg)
 	}
 	session, ok := s.findSession(msg)
@@ -833,11 +868,14 @@ func (s *Service) forwardACPCommand(ctx context.Context, command string, msg fei
 	if !strings.HasPrefix(command, "/") || strings.HasPrefix(command, "//") {
 		return "请使用 /cmds /command [args]，或简写为 //command [args]。"
 	}
+	name := strings.TrimPrefix(strings.Fields(command)[0], "/")
+	if name == "" {
+		return "ACP command 名称不能为空。请使用 /cmds /command [args]，或简写为 //command [args]。"
+	}
 	session, ok := s.findSession(msg)
 	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
 		return "当前会话还没有 ACP session，发送普通文本或 /new 后再执行 ACP command。"
 	}
-	name := strings.TrimPrefix(strings.Fields(command)[0], "/")
 	if len(session.AvailableCommands) > 0 && !sessionHasCommand(session, name) {
 		return "当前 ACP server 未上报该命令：" + "/" + name + "。发送 /cmds 查看可用命令。"
 	}
@@ -1223,8 +1261,8 @@ func modeSelectionOptions(session Session, modeOpt acp.SessionConfigOption) []fe
 }
 
 func (s *Service) HandleModeSelection(ctx context.Context, selection feishu.ModeSelection) (string, error) {
-	if selection.RequesterID != "" && selection.OperatorID != "" && selection.RequesterID != selection.OperatorID {
-		return "", fmt.Errorf("只有发起该命令的用户可以设置模式")
+	if err := validateSelectionRequester(selection.RequesterID, selection.OperatorID, "模式", "mode", "设置模式"); err != nil {
+		return "", err
 	}
 	msg := feishu.Message{
 		BotID:    selection.BotID,
@@ -1289,8 +1327,8 @@ func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, sessio
 }
 
 func (s *Service) HandleModelSelection(ctx context.Context, selection feishu.ModelSelection) (string, error) {
-	if selection.RequesterID != "" && selection.OperatorID != "" && selection.RequesterID != selection.OperatorID {
-		return "", fmt.Errorf("只有发起该命令的用户可以设置模型")
+	if err := validateSelectionRequester(selection.RequesterID, selection.OperatorID, "模型", "model", "设置模型"); err != nil {
+		return "", err
 	}
 	msg := feishu.Message{
 		BotID:    selection.BotID,
@@ -1339,6 +1377,18 @@ func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, sessi
 	}
 	s.saveSessionState(ctx, msg, session)
 	return value, modelOptionName(modelOpt, value), nil
+}
+
+func validateSelectionRequester(requesterID string, operatorID string, label string, command string, action string) error {
+	requesterID = strings.TrimSpace(requesterID)
+	operatorID = strings.TrimSpace(operatorID)
+	if requesterID == "" || operatorID == "" {
+		return fmt.Errorf("%s选择缺少发起人或操作者信息，请重新发送 /%s", label, command)
+	}
+	if requesterID != operatorID {
+		return fmt.Errorf("只有发起该命令的用户可以%s", action)
+	}
+	return nil
 }
 
 func modelOptionName(opt acp.SessionConfigOption, value string) string {
@@ -1859,37 +1909,41 @@ type loopRequest struct {
 }
 
 func parseLoopRequest(text string) (loopRequest, error) {
-	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "/loop")))
+	argsText := strings.TrimSpace(strings.TrimPrefix(text, "/loop"))
 	req := loopRequest{Interval: defaultLoopInterval}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+	for strings.TrimSpace(argsText) != "" {
+		var arg string
+		arg, argsText = nextLoopToken(argsText)
 		switch arg {
 		case "-t":
-			i++
-			if i >= len(args) {
+			var raw string
+			raw, argsText = nextLoopToken(argsText)
+			if raw == "" {
 				return loopRequest{}, fmt.Errorf("请为 -t 指定 duration，例如 /loop -t 30m 提示词；-t 0 表示不限。")
 			}
-			d, err := parseLoopDuration(args[i], "time")
+			d, err := parseLoopDuration(raw, "time")
 			if err != nil {
 				return loopRequest{}, err
 			}
 			req.MaxDuration = d
 		case "-n":
-			i++
-			if i >= len(args) {
+			var raw string
+			raw, argsText = nextLoopToken(argsText)
+			if raw == "" {
 				return loopRequest{}, fmt.Errorf("请为 -n 指定最大轮次；-n 0 表示不限。")
 			}
-			n, err := strconv.Atoi(args[i])
+			n, err := strconv.Atoi(raw)
 			if err != nil || n < 0 {
 				return loopRequest{}, fmt.Errorf("-n 必须是非负整数；-n 0 表示不限。")
 			}
 			req.MaxRounds = n
 		case "-i":
-			i++
-			if i >= len(args) {
+			var raw string
+			raw, argsText = nextLoopToken(argsText)
+			if raw == "" {
 				return loopRequest{}, fmt.Errorf("请为 -i 指定每轮间隔，例如 /loop -i 10s 提示词。")
 			}
-			d, err := parseLoopDuration(args[i], "interval")
+			d, err := parseLoopDuration(raw, "interval")
 			if err != nil {
 				return loopRequest{}, err
 			}
@@ -1901,14 +1955,27 @@ func parseLoopRequest(text string) (loopRequest, error) {
 			if strings.HasPrefix(arg, "-") {
 				return loopRequest{}, fmt.Errorf("未知 loop 参数：%s。用法：/loop [-t 0] [-n 0] [-i 10s] 提示词", arg)
 			}
-			req.Prompt = strings.TrimSpace(strings.Join(args[i:], " "))
-			i = len(args)
+			req.Prompt = strings.TrimSpace(arg + argsText)
+			argsText = ""
 		}
 	}
 	if req.Prompt == "" {
 		return loopRequest{}, fmt.Errorf("提示词必填。用法：/loop [-t 0] [-n 0] [-i 10s] 提示词")
 	}
 	return req, nil
+}
+
+func nextLoopToken(text string) (string, string) {
+	text = strings.TrimLeftFunc(text, unicode.IsSpace)
+	if text == "" {
+		return "", ""
+	}
+	for i, r := range text {
+		if unicode.IsSpace(r) {
+			return text[:i], text[i:]
+		}
+	}
+	return text, ""
 }
 
 func parseLoopDuration(raw string, name string) (time.Duration, error) {
@@ -2078,6 +2145,9 @@ func (s *Service) resumeSessionByID(ctx context.Context, msg feishu.Message, acp
 }
 
 func (s *Service) HandleSessionSelection(ctx context.Context, selection feishu.SessionSelection) (string, error) {
+	if err := validateSelectionRequester(selection.RequesterID, selection.OperatorID, "会话", "session list", "恢复会话"); err != nil {
+		return "", err
+	}
 	msg := feishu.Message{
 		BotID:    selection.BotID,
 		ChatID:   selection.ChatID,
@@ -4262,16 +4332,14 @@ func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) 
 			req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
 			req.ManualTitle = req.Title != ""
 		} else {
-			candidate, err := config.ExpandPath(args[0])
-			if err == nil {
-				if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
-					req.Cwd = candidate
-					req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
-					req.ManualTitle = req.Title != ""
-				} else {
-					req.Title = normalizeSessionTitle(strings.Join(args, " "))
-					req.ManualTitle = req.Title != ""
-				}
+			candidate, isPath, errText := s.resolveNewSessionCwdArg(args[0], msg)
+			if errText != "" {
+				return newSessionRequest{}, "", errText
+			}
+			if isPath {
+				req.Cwd = candidate
+				req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
+				req.ManualTitle = req.Title != ""
 			} else {
 				req.Title = normalizeSessionTitle(strings.Join(args, " "))
 				req.ManualTitle = req.Title != ""
@@ -4281,17 +4349,69 @@ func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) 
 	if req.Cwd != "" {
 		return req, "命令参数", ""
 	}
+	cwd, source, errText := s.defaultNewSessionCwd(msg)
+	if errText != "" {
+		return newSessionRequest{}, "", errText
+	}
+	req.Cwd = cwd
+	return req, source, ""
+}
+
+func (s *Service) defaultNewSessionCwd(msg feishu.Message) (string, string, string) {
 	if session, ok := s.findSession(msg); ok && session.Cwd != "" {
-		req.Cwd = session.Cwd
-		return req, "当前会话已有会话", ""
+		return session.Cwd, "当前会话已有会话", ""
 	}
 	agentName := s.defaultAgentName()
 	agent, ok := s.registry.Get(agentName)
 	if !ok || strings.TrimSpace(agent.DefaultCwd) == "" {
-		return newSessionRequest{}, "", "当前会话还没有会话映射，且默认 agent 未配置 default_cwd。请使用 /new <cwd> 指定工作目录。"
+		return "", "", "当前会话还没有会话映射，且默认 agent 未配置 default_cwd。请使用 /new <cwd> 指定工作目录。"
 	}
-	req.Cwd = agent.DefaultCwd
-	return req, "默认配置", ""
+	return agent.DefaultCwd, "默认配置", ""
+}
+
+func (s *Service) resolveNewSessionCwdArg(arg string, msg feishu.Message) (string, bool, string) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return "", false, ""
+	}
+	looksPath := isExplicitPathArg(arg)
+	if !looksPath {
+		return "", false, ""
+	}
+	candidate, err := config.ExpandPath(arg)
+	if err != nil {
+		return "", false, "展开工作目录失败：" + err.Error()
+	}
+	if !filepath.IsAbs(candidate) {
+		base, _, errText := s.defaultNewSessionCwd(msg)
+		if errText != "" {
+			return "", false, errText
+		}
+		candidate = filepath.Join(base, candidate)
+	}
+	info, statErr := os.Stat(candidate)
+	if statErr == nil {
+		if !info.IsDir() {
+			return "", false, "工作目录不是目录：" + candidate
+		}
+		return candidate, true, ""
+	}
+	return "", false, "工作目录不可访问：" + statErr.Error()
+}
+
+func isExplicitPathArg(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	return filepath.IsAbs(arg) ||
+		arg == "~" ||
+		strings.HasPrefix(arg, "~/") ||
+		arg == "." ||
+		arg == ".." ||
+		strings.HasPrefix(arg, "./") ||
+		strings.HasPrefix(arg, "../") ||
+		strings.HasPrefix(arg, `.\\`) ||
+		strings.HasPrefix(arg, `..\\`) ||
+		strings.HasPrefix(arg, "$HOME/") ||
+		strings.HasPrefix(arg, "${HOME}/")
 }
 
 const maxSessionTitleRunes = 40
@@ -4464,8 +4584,11 @@ func parseWikiInterval(raw string) (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("wiki interval 格式无效，可用 5m、30s 或纯数字分钟")
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("wiki interval 必须大于 0")
+	if d < minWikiInterval {
+		return 0, fmt.Errorf("wiki interval 不能小于 1s")
+	}
+	if d%time.Second != 0 {
+		return 0, fmt.Errorf("wiki interval 必须是整秒，例如 30s、5m 或纯数字分钟")
 	}
 	return d, nil
 }

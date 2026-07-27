@@ -180,7 +180,7 @@ func childArgs(args []string) []string {
 			continue
 		default:
 			out = append(out, arg)
-			if arg == "-config" {
+			if arg == "-config" || arg == "--config" {
 				skipNext = true
 			}
 		}

@@ -109,11 +109,20 @@ func consumeRestartAck(ctx context.Context, workspace string, sender restartAckS
 	}
 	var ack restartAck
 	if err := json.Unmarshal(data, &ack); err != nil {
-		return fmt.Errorf("解析重启确认记录: %w", err)
+		if removeErr := removeRestartAckFile(path); removeErr != nil {
+			return fmt.Errorf("删除无效重启确认记录: %w", removeErr)
+		}
+		return nil
 	}
 	if restartAckExpired(ack, time.Now()) {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeRestartAckFile(path); err != nil {
 			return fmt.Errorf("删除过期重启确认记录: %w", err)
+		}
+		return nil
+	}
+	if ack.Message.MessageID == "" || ack.Message.ChatID == "" || ack.Message.ChatType == "" {
+		if err := removeRestartAckFile(path); err != nil {
+			return fmt.Errorf("删除无效重启确认记录: %w", err)
 		}
 		return nil
 	}
@@ -132,8 +141,15 @@ func consumeRestartAck(ctx context.Context, workspace string, sender restartAckS
 	if err := sender.SendText(ctx, msg, restartAckText()); err != nil {
 		return fmt.Errorf("发送重启确认消息: %w", err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeRestartAckFile(path); err != nil {
 		return fmt.Errorf("删除重启确认记录: %w", err)
+	}
+	return nil
+}
+
+func removeRestartAckFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }

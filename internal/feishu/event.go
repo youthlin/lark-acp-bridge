@@ -29,6 +29,10 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	msg.BotOpenID = a.cfg.BotOpenID
 	msg.Workspace = a.cfg.Workspace
 	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
+	if strings.TrimSpace(msg.MessageID) == "" {
+		slog.WarnContext(ctx, "跳过缺少 message_id 的飞书消息")
+		return nil
+	}
 	if a.deduper != nil {
 		allowed, err := a.deduper.Allow(msg.BotID, msg.MessageID)
 		if err != nil {

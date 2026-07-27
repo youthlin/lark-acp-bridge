@@ -125,13 +125,55 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("读取配置文件: %w", err)
 	}
+	explicitAgents, hasExplicitAgents, err := configuredAgents(data)
+	if err != nil {
+		return Config{}, err
+	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("解析配置文件: %w", err)
+	}
+	if hasExplicitAgents {
+		agents := cloneAgents(Default().Agents)
+		for name, agent := range explicitAgents {
+			agents[name] = agent
+		}
+		cfg.Agents = agents
 	}
 	if err := normalize(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func configuredAgents(data []byte) (map[string]AgentConfig, bool, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, false, nil
+	}
+	raw, ok := root["agents"]
+	if !ok {
+		return nil, false, nil
+	}
+	var agents map[string]AgentConfig
+	if err := json.Unmarshal(raw, &agents); err != nil {
+		return nil, true, fmt.Errorf("解析配置 agents: %w", err)
+	}
+	normalized, err := normalizeAgents(agents)
+	if err != nil {
+		return nil, true, err
+	}
+	return normalized, true, nil
+}
+
+func cloneAgents(agents map[string]AgentConfig) map[string]AgentConfig {
+	if len(agents) == 0 {
+		return nil
+	}
+	cloned := make(map[string]AgentConfig, len(agents))
+	for name, agent := range agents {
+		cloned[name] = agent
+	}
+	return cloned
 }
 
 func Write(path string, cfg Config) error {
@@ -147,7 +189,7 @@ func Write(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("创建配置目录: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("写入配置文件: %w", err)
 	}
 	return nil
@@ -229,10 +271,22 @@ func WriteResolvedBotFields(path string, bots []BotConfig) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, fmt.Errorf("创建配置目录: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
 		return false, fmt.Errorf("写入配置文件: %w", err)
 	}
 	return true, nil
+}
+
+func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func rawString(raw json.RawMessage) (string, bool) {
@@ -304,33 +358,70 @@ func (c Config) ValidateAgentCommands() error {
 		return fmt.Errorf("未配置 ACP agent")
 	}
 	for name, agent := range c.Agents {
-		command := strings.TrimSpace(agent.Command)
-		if command == "" {
-			return fmt.Errorf("agent %q 启动命令为空", name)
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("agent 名称不能为空")
 		}
-		if isPathCommand(command) {
-			expanded, err := ExpandPath(command)
-			if err != nil {
-				return fmt.Errorf("展开 agent %q 启动命令: %w", name, err)
-			}
-			info, err := os.Stat(expanded)
-			if err != nil {
-				return fmt.Errorf("agent %q 启动命令不可访问: %s: %w", name, expanded, err)
-			}
-			if info.IsDir() {
-				return fmt.Errorf("agent %q 启动命令是目录: %s", name, expanded)
-			}
-			if info.Mode().Perm()&0o111 == 0 {
-				return fmt.Errorf("agent %q 启动命令不可执行: %s", name, expanded)
-			}
-			continue
+		label := fmt.Sprintf("agent %q 启动命令", name)
+		if err := validateExecutableCommand(label, agent.Command); err != nil {
+			return err
 		}
-		if _, err := exec.LookPath(command); err != nil {
-			return fmt.Errorf("agent %q 启动命令不存在: %s: %w", name, command, err)
+		if strings.TrimSpace(agent.DefaultCwd) != "" {
+			if err := validateDirectory(fmt.Sprintf("agent %q 默认工作目录", name), agent.DefaultCwd); err != nil {
+				return err
+			}
 		}
 	}
-	if len(c.RestartCommand) > 0 && strings.TrimSpace(c.RestartCommand[0]) == "" {
-		return fmt.Errorf("restart_command 启动命令为空")
+	if len(c.RestartCommand) > 0 {
+		if err := validateExecutableCommand("restart_command 启动命令", c.RestartCommand[0]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateExecutableCommand(label, command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return fmt.Errorf("%s为空", label)
+	}
+	if isPathCommand(command) {
+		expanded, err := ExpandPath(command)
+		if err != nil {
+			return fmt.Errorf("展开 %s: %w", label, err)
+		}
+		info, err := os.Stat(expanded)
+		if err != nil {
+			return fmt.Errorf("%s不可访问: %s: %w", label, expanded, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%s是目录: %s", label, expanded)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("%s不可执行: %s", label, expanded)
+		}
+		return nil
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return fmt.Errorf("%s不存在: %s: %w", label, command, err)
+	}
+	return nil
+}
+
+func validateDirectory(label, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("%s为空", label)
+	}
+	expanded, err := ExpandPath(path)
+	if err != nil {
+		return fmt.Errorf("展开 %s: %w", label, err)
+	}
+	info, err := os.Stat(expanded)
+	if err != nil {
+		return fmt.Errorf("%s不可访问: %s: %w", label, expanded, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s不是目录: %s", label, expanded)
 	}
 	return nil
 }
@@ -346,7 +437,8 @@ func normalize(cfg *Config) error {
 	seenBotIDs := make(map[string]struct{}, len(cfg.Bots))
 	seenWorkspaces := make(map[string]string, len(cfg.Bots))
 	for i, bot := range cfg.Bots {
-		if strings.TrimSpace(bot.ID) == "" {
+		bot.ID = strings.TrimSpace(bot.ID)
+		if bot.ID == "" {
 			bot.ID = fmt.Sprintf("bot-%d", i+1)
 		}
 		if _, ok := seenBotIDs[bot.ID]; ok {
@@ -378,6 +470,11 @@ func normalize(cfg *Config) error {
 	if len(cfg.Agents) == 0 {
 		cfg.Agents = Default().Agents
 	}
+	agents, err := normalizeAgents(cfg.Agents)
+	if err != nil {
+		return err
+	}
+	cfg.Agents = agents
 	cfg.RestartCommand = normalizeCommand(cfg.RestartCommand)
 	for name, agent := range cfg.Agents {
 		if agent.DefaultCwd != "" {
@@ -390,6 +487,24 @@ func normalize(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+func normalizeAgents(agents map[string]AgentConfig) (map[string]AgentConfig, error) {
+	if len(agents) == 0 {
+		return nil, nil
+	}
+	normalized := make(map[string]AgentConfig, len(agents))
+	for name, agent := range agents {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("agent 名称不能为空")
+		}
+		if _, ok := normalized[name]; ok {
+			return nil, fmt.Errorf("agent 名称重复: %s", name)
+		}
+		normalized[name] = agent
+	}
+	return normalized, nil
 }
 
 func normalizeOpenIDs(ids []string) []string {

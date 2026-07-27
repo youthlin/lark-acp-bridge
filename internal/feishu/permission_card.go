@@ -103,10 +103,13 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 	if !cardResp.Success() {
 		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片返回错误: code=%d msg=%s", cardResp.Code, cardResp.Msg)
 	}
-	if cardResp.Data == nil || cardResp.Data.CardId == nil || *cardResp.Data.CardId == "" {
+	cardID := ""
+	if cardResp.Data != nil {
+		cardID = normalizedCardID(cardResp.Data.CardId)
+	}
+	if cardID == "" {
 		return acp.PermissionOutcome{}, fmt.Errorf("创建飞书权限卡片未返回 card_id")
 	}
-	cardID := *cardResp.Data.CardId
 	waiter := newPermissionCardWaiter()
 	a.permissionCards.add(requestID, permissionCardEntry{
 		waiter:       waiter,

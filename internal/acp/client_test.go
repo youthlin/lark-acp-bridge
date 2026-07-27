@@ -379,6 +379,32 @@ func TestClientNewSessionSendsMCPServers(t *testing.T) {
 	<-done
 }
 
+func TestSessionInfoTrimsAvailableCommands(t *testing.T) {
+	var sessionInfo SessionInfo
+	if err := json.Unmarshal([]byte(`{
+		"sessionId": "session-1",
+		"availableCommands": [
+			{
+				"name": " review ",
+				"description": " Review current changes ",
+				"input": {"hint": " optional focus "}
+			}
+		]
+	}`), &sessionInfo); err != nil {
+		t.Fatalf("Unmarshal SessionInfo error = %v", err)
+	}
+	if len(sessionInfo.AvailableCommands) != 1 {
+		t.Fatalf("AvailableCommands = %+v, want one command", sessionInfo.AvailableCommands)
+	}
+	cmd := sessionInfo.AvailableCommands[0]
+	if cmd.Name != "review" || cmd.Description != "Review current changes" {
+		t.Fatalf("command = %+v, want trimmed name and description", cmd)
+	}
+	if cmd.Input == nil || cmd.Input.Hint != "optional focus" {
+		t.Fatalf("command input = %+v, want trimmed hint", cmd.Input)
+	}
+}
+
 func TestClientNewSessionRequiresInitialize(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()
@@ -630,6 +656,29 @@ func TestSessionInfoParsesModeStringAndLegacyModes(t *testing.T) {
 	}
 }
 
+func TestSessionInfoTrimsModelStateFields(t *testing.T) {
+	var info SessionInfo
+	if err := json.Unmarshal([]byte(`{
+		"sessionId":"session-1",
+		"models":{
+			"currentModelId":" gpt-5.5 ",
+			"availableModels":[{"modelId":" gpt-5.5 ","name":" GPT-5.5 ","description":" default model "}]
+		}
+	}`), &info); err != nil {
+		t.Fatalf("Unmarshal model state error = %v", err)
+	}
+	if info.Models == nil || info.Models.CurrentModelID != "gpt-5.5" {
+		t.Fatalf("Models = %+v, want trimmed current model", info.Models)
+	}
+	if len(info.Models.AvailableModels) != 1 {
+		t.Fatalf("AvailableModels = %+v, want one model", info.Models.AvailableModels)
+	}
+	got := info.Models.AvailableModels[0]
+	if got.ModelID != "gpt-5.5" || got.Name != "GPT-5.5" || got.Description != "default model" {
+		t.Fatalf("model = %+v, want trimmed fields", got)
+	}
+}
+
 func TestClientNewSessionSendsAdditionalDirectoriesWhenSupported(t *testing.T) {
 	workspace := t.TempDir()
 	client, server := newPipeClient(t, workspace)
@@ -778,6 +827,38 @@ func TestClientCloseSessionRequiresInitialize(t *testing.T) {
 	err := client.CloseSession(context.Background(), "session-1")
 	if err == nil || !strings.Contains(err.Error(), "ACP client 尚未 initialize") {
 		t.Fatalf("CloseSession() error = %v, want initialize required error", err)
+	}
+}
+
+func TestCapabilitiesTreatExplicitFalseAsUnsupported(t *testing.T) {
+	sessionCapabilities := SessionCapabilities{
+		Resume:                false,
+		Close:                 false,
+		Delete:                true,
+		List:                  map[string]any{},
+		AdditionalDirectories: false,
+	}
+	if sessionCapabilities.SupportsResume() {
+		t.Fatal("SupportsResume() = true, want false for explicit false")
+	}
+	if sessionCapabilities.SupportsClose() {
+		t.Fatal("SupportsClose() = true, want false for explicit false")
+	}
+	if !sessionCapabilities.SupportsDelete() {
+		t.Fatal("SupportsDelete() = false, want true for explicit true")
+	}
+	if !sessionCapabilities.SupportsList() {
+		t.Fatal("SupportsList() = false, want true for object capability")
+	}
+	if sessionCapabilities.SupportsAdditionalDirectories() {
+		t.Fatal("SupportsAdditionalDirectories() = true, want false for explicit false")
+	}
+
+	if (AuthCapabilities{Logout: false}).SupportsLogout() {
+		t.Fatal("SupportsLogout() = true, want false for explicit false")
+	}
+	if !(AuthCapabilities{Logout: true}).SupportsLogout() {
+		t.Fatal("SupportsLogout() = false, want true for explicit true")
 	}
 }
 
@@ -1169,6 +1250,63 @@ func TestSessionUpdateIgnoresUnsupportedConfigOptionType(t *testing.T) {
 	}
 	if len(update.ConfigOptions) != 1 || update.ConfigOptions[0].ID != "model" {
 		t.Fatalf("ConfigOptions = %+v, want only supported model option", update.ConfigOptions)
+	}
+}
+
+func TestSessionUpdateTrimsAvailableCommands(t *testing.T) {
+	var update SessionUpdate
+	if err := json.Unmarshal([]byte(`{
+		"sessionUpdate": "available_commands_update",
+		"availableCommands": [
+			{
+				"name": " review ",
+				"description": " Review current changes ",
+				"input": {"hint": " optional focus "}
+			}
+		]
+	}`), &update); err != nil {
+		t.Fatalf("Unmarshal SessionUpdate error = %v", err)
+	}
+	if len(update.AvailableCommands) != 1 {
+		t.Fatalf("AvailableCommands = %+v, want one command", update.AvailableCommands)
+	}
+	cmd := update.AvailableCommands[0]
+	if cmd.Name != "review" || cmd.Description != "Review current changes" {
+		t.Fatalf("command = %+v, want trimmed name and description", cmd)
+	}
+	if cmd.Input == nil || cmd.Input.Hint != "optional focus" {
+		t.Fatalf("command input = %+v, want trimmed hint", cmd.Input)
+	}
+}
+
+func TestConfigOptionsTrimStructuredFields(t *testing.T) {
+	var info SessionInfo
+	if err := json.Unmarshal([]byte(`{
+		"sessionId": "session-1",
+		"configOptions": [
+			{
+				"id": " model ",
+				"name": " Model ",
+				"category": " model ",
+				"type": " select ",
+				"currentValue": " gpt-5.6 ",
+				"options": [
+					{"value": " gpt-5.6 ", "name": " GPT-5.6 "}
+				]
+			}
+		]
+	}`), &info); err != nil {
+		t.Fatalf("Unmarshal SessionInfo error = %v", err)
+	}
+	if len(info.ConfigOptions) != 1 {
+		t.Fatalf("ConfigOptions = %+v, want one normalized option", info.ConfigOptions)
+	}
+	option := info.ConfigOptions[0]
+	if option.ID != "model" || option.Category != "model" || option.Type != "select" {
+		t.Fatalf("option = %+v, want trimmed id/category/type", option)
+	}
+	if len(option.Options) != 1 || option.Options[0].Value != "gpt-5.6" || option.Options[0].Name != "GPT-5.6" {
+		t.Fatalf("option values = %+v, want trimmed value/name", option.Options)
 	}
 }
 
@@ -1577,6 +1715,70 @@ func TestClientPermissionRequestUsesHandlerAndToolCallState(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for permission request")
 	}
+}
+
+func TestClientPermissionRequestNormalizesHandlerRequestFields(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	gotReq := make(chan PermissionRequest, 1)
+	generation := client.setPermissionHandler("session-1", context.Background(), func(ctx context.Context, req PermissionRequest) (PermissionOutcome, error) {
+		gotReq <- req
+		return PermissionOutcome{Outcome: "selected", OptionID: "allow-once"}, nil
+	})
+	defer client.clearPermissionHandler("session-1", generation)
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":" session-1 ","toolCall":{"toolCallId":" call-1 ","title":" Run tests ","kind":" execute ","status":" pending "},"options":[{"optionId":" allow-once ","name":" Allow once ","kind":" allow_once "}]}}`)
+
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "allow-once" {
+		t.Fatalf("permission outcome = %+v, want selected allow-once", result.Outcome)
+	}
+	select {
+	case req := <-gotReq:
+		if req.SessionID != "session-1" {
+			t.Fatalf("sessionID = %q, want session-1", req.SessionID)
+		}
+		if req.ToolCall.ToolCallID != "call-1" || req.ToolCall.Title != "Run tests" || req.ToolCall.Kind != "execute" || req.ToolCall.Status != "pending" {
+			t.Fatalf("toolCall = %+v, want trimmed fields", req.ToolCall)
+		}
+		if len(req.Options) != 1 {
+			t.Fatalf("options = %+v, want one permission option", req.Options)
+		}
+		if req.Options[0].OptionID != "allow-once" || req.Options[0].Name != "Allow once" || req.Options[0].Kind != "allow_once" {
+			t.Fatalf("option = %+v, want trimmed fields", req.Options[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for permission request")
+	}
+}
+
+func TestClientPermissionRequestNormalizesDefaultRejectOption(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	server.writeRaw(t, `{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"session-1","options":[{"optionId":" reject ","kind":" reject_once "}]}}`)
+
+	resp := server.readRequest(t)
+	if resp.Error != nil {
+		t.Fatalf("permission response error = %+v", resp.Error)
+	}
+	var result PermissionResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("Unmarshal permission result error = %v", err)
+	}
+	if result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "reject" {
+		t.Fatalf("permission outcome = %+v, want selected reject", result.Outcome)
+	}
+
+	_ = client
 }
 
 func TestClientPermissionRequestRejectsSelectedWithoutOptionID(t *testing.T) {
@@ -2210,6 +2412,52 @@ func TestClientPromptWithOptionsReportsSessionUpdates(t *testing.T) {
 	<-done
 }
 
+func TestClientPromptTrimsSessionUpdateIdentityFields(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{ProtocolVersion: 1}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "session/prompt" {
+			t.Errorf("method = %q, want session/prompt", req.Method)
+		}
+		server.writeNotification(t, "session/update", map[string]any{
+			"sessionId": " session-1 ",
+			"update": map[string]any{
+				"sessionUpdate": "tool_call",
+				"toolCallId":    " call-1 ",
+				"title":         "Run tests",
+			},
+		})
+		server.writeResponse(t, req.ID, map[string]any{})
+	}()
+
+	var updates []PromptUpdate
+	if _, err := client.PromptWithOptions(context.Background(), "session-1", "运行测试", PromptOptions{
+		OnUpdate: func(update PromptUpdate) {
+			updates = append(updates, update)
+		},
+	}); err != nil {
+		t.Fatalf("PromptWithOptions() error = %v", err)
+	}
+	if len(updates) != 1 {
+		t.Fatalf("updates = %+v, want one update for trimmed session id", updates)
+	}
+	if updates[0].SessionID != "session-1" {
+		t.Fatalf("update sessionID = %q, want session-1", updates[0].SessionID)
+	}
+	if updates[0].Update.ToolCallID != "call-1" {
+		t.Fatalf("toolCallID = %q, want call-1", updates[0].Update.ToolCallID)
+	}
+	if tool := client.toolCallSnapshot("session-1", "call-1"); tool == nil || tool.ToolCallID != "call-1" || tool.Title != "Run tests" {
+		t.Fatalf("toolCallSnapshot = %+v, want trimmed call-1 Run tests", tool)
+	}
+	<-done
+}
+
 func TestClientPromptParsesAudioContentBlock(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()
@@ -2483,6 +2731,29 @@ func TestSessionInfoUpdateTracksNullUpdatedAt(t *testing.T) {
 	}
 	if update.UpdatedAt != "" {
 		t.Fatalf("UpdatedAt = %q, want empty updatedAt for null", update.UpdatedAt)
+	}
+}
+
+func TestSessionUpdateTrimsModelStateFields(t *testing.T) {
+	var update SessionUpdate
+	if err := json.Unmarshal([]byte(`{
+		"sessionUpdate":"session_state_update",
+		"models":{
+			"currentModelId":" gpt-5.6 ",
+			"availableModels":[{"modelId":" gpt-5.6 ","name":" GPT-5.6 ","description":" next model "}]
+		}
+	}`), &update); err != nil {
+		t.Fatalf("Unmarshal session_state_update error = %v", err)
+	}
+	if update.Models == nil || update.Models.CurrentModelID != "gpt-5.6" {
+		t.Fatalf("Models = %+v, want trimmed current model", update.Models)
+	}
+	if len(update.Models.AvailableModels) != 1 {
+		t.Fatalf("AvailableModels = %+v, want one model", update.Models.AvailableModels)
+	}
+	got := update.Models.AvailableModels[0]
+	if got.ModelID != "gpt-5.6" || got.Name != "GPT-5.6" || got.Description != "next model" {
+		t.Fatalf("model = %+v, want trimmed fields", got)
 	}
 }
 
