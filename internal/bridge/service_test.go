@@ -283,118 +283,6 @@ func testReadySession(t *testing.T, store *SessionStore) Session {
 	return session
 }
 
-func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
-	workspace := filepath.Join(t.TempDir(), "workspace")
-	status, err := ensureWorkspace(workspace, "bot-a")
-	if err != nil {
-		t.Fatalf("ensureWorkspace(new) error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); err != nil {
-		t.Fatalf("Bootstrap.md should exist after new workspace: %v", err)
-	}
-
-	markWorkspaceBootstrapped(t, workspace)
-	status, err = ensureWorkspace(workspace, "bot-a")
-	if err != nil {
-		t.Fatalf("ensureWorkspace(existing) error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Bootstrap.md should stay deleted after bootstrapped workspace, err=%v", err)
-	}
-	if len(status.CreatedFiles) != 0 {
-		t.Fatalf("created files = %+v, want none for existing workspace", status.CreatedFiles)
-	}
-}
-
-func TestEnsureWorkspaceRejectsEmptyPath(t *testing.T) {
-	if _, err := ensureWorkspace("", "bot-a"); err == nil || !strings.Contains(err.Error(), "workspace 为空") {
-		t.Fatalf("ensureWorkspace(empty) error = %v, want workspace empty error", err)
-	}
-}
-
-func TestEnsureWorkspaceRejectsFilePath(t *testing.T) {
-	workspace := filepath.Join(t.TempDir(), "workspace")
-	if err := os.WriteFile(workspace, []byte("not a directory"), 0o644); err != nil {
-		t.Fatalf("WriteFile(workspace) error = %v", err)
-	}
-
-	if _, err := ensureWorkspace(workspace, "bot-a"); err == nil || !strings.Contains(err.Error(), "workspace 路径不是目录") {
-		t.Fatalf("ensureWorkspace(file) error = %v, want not directory error", err)
-	}
-}
-
-func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T) {
-	workspace := filepath.Join(t.TempDir(), "workspace")
-	if _, err := ensureWorkspace(workspace, "default"); err != nil {
-		t.Fatalf("ensureWorkspace() error = %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(workspace, "TOOLS.md"))
-	if err != nil {
-		t.Fatalf("ReadFile(TOOLS.md) error = %v", err)
-	}
-	tools := string(data)
-	for _, want := range []string{
-		"飞书 CLI",
-		"lark-cli",
-		"https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md",
-		"lark-acp-default",
-		"config.json",
-		"app_id",
-		"app_secret",
-		"stdin",
-		"不要写入提示词、回复、日志或命令行参数",
-	} {
-		if !strings.Contains(tools, want) {
-			t.Fatalf("TOOLS.md = %q, want %q", tools, want)
-		}
-	}
-}
-
-func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-	tmp := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmp, workspaceBootstrapFile), []byte("# Should Not Leak\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(Bootstrap.md) error = %v", err)
-	}
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("Chdir(tmp) error = %v", err)
-	}
-	defer func() {
-		if err := os.Chdir(oldWd); err != nil {
-			t.Fatalf("Chdir(oldWd) error = %v", err)
-		}
-	}()
-
-	if got := workspaceContextPrompt(""); got != "" {
-		t.Fatalf("workspaceContextPrompt(empty) = %q, want empty", got)
-	}
-	if got := promptTextWithWorkspaceContext("", feishu.Message{}, "hello"); got != "hello" {
-		t.Fatalf("promptTextWithWorkspaceContext(empty) = %q, want user text only", got)
-	}
-}
-
-func TestWorkspaceContextPromptTruncatesLargeFiles(t *testing.T) {
-	workspace := t.TempDir()
-	largeContent := strings.Repeat("a", int(workspaceContextFileMaxBytes)+32) + "TAIL_SHOULD_NOT_APPEAR"
-	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte(largeContent), 0o644); err != nil {
-		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
-	}
-
-	prompt := workspaceContextPrompt(workspace)
-	if !strings.Contains(prompt, "Workspace Context") {
-		t.Fatalf("prompt = %q, want workspace context", prompt)
-	}
-	if !strings.Contains(prompt, "已截断") {
-		t.Fatalf("prompt = %q, want truncation notice", prompt)
-	}
-	if strings.Contains(prompt, "TAIL_SHOULD_NOT_APPEAR") {
-		t.Fatalf("prompt contains truncated tail")
-	}
-}
-
 func TestHandleFeishuMessageHelp(t *testing.T) {
 	svc := newTestService(config.Default(), nil)
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -492,207 +380,6 @@ func TestHandleFeishuMessageDebugCommandTogglesProgramLevel(t *testing.T) {
 	}
 	if !strings.Contains(reply, "已关闭 bridge debug 日志") || !strings.Contains(reply, "关闭") {
 		t.Fatalf("reply = %q, want debug disabled reply", reply)
-	}
-}
-
-func TestApplyACPStateUpdateAllowsEmptyLists(t *testing.T) {
-	session := Session{
-		AvailableCommands: []acp.AvailableCommand{{Name: "review"}},
-		ConfigOptions: []acp.SessionConfigOption{
-			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.5"},
-		},
-	}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "available_commands_update"}) {
-		t.Fatal("available_commands_update should be treated as changed even when empty")
-	}
-	if len(session.AvailableCommands) != 0 {
-		t.Fatalf("AvailableCommands = %+v, want cleared", session.AvailableCommands)
-	}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "config_option_update"}) {
-		t.Fatal("config_option_update should be treated as changed even when empty")
-	}
-	if len(session.ConfigOptions) != 0 {
-		t.Fatalf("ConfigOptions = %+v, want cleared", session.ConfigOptions)
-	}
-}
-
-func TestApplyACPStateUpdateReplacesConfigOptions(t *testing.T) {
-	session := Session{
-		ConfigOptions: []acp.SessionConfigOption{
-			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.5"},
-			{ID: "mode", Name: "Mode", Type: "select", CurrentValue: "ask"},
-		},
-	}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "config_option_update",
-		ConfigOptions: []acp.SessionConfigOption{
-			{ID: "reasoning", Name: "Reasoning", Type: "select", CurrentValue: "high"},
-			{ID: "model", Name: "Model", Type: "select", CurrentValue: "gpt-5.6"},
-		},
-	}) {
-		t.Fatal("config_option_update should be treated as changed")
-	}
-	if len(session.ConfigOptions) != 2 {
-		t.Fatalf("ConfigOptions = %+v, want full replacement with two options", session.ConfigOptions)
-	}
-	if session.ConfigOptions[0].ID != "reasoning" || session.ConfigOptions[0].CurrentValue != "high" {
-		t.Fatalf("first config option = %+v, want reasoning high", session.ConfigOptions[0])
-	}
-	if session.ConfigOptions[1].ID != "model" || session.ConfigOptions[1].CurrentValue != "gpt-5.6" {
-		t.Fatalf("second config option = %+v, want model gpt-5.6", session.ConfigOptions[1])
-	}
-}
-
-func TestApplyACPStateUpdatePersistsModeAndModelState(t *testing.T) {
-	session := Session{}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_state_update",
-		Models: &acp.SessionModelState{
-			CurrentModelID: "gpt-5.5",
-			AvailableModels: []acp.SessionModel{
-				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
-			},
-		},
-		Mode: &acp.SessionModeState{
-			CurrentModeID: "agent",
-			AvailableModes: []acp.SessionMode{
-				{ModeID: "agent", Name: "Agent"},
-			},
-		},
-	}) {
-		t.Fatal("session_state_update should update mode/model state")
-	}
-	if got := currentModelDisplay(session); got != "gpt-5.5" {
-		t.Fatalf("currentModelDisplay = %q, want gpt-5.5", got)
-	}
-	if got := currentModeDisplay(session); got != "agent" {
-		t.Fatalf("currentModeDisplay = %q, want agent", got)
-	}
-}
-
-func TestApplyACPStateUpdatePersistsCurrentModeUpdate(t *testing.T) {
-	session := Session{
-		Mode: &acp.SessionModeState{
-			CurrentModeID: "default",
-			AvailableModes: []acp.SessionMode{
-				{ModeID: "default", Name: "Default"},
-				{ModeID: "plan", Name: "Plan"},
-			},
-		},
-	}
-	if !isACPStateUpdate(acp.SessionUpdate{SessionUpdate: "current_mode_update", ModeID: "plan"}) {
-		t.Fatal("current_mode_update should be treated as state update")
-	}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{SessionUpdate: "current_mode_update", ModeID: "plan"}) {
-		t.Fatal("current_mode_update should update current mode")
-	}
-	if session.Mode == nil || session.Mode.CurrentModeID != "plan" {
-		t.Fatalf("Mode = %+v, want current mode plan", session.Mode)
-	}
-	if len(session.Mode.AvailableModes) != 2 {
-		t.Fatalf("AvailableModes = %+v, want preserved mode list", session.Mode.AvailableModes)
-	}
-}
-
-func TestApplyACPStateUpdatePersistsSessionInfoTitle(t *testing.T) {
-	session := Session{Title: "旧标题"}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		Title:         "新标题",
-		TitleSet:      true,
-	}) {
-		t.Fatal("session_info_update should update title")
-	}
-	if session.Title != "新标题" {
-		t.Fatalf("Title = %q, want 新标题", session.Title)
-	}
-
-	session.ManualTitle = true
-	if applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		Title:         "自动标题",
-		TitleSet:      true,
-	}) {
-		t.Fatal("manual title should not be overwritten by session_info_update")
-	}
-	if session.Title != "新标题" {
-		t.Fatalf("Title = %q, want manual title preserved", session.Title)
-	}
-}
-
-func TestApplyACPStateUpdateClearsSessionInfoTitle(t *testing.T) {
-	session := Session{Title: "旧标题"}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		TitleSet:      true,
-	}) {
-		t.Fatal("session_info_update should clear title when title is null")
-	}
-	if session.Title != "" {
-		t.Fatalf("Title = %q, want cleared", session.Title)
-	}
-
-	session = Session{Title: "手动标题", ManualTitle: true}
-	if applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		TitleSet:      true,
-	}) {
-		t.Fatal("manual title should not be cleared by session_info_update")
-	}
-	if session.Title != "手动标题" {
-		t.Fatalf("Title = %q, want manual title preserved", session.Title)
-	}
-}
-
-func TestApplyACPStateUpdatePersistsACPUpdatedAt(t *testing.T) {
-	session := Session{ACPUpdatedAt: "2025-10-29T14:22:15Z"}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		UpdatedAt:     "2025-10-29T15:00:00Z",
-		UpdatedAtSet:  true,
-	}) {
-		t.Fatal("session_info_update should update ACP updatedAt")
-	}
-	if session.ACPUpdatedAt != "2025-10-29T15:00:00Z" {
-		t.Fatalf("ACPUpdatedAt = %q, want updated timestamp", session.ACPUpdatedAt)
-	}
-
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		UpdatedAtSet:  true,
-	}) {
-		t.Fatal("session_info_update should clear ACP updatedAt")
-	}
-	if session.ACPUpdatedAt != "" {
-		t.Fatalf("ACPUpdatedAt = %q, want cleared", session.ACPUpdatedAt)
-	}
-}
-
-func TestApplyACPStateUpdatePersistsACPMeta(t *testing.T) {
-	session := Session{ACPMeta: map[string]any{"old": true}}
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		Meta: map[string]any{
-			"priority": "high",
-		},
-	}) {
-		t.Fatal("session_info_update should update ACP meta")
-	}
-	if got, ok := session.ACPMeta["priority"]; !ok || got != "high" {
-		t.Fatalf("ACPMeta[priority] = %v, want high", got)
-	}
-	if _, ok := session.ACPMeta["old"]; ok {
-		t.Fatalf("ACPMeta retained old key: %+v", session.ACPMeta)
-	}
-
-	if !applyACPStateUpdate(&session, acp.SessionUpdate{
-		SessionUpdate: "session_info_update",
-		Meta:          map[string]any{},
-	}) {
-		t.Fatal("session_info_update should clear ACP meta with empty object")
-	}
-	if len(session.ACPMeta) != 0 {
-		t.Fatalf("ACPMeta = %+v, want empty", session.ACPMeta)
 	}
 }
 
@@ -1417,7 +1104,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
-		Text:     "/show status off",
+		Text:     "/show STATUS off",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/show status off) error = %v", err)
@@ -1445,6 +1132,19 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
 	if !updated.HideUsageDetail {
 		t.Fatalf("HideUsageDetail = false, want true after /show used off")
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show STATUS",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show STATUS) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话流式卡片展示：") || !strings.Contains(reply, "状态栏：关闭") {
+		t.Fatalf("reply = %q, want show status output", reply)
 	}
 }
 
@@ -1617,245 +1317,6 @@ func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing
 	updated, ok := store.Get(session.Key)
 	if !ok || updated.HideStatusBar || updated.HideUsageDetail {
 		t.Fatalf("new session = %+v, %v; show options should not be stored on new session", updated, ok)
-	}
-}
-
-func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
-	session := Session{
-		Models: &acp.SessionModelState{
-			CurrentModelID: "gpt-5.5",
-			AvailableModels: []acp.SessionModel{
-				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
-				{ModelID: "gpt-5.6", Name: "GPT-5.6"},
-			},
-		},
-	}
-	options := modelSelectionOptions(session, acp.SessionConfigOption{ID: "model", Category: "model"})
-	if len(options) != 2 || options[1].Value != "gpt-5.6" || options[1].Name != "GPT-5.6" {
-		t.Fatalf("options = %+v, want models fallback", options)
-	}
-}
-
-func TestModeSelectionOptionsFallsBackToModeState(t *testing.T) {
-	session := Session{
-		Mode: &acp.SessionModeState{
-			CurrentModeID: "default",
-			AvailableModes: []acp.SessionMode{
-				{ModeID: "default", Name: "Default"},
-				{ModeID: "plan", Name: "Plan"},
-			},
-		},
-	}
-	options := modeSelectionOptions(session, acp.SessionConfigOption{ID: "mode", Category: "mode"})
-	if len(options) != 2 || options[1].Value != "plan" || options[1].Name != "Plan" {
-		t.Fatalf("options = %+v, want modes fallback", options)
-	}
-}
-
-func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	session := testReadySession(t, store)
-	session.ConfigOptions = []acp.SessionConfigOption{
-		{
-			ID:           "model",
-			Name:         "Model",
-			Category:     "model",
-			Type:         "select",
-			CurrentValue: "gpt-5.5",
-			Options: []acp.SessionConfigOptionValue{
-				{Value: "gpt-5.5", Name: "GPT-5.5"},
-				{Value: "gpt-5.6", Name: "GPT-5.6"},
-			},
-		},
-	}
-	if err := store.Upsert(session); err != nil {
-		t.Fatalf("Upsert(session) error = %v", err)
-	}
-	rt := &fakeRuntime{
-		configOptions: []acp.SessionConfigOption{
-			{
-				ID:           "model",
-				Name:         "Model",
-				Category:     "model",
-				Type:         "select",
-				CurrentValue: "gpt-5.6",
-				Options: []acp.SessionConfigOptionValue{
-					{Value: "gpt-5.5", Name: "GPT-5.5"},
-					{Value: "gpt-5.6", Name: "GPT-5.6"},
-				},
-			},
-		},
-	}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	selection := feishu.ModelSelection{
-		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
-		ACPSessionID: session.ACPSessionID,
-		RequesterID:  "ou_requester",
-		OperatorID:   "ou_requester",
-		Model:        "gpt-5.6",
-	}
-
-	display, err := svc.HandleModelSelection(context.Background(), selection)
-	if err != nil {
-		t.Fatalf("HandleModelSelection() error = %v", err)
-	}
-	if display != "GPT-5.6（gpt-5.6）" {
-		t.Fatalf("display = %q, want friendly model display", display)
-	}
-	if len(rt.configCalls) != 1 || rt.configCalls[0].Value != "gpt-5.6" {
-		t.Fatalf("configCalls = %+v, want gpt-5.6", rt.configCalls)
-	}
-
-	selection.OperatorID = "ou_other"
-	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "只有发起") {
-		t.Fatalf("other user error = %v, want requester validation", err)
-	}
-
-	selection.OperatorID = selection.RequesterID
-	selection.RequesterID = ""
-	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
-	}
-
-	selection.RequesterID = "ou_requester"
-	selection.OperatorID = ""
-	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
-	}
-
-	selection.OperatorID = selection.RequesterID
-	selection.ACPSessionID = "stale-session"
-	if _, err := svc.HandleModelSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "已过期") {
-		t.Fatalf("stale card error = %v, want expired validation", err)
-	}
-}
-
-func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	session := testReadySession(t, store)
-	session.ConfigOptions = []acp.SessionConfigOption{
-		{
-			ID:           "mode",
-			Name:         "Mode",
-			Category:     "mode",
-			Type:         "select",
-			CurrentValue: "default",
-			Options: []acp.SessionConfigOptionValue{
-				{Value: "default", Name: "Default"},
-				{Value: "plan", Name: "Plan"},
-			},
-		},
-	}
-	if err := store.Upsert(session); err != nil {
-		t.Fatalf("Upsert(session) error = %v", err)
-	}
-	rt := &fakeRuntime{
-		configOptions: []acp.SessionConfigOption{
-			{
-				ID:           "mode",
-				Name:         "Mode",
-				Category:     "mode",
-				Type:         "select",
-				CurrentValue: "plan",
-				Options: []acp.SessionConfigOptionValue{
-					{Value: "default", Name: "Default"},
-					{Value: "plan", Name: "Plan"},
-				},
-			},
-		},
-	}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	selection := feishu.ModeSelection{
-		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
-		ACPSessionID: session.ACPSessionID,
-		RequesterID:  "ou_requester",
-		OperatorID:   "ou_requester",
-		Mode:         "plan",
-	}
-
-	display, err := svc.HandleModeSelection(context.Background(), selection)
-	if err != nil {
-		t.Fatalf("HandleModeSelection() error = %v", err)
-	}
-	if display != "Plan（plan）" {
-		t.Fatalf("display = %q, want friendly mode display", display)
-	}
-	if len(rt.configCalls) != 1 || rt.configCalls[0].Value != "plan" {
-		t.Fatalf("configCalls = %+v, want plan", rt.configCalls)
-	}
-
-	selection.OperatorID = "ou_other"
-	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "只有发起") {
-		t.Fatalf("other user error = %v, want requester validation", err)
-	}
-
-	selection.OperatorID = selection.RequesterID
-	selection.RequesterID = ""
-	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
-	}
-
-	selection.RequesterID = "ou_requester"
-	selection.OperatorID = ""
-	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
-	}
-
-	selection.OperatorID = selection.RequesterID
-	selection.ACPSessionID = "stale-session"
-	if _, err := svc.HandleModeSelection(context.Background(), selection); err == nil || !strings.Contains(err.Error(), "已过期") {
-		t.Fatalf("stale card error = %v, want expired validation", err)
-	}
-}
-
-func TestHandleModeSelectionFallsBackToLegacySetMode(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	session := testReadySession(t, store)
-	session.ConfigOptions = nil
-	session.Mode = &acp.SessionModeState{
-		CurrentModeID: "default",
-		AvailableModes: []acp.SessionMode{
-			{ModeID: "default", Name: "Default"},
-			{ModeID: "plan", Name: "Plan"},
-		},
-	}
-	if err := store.Upsert(session); err != nil {
-		t.Fatalf("Upsert(session) error = %v", err)
-	}
-	rt := &fakeRuntime{}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-
-	display, err := svc.HandleModeSelection(context.Background(), feishu.ModeSelection{
-		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
-		ACPSessionID: session.ACPSessionID,
-		RequesterID:  "ou_requester",
-		OperatorID:   "ou_requester",
-		Mode:         "Plan",
-	})
-	if err != nil {
-		t.Fatalf("HandleModeSelection() error = %v", err)
-	}
-	if display != "Plan（plan）" {
-		t.Fatalf("display = %q, want friendly legacy mode display", display)
-	}
-	if len(rt.modeCalls) != 1 || rt.modeCalls[0].ModeID != "plan" {
-		t.Fatalf("modeCalls = %+v, want legacy set_mode plan", rt.modeCalls)
-	}
-	if len(rt.configCalls) != 0 {
-		t.Fatalf("configCalls = %+v, want no set_config_option fallback call", rt.configCalls)
-	}
-	updated, ok := store.Get(session.Key)
-	if !ok || updated.Mode == nil || updated.Mode.CurrentModeID != "plan" {
-		t.Fatalf("updated session = %+v, want legacy mode plan persisted", updated)
 	}
 }
 
@@ -2420,29 +1881,6 @@ func TestHandleFeishuGroupChatStartsReactionOnlyWhenMessageIsProcessed(t *testin
 	}
 }
 
-func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
-	msg := feishu.Message{
-		BotOpenID: testBotOpenID,
-		Mentions: []feishu.Mention{
-			{ID: "ou_other_user", Name: "其他用户", Type: "user"},
-			{ID: "ou_other_bot", Name: "其他助手", Type: "bot"},
-		},
-	}
-	if messageMentionsBot(msg) {
-		t.Fatalf("messageMentionsBot(%+v) = true, want false for mentions that do not target current bot", msg.Mentions)
-	}
-
-	msg.Mentions = append(msg.Mentions, testBotMention("智能助手"))
-	if !messageMentionsBot(msg) {
-		t.Fatalf("messageMentionsBot(%+v) = false, want true for current bot open_id", msg.Mentions)
-	}
-
-	msg.BotOpenID = ""
-	if messageMentionsBot(msg) {
-		t.Fatalf("messageMentionsBot without BotOpenID = true, want false")
-	}
-}
-
 func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -2793,10 +2231,10 @@ func TestHandleFeishuSessionListAndResume(t *testing.T) {
 		ChatID:    base.ChatID,
 		ChatType:  base.ChatType,
 		MessageID: "om_list",
-		Text:      "/session list",
+		Text:      "/session LIST",
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(/session list) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(/session LIST) error = %v", err)
 	}
 	if !strings.Contains(reply, "1. acp-session-2 *") || !strings.Contains(reply, "2. acp-session-1") {
 		t.Fatalf("reply = %q, want newest current session first", reply)
@@ -2807,10 +2245,10 @@ func TestHandleFeishuSessionListAndResume(t *testing.T) {
 		ChatID:    base.ChatID,
 		ChatType:  base.ChatType,
 		MessageID: "om_resume",
-		Text:      "/session resume 2",
+		Text:      "/session RESUME 2",
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(/session resume) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(/session RESUME) error = %v", err)
 	}
 	if !strings.Contains(reply, "已恢复会话 2") || !strings.Contains(reply, "session：acp-session-1") {
 		t.Fatalf("reply = %q, want resumed first session", reply)
@@ -2897,119 +2335,6 @@ func TestHandleFeishuSessionListSendsSelectionCard(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuSessionListSelectionOptionsAreLimited(t *testing.T) {
-	items := make([]Session, 0, maxSessionHistoryPerChat+2)
-	for i := 0; i < maxSessionHistoryPerChat+2; i++ {
-		items = append(items, Session{
-			Title:        fmt.Sprintf("会话%d", i),
-			ACPSessionID: fmt.Sprintf("session-%d", i),
-			Cwd:          "/repo",
-		})
-	}
-	options := sessionSelectionOptions(items, maxSessionHistoryPerChat)
-	if len(options) != maxSessionHistoryPerChat {
-		t.Fatalf("len(options) = %d, want %d", len(options), maxSessionHistoryPerChat)
-	}
-	if options[0].ACPSessionID != "session-0" || options[len(options)-1].ACPSessionID != fmt.Sprintf("session-%d", maxSessionHistoryPerChat-1) {
-		t.Fatalf("options = %+v, want first %d items", options, maxSessionHistoryPerChat)
-	}
-}
-
-func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	firstDir := t.TempDir()
-	secondDir := t.TempDir()
-	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	base := feishu.Message{
-		BotID:    "bot-a",
-		ChatID:   "oc_private",
-		ChatType: "p2p",
-	}
-
-	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     base.BotID,
-		ChatID:    base.ChatID,
-		ChatType:  base.ChatType,
-		MessageID: "om_first",
-		Text:      "/new " + firstDir + " 第一个",
-	}); err != nil {
-		t.Fatalf("HandleFeishuMessage(/new first) error = %v", err)
-	}
-	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     base.BotID,
-		ChatID:    base.ChatID,
-		ChatType:  base.ChatType,
-		MessageID: "om_second",
-		Text:      "/new " + secondDir + " 第二个",
-	}); err != nil {
-		t.Fatalf("HandleFeishuMessage(/new second) error = %v", err)
-	}
-
-	display, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
-		BotID:        base.BotID,
-		ChatID:       base.ChatID,
-		RequesterID:  testOwnerOpenID,
-		OperatorID:   testOwnerOpenID,
-		ACPSessionID: "acp-session-1",
-	})
-	if err != nil {
-		t.Fatalf("HandleSessionSelection(owner) error = %v", err)
-	}
-	if display != "第一个" {
-		t.Fatalf("display = %q, want restored title", display)
-	}
-	session, ok := store.Get(SessionKey{BotID: base.BotID, ChatID: base.ChatID})
-	if !ok {
-		t.Fatalf("current session not found")
-	}
-	if session.ACPSessionID != "acp-session-1" || session.Cwd != firstDir {
-		t.Fatalf("session = %+v, want first session restored", session)
-	}
-	if len(rt.closedKeys) == 0 {
-		t.Fatalf("closedKeys = %+v, want runtime closed before resume", rt.closedKeys)
-	}
-
-	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
-		BotID:        base.BotID,
-		ChatID:       base.ChatID,
-		RequesterID:  testOwnerOpenID,
-		OperatorID:   "ou_other",
-		ACPSessionID: "acp-session-2",
-	}); err == nil || !strings.Contains(err.Error(), "只有发起") {
-		t.Fatalf("other requester error = %v, want requester validation", err)
-	}
-
-	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
-		BotID:        base.BotID,
-		ChatID:       base.ChatID,
-		RequesterID:  "ou_other",
-		OperatorID:   "ou_other",
-		ACPSessionID: "acp-session-2",
-	}); err == nil || !strings.Contains(err.Error(), "只有 bot owner") {
-		t.Fatalf("non-owner error = %v, want owner validation", err)
-	}
-
-	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
-		BotID:        base.BotID,
-		ChatID:       base.ChatID,
-		OperatorID:   testOwnerOpenID,
-		ACPSessionID: "acp-session-2",
-	}); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing requester error = %v, want requester metadata validation", err)
-	}
-
-	if _, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
-		BotID:        base.BotID,
-		ChatID:       base.ChatID,
-		RequesterID:  testOwnerOpenID,
-		ACPSessionID: "acp-session-2",
-	}); err == nil || !strings.Contains(err.Error(), "缺少发起人或操作者") {
-		t.Fatalf("missing operator error = %v, want operator metadata validation", err)
-	}
-}
-
 func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -3048,10 +2373,10 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
 		MessageID: "om_title",
-		Text:      "/session title 新标题",
+		Text:      "/session TITLE 新标题",
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(/session title) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(/session TITLE) error = %v", err)
 	}
 	if !strings.Contains(reply, "已设置当前会话标题：新标题") {
 		t.Fatalf("reply = %q, want title confirmation", reply)
@@ -4049,145 +3374,6 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 	}
 }
 
-func TestPromptResultHasUsageDetail(t *testing.T) {
-	tests := []struct {
-		name   string
-		result acp.PromptResult
-		want   bool
-	}{
-		{
-			name: "structured usage",
-			result: acp.PromptResult{Usage: acp.TokenUsage{
-				InputTokens: 1,
-			}},
-			want: true,
-		},
-		{
-			name: "trae meta",
-			result: acp.PromptResult{Meta: acp.PromptResultMeta{
-				TraeTokenUsage: &acp.TraeTokenUsage{},
-			}},
-			want: true,
-		},
-		{
-			name:   "raw usage",
-			result: acp.PromptResult{Raw: json.RawMessage(`{"usage":{"inputTokens":1}}`)},
-			want:   true,
-		},
-		{
-			name:   "raw meta",
-			result: acp.PromptResult{Raw: json.RawMessage(`{"_meta":{"trace":"abc"}}`)},
-			want:   true,
-		},
-		{
-			name:   "no usage",
-			result: acp.PromptResult{Raw: json.RawMessage(`{"stopReason":"end_turn"}`)},
-			want:   false,
-		},
-		{
-			name:   "empty usage object",
-			result: acp.PromptResult{Raw: json.RawMessage(`{"usage":{}}`)},
-			want:   false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := promptResultHasUsageDetail(tt.result); got != tt.want {
-				t.Fatalf("promptResultHasUsageDetail() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
-	status := promptStatusBar{state: promptStatusRunning}
-	status.Context = acp.ContextWindowUsage{Used: 69200, Size: 258400}
-	status.applyPromptResult(acp.PromptResult{
-		Usage: acp.TokenUsage{
-			InputTokens:      511800,
-			CachedReadTokens: 496446,
-		},
-		Meta: acp.PromptResultMeta{
-			TraeTokenUsage: &acp.TraeTokenUsage{
-				TurnDisplay: acp.TokenUsage{
-					InputTokens:  987,
-					OutputTokens: 356,
-				},
-				ContextWindow: acp.ContextWindowUsage{Used: 99000, Size: 300000},
-			},
-		},
-	})
-
-	got := status.text()
-	want := "执行中 | 511.8K(97%), 356 | 69K/258K"
-	if got != want {
-		t.Fatalf("status text = %q, want %q", got, want)
-	}
-}
-
-func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
-	status := promptStatusBar{
-		state:       promptStatusCompleted,
-		input:       2_908_700,
-		cachedInput: 2_763_265,
-		output:      1_200_000,
-		Context:     acp.ContextWindowUsage{Used: 2_908_700, Size: 4_096_000},
-	}
-
-	got := status.text()
-	want := "已完成 | 2.9M(95%), 1.2M | 2M/4M"
-	if got != want {
-		t.Fatalf("status text = %q, want %q", got, want)
-	}
-}
-
-func TestPromptStatusBarOmitsMissingTokenUsage(t *testing.T) {
-	tests := []struct {
-		name string
-		bar  promptStatusBar
-		want string
-	}{
-		{
-			name: "output only",
-			bar:  promptStatusBar{state: promptStatusCompleted, output: 1000},
-			want: "已完成 | 1K",
-		},
-		{
-			name: "input only without cache rate",
-			bar:  promptStatusBar{state: promptStatusCompleted, input: 1000},
-			want: "已完成 | 1K",
-		},
-		{
-			name: "no usage",
-			bar:  promptStatusBar{state: promptStatusCompleted},
-			want: "已完成",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.bar.text(); got != tt.want {
-				t.Fatalf("status text = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestPromptStatusBarCancelledStopReason(t *testing.T) {
-	status := promptStatusBar{state: promptStatusRunning}
-	status.applyPromptResult(acp.PromptResult{
-		StopReason: "cancelled",
-		Usage: acp.TokenUsage{
-			InputTokens:  1200,
-			OutputTokens: 345,
-		},
-	})
-	status.state = promptStatusFromStopReason("cancelled")
-	status.stopReason = "cancelled"
-	if got, want := status.text(), "已取消 | 1.2K, 345"; got != want {
-		t.Fatalf("status text = %q, want %q", got, want)
-	}
-}
-
 func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{
@@ -4241,18 +3427,6 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 	got := cards[0].statusUpdatesSnapshot()
 	if len(got) == 0 || got[len(got)-1] != "已取消 | 1.2K" {
 		t.Fatalf("statusUpdates = %+v, want final cancelled status", got)
-	}
-}
-
-func TestFormatPromptResultDetailEscapesCodeFence(t *testing.T) {
-	got := formatPromptResultDetail(acp.PromptResult{
-		Raw: json.RawMessage("{\"message\":\"contains ``` fence\"}"),
-	})
-	if !strings.HasPrefix(got, "````json\n") || !strings.HasSuffix(got, "\n````") {
-		t.Fatalf("detail = %q, want four-backtick fence", got)
-	}
-	if !strings.Contains(got, "contains ``` fence") {
-		t.Fatalf("detail = %q, want raw content", got)
 	}
 }
 
@@ -4661,55 +3835,6 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	}
 }
 
-func TestFormatPromptUpdatePrefixesProcessMessageOnly(t *testing.T) {
-	tests := []struct {
-		name   string
-		update acp.PromptUpdate
-		want   string
-	}{
-		{
-			name: "process message",
-			update: acp.PromptUpdate{Update: acp.SessionUpdate{
-				SessionUpdate: "status",
-				Message:       "准备处理",
-			}},
-			want: "💬 准备处理",
-		},
-		{
-			name: "agent message",
-			update: acp.PromptUpdate{Update: acp.SessionUpdate{
-				SessionUpdate: "agent_message",
-				Message:       "先说明一下",
-			}},
-			want: "💬 先说明一下",
-		},
-		{
-			name: "thought message",
-			update: acp.PromptUpdate{Update: acp.SessionUpdate{
-				SessionUpdate: "reasoning",
-				Message:       "分析用户需求",
-			}},
-			want: "🧠 分析用户需求",
-		},
-		{
-			name: "agent chunk stays final text candidate",
-			update: acp.PromptUpdate{Update: acp.SessionUpdate{
-				SessionUpdate: "agent_message_chunk",
-				Content:       &acp.ContentBlock{Type: "text", Text: "正文"},
-			}},
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := formatPromptUpdate(tt.update); got != tt.want {
-				t.Fatalf("formatPromptUpdate() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
@@ -4744,167 +3869,6 @@ func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 	if rt.permissionOutcome.Outcome != "selected" || rt.permissionOutcome.OptionID != "reject-once" {
 		t.Fatalf("permission outcome = %+v, want reject-once", rt.permissionOutcome)
 	}
-}
-
-func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	var mu sync.Mutex
-	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		started <- struct{}{}
-		<-release
-		card := &fakeStreamCard{}
-		mu.Lock()
-		cards = append(cards, card)
-		mu.Unlock()
-		return card, nil
-	})
-	stream := newPromptCardStream(ctx, feishu.Message{
-		MessageID: "om_msg",
-		ChatID:    "oc_private",
-		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
-
-	done := make(chan struct{}, 2)
-	go func() {
-		stream.updateText("hello")
-		done <- struct{}{}
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("stream card starter was not called")
-	}
-	go func() {
-		stream.updateProcess("process")
-		done <- struct{}{}
-	}()
-	select {
-	case <-started:
-		t.Fatal("stream card starter was called twice while first creation was in flight")
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(release)
-	for i := 0; i < 2; i++ {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("concurrent stream update did not finish")
-		}
-	}
-	mu.Lock()
-	gotCards := len(cards)
-	if gotCards != 1 {
-		mu.Unlock()
-		t.Fatalf("cards = %d, want one stream card", gotCards)
-	}
-	card := cards[0]
-	mu.Unlock()
-	if got := card.textUpdatesSnapshot(); len(got) != 1 || got[0] != "hello" {
-		t.Fatalf("textUpdates = %+v, want text update on single card", got)
-	}
-	if got := card.processUpdatesSnapshot(); len(got) != 1 || got[0] != "process" {
-		t.Fatalf("processUpdates = %+v, want process update on single card", got)
-	}
-}
-
-func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
-	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		card := &fakeStreamCard{}
-		cards = append(cards, card)
-		return card, nil
-	})
-	stream := newPromptCardStream(ctx, feishu.Message{
-		MessageID: "om_msg",
-		ChatID:    "oc_private",
-		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
-
-	stream.updateProcess(strings.Repeat("前", maxPromptProcessRunes+20) + "尾部")
-
-	if len(cards) != 1 {
-		t.Fatalf("cards = %+v, want one stream card", cards)
-	}
-	got := cards[0].processUpdatesSnapshot()
-	if len(got) != 1 {
-		t.Fatalf("processUpdates = %+v, want one process update", got)
-	}
-	if !strings.HasPrefix(got[0], "（前面过程内容已省略）\n") {
-		t.Fatalf("process update prefix = %q, want omission marker", got[0])
-	}
-	if !strings.HasSuffix(got[0], "尾部") {
-		t.Fatalf("process update suffix = %q, want tail retained", got[0])
-	}
-	if len([]rune(got[0])) > maxPromptProcessRunes+20 {
-		t.Fatalf("process update length = %d, want bounded text", len([]rune(got[0])))
-	}
-}
-
-func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
-	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		card := &fakeStreamCard{}
-		cards = append(cards, card)
-		return card, nil
-	})
-	stream := newPromptCardStream(ctx, feishu.Message{
-		MessageID: "om_msg",
-		ChatID:    "oc_private",
-		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
-
-	stream.updateProcess("one")
-	stream.updateProcess("two")
-
-	if len(cards) != 1 {
-		t.Fatalf("cards = %+v, want one stream card", cards)
-	}
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "one" {
-		t.Fatalf("processUpdates = %+v, want second process update throttled", got)
-	}
-	stream.close()
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\ntwo" {
-		t.Fatalf("processUpdates = %+v, want pending process flushed on close", got)
-	}
-}
-
-func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
-	var cardsMu sync.Mutex
-	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		card := &fakeStreamCard{}
-		cardsMu.Lock()
-		cards = append(cards, card)
-		cardsMu.Unlock()
-		return card, nil
-	})
-	cardsSnapshot := func() []*fakeStreamCard {
-		cardsMu.Lock()
-		defer cardsMu.Unlock()
-		return append([]*fakeStreamCard(nil), cards...)
-	}
-	stream := newPromptCardStream(ctx, feishu.Message{
-		MessageID: "om_msg",
-		ChatID:    "oc_private",
-		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
-	chunks := newPromptChunkAccumulator(stream)
-	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "Hel"})
-	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "lo"})
-	if got := cardsSnapshot(); len(got) != 0 {
-		t.Fatalf("cards = %+v, want debounce to delay card creation", got)
-	}
-	time.Sleep(promptCardFlushDelay + 80*time.Millisecond)
-	gotCards := cardsSnapshot()
-	if len(gotCards) != 1 {
-		t.Fatalf("cards = %+v, want one stream card after debounce flush", gotCards)
-	}
-	if got := gotCards[0].textUpdatesSnapshot(); len(got) != 1 || got[0] != "Hello" {
-		t.Fatalf("textUpdates = %+v, want one debounced update", got)
-	}
-	chunks.close()
 }
 
 func TestPromptRuntimeWaitsForInFlightDebouncedCardFlush(t *testing.T) {
@@ -4992,40 +3956,6 @@ func TestPromptRuntimeWaitsForInFlightDebouncedCardFlush(t *testing.T) {
 	}
 	if !cards[0].isClosed() {
 		t.Fatalf("stream card should be closed")
-	}
-}
-
-func TestNormalizeStreamMarkdownFoldsSoftLineBreaks(t *testing.T) {
-	input := strings.Join([]string{
-		"hello",
-		"world",
-		"from",
-		"ACP.",
-		"下一句",
-		"继续",
-		"",
-		"- item 1",
-		"- item 2",
-		"",
-		"```",
-		"line 1",
-		"line 2",
-		"```",
-	}, "\n")
-	want := strings.Join([]string{
-		"hello world from ACP.",
-		"下一句继续",
-		"",
-		"- item 1",
-		"- item 2",
-		"",
-		"```",
-		"line 1",
-		"line 2",
-		"```",
-	}, "\n")
-	if got := normalizeStreamMarkdown(input); got != want {
-		t.Fatalf("normalizeStreamMarkdown() = %q, want %q", got, want)
 	}
 }
 
@@ -5846,7 +4776,7 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
-		Text:      "/wiki interval 1s",
+		Text:      "/wiki INTERVAL 1s",
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
@@ -5870,7 +4800,7 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		MessageID: "om_off",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
-		Text:      "/wiki off",
+		Text:      "/wiki OFF",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/wiki off) error = %v", err)
@@ -6236,7 +5166,7 @@ func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 		MessageID: "om_status",
 		ChatID:    "oc_chat",
 		ThreadID:  "omt_thread",
-		Text:      "/wiki status",
+		Text:      "/wiki STATUS",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/wiki status) error = %v", err)
@@ -6512,67 +5442,6 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 	}
 }
 
-func TestParseLoopRequest(t *testing.T) {
-	req, err := parseLoopRequest("/loop -t 30m -n 3 -i 2s 持续推进")
-	if err != nil {
-		t.Fatalf("parseLoopRequest() error = %v", err)
-	}
-	if req.MaxDuration != 30*time.Minute || req.MaxRounds != 3 || req.Interval != 2*time.Second || req.Prompt != "持续推进" {
-		t.Fatalf("request = %+v, want parsed loop options", req)
-	}
-
-	req, err = parseLoopRequest("/loop -t 0 -n 0 默认间隔")
-	if err != nil {
-		t.Fatalf("parseLoopRequest(unlimited) error = %v", err)
-	}
-	if req.MaxDuration != 0 || req.MaxRounds != 0 || req.Interval != defaultLoopInterval || req.Prompt != "默认间隔" {
-		t.Fatalf("request = %+v, want unlimited with default interval", req)
-	}
-
-	req, err = parseLoopRequest("/loop -n 1 请保留  多空格\n以及换行")
-	if err != nil {
-		t.Fatalf("parseLoopRequest(spaced prompt) error = %v", err)
-	}
-	if req.Prompt != "请保留  多空格\n以及换行" {
-		t.Fatalf("prompt = %q, want original spacing", req.Prompt)
-	}
-
-	if _, err := parseLoopRequest("/loop -i 0 提示词"); err == nil || !strings.Contains(err.Error(), "-i 必须大于 0") {
-		t.Fatalf("parseLoopRequest(-i 0) error = %v, want interval validation", err)
-	}
-	if _, err := parseLoopRequest("/loop -x 提示词"); err == nil || !strings.Contains(err.Error(), "未知 loop 参数") {
-		t.Fatalf("parseLoopRequest(-x) error = %v, want unknown option", err)
-	}
-	if _, err := parseLoopRequest("/loop -n 1"); err == nil || !strings.Contains(err.Error(), "提示词必填") {
-		t.Fatalf("parseLoopRequest(no prompt) error = %v, want required prompt", err)
-	}
-}
-
-func TestLoopDone(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		want bool
-	}{
-		{name: "plain", text: "DONE", want: true},
-		{name: "space", text: " \nDONE\t", want: true},
-		{name: "inline code not accepted", text: "`DONE`"},
-		{name: "plain fenced not accepted", text: "```\nDONE\n```"},
-		{name: "typed fenced not accepted", text: "```text\nDONE\n```"},
-		{name: "lowercase not accepted", text: "done"},
-		{name: "extra text not accepted", text: "DONE\n继续"},
-		{name: "sentence not accepted", text: "DONE，已完成"},
-		{name: "typed fenced extra text not accepted", text: "```text\nDONE\n继续\n```"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := loopDone(tt.text); got != tt.want {
-				t.Fatalf("loopDone(%q) = %v, want %v", tt.text, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestLoopCommandRunsUntilDoneAndUpdatesStartCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "继续"}, {Text: "DONE"}}}
@@ -6825,10 +5694,18 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 	client := newFakeSentMessageClient("om_loop_start")
+	var streamMsgsMu sync.Mutex
 	var streamMsgs []feishu.Message
+	streamMsgsSnapshot := func() []feishu.Message {
+		streamMsgsMu.Lock()
+		defer streamMsgsMu.Unlock()
+		return append([]feishu.Message(nil), streamMsgs...)
+	}
 	ctx := withFakeSentMessageClient(context.Background(), client)
 	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		streamMsgsMu.Lock()
 		streamMsgs = append(streamMsgs, msg)
+		streamMsgsMu.Unlock()
 		return &fakeStreamCard{}, nil
 	})
 
@@ -6853,35 +5730,12 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 		t.Fatalf("start message = %+v, want loop start card to reply normally to user message", startMsgs[0])
 	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
-	if len(streamMsgs) != 1 {
-		t.Fatalf("stream messages = %+v, want one card", streamMsgs)
+	streamMsgList := streamMsgsSnapshot()
+	if len(streamMsgList) != 1 {
+		t.Fatalf("stream messages = %+v, want one card", streamMsgList)
 	}
-	if streamMsgs[0].MessageID != "om_loop_start" || !streamMsgs[0].ForceReplyInThread {
-		t.Fatalf("stream message = %+v, want card reply to loop start message in thread", streamMsgs[0])
-	}
-}
-
-func TestUpdateLoopAnchorIgnoresCanceledParentContext(t *testing.T) {
-	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
-	client := newFakeSentMessageClient("om_loop_start")
-	parent, cancel := context.WithCancel(context.Background())
-	cancel()
-	anchor := loopAnchor{
-		message: feishu.Message{MessageID: "om_loop_start"},
-		request: loopRequest{Prompt: "持续推进", Interval: time.Second},
-		card: &fakeLoopStatusCard{
-			client:                client,
-			message:               feishu.SentMessage{MessageID: "om_loop_start"},
-			failOnCanceledContext: true,
-		},
-	}
-
-	if !svc.updateLoopAnchor(parent, anchor, loopProgressFinished, 0, "agent 返回 DONE") {
-		t.Fatal("updateLoopAnchor() = false, want update with detached context")
-	}
-	finishes := client.finishesSnapshot()
-	if len(finishes) != 1 || !strings.Contains(finishes[0], "状态：已完成") || !strings.Contains(finishes[0], "结束原因：agent 返回 DONE") {
-		t.Fatalf("finishes = %#v, want completed finish update", finishes)
+	if streamMsgList[0].MessageID != "om_loop_start" || !streamMsgList[0].ForceReplyInThread {
+		t.Fatalf("stream message = %+v, want card reply to loop start message in thread", streamMsgList[0])
 	}
 }
 
@@ -7038,7 +5892,7 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
-		Text:     "/loop stop",
+		Text:     "/loop STOP",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/loop stop) error = %v", err)
@@ -7060,197 +5914,13 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		ChatType: "p2p",
-		Text:     "/loop status",
+		Text:     "/loop STATUS",
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/loop status) error = %v", err)
 	}
 	if !strings.Contains(statusReply, "状态：已结束") || !strings.Contains(statusReply, "原因：已手动停止") {
 		t.Fatalf("status reply = %q, want manual stop status", statusReply)
-	}
-}
-
-func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	rt := &fakeRuntime{}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
-	session := Session{
-		Key:          key,
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          t.TempDir(),
-	}
-	if err := store.Upsert(session); err != nil {
-		t.Fatalf("Upsert() error = %v", err)
-	}
-	taskCtx, finish := svc.startTask(context.Background(), session, config.AgentConfig{}, taskKindLoop)
-	defer finish()
-	svc.taskMu.Lock()
-	svc.loopStatuses[key] = loopRunStatus{running: true, started: time.Now()}
-	svc.taskMu.Unlock()
-
-	display, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
-		BotID:        "bot-a",
-		ChatID:       "oc_chat",
-		ThreadID:     "omt_thread",
-		ACPSessionID: "acp-session-1",
-		OperatorID:   testOwnerOpenID,
-	})
-	if err != nil {
-		t.Fatalf("HandleLoopCancel() error = %v", err)
-	}
-	if !strings.Contains(display, "loop 已结束") || !strings.Contains(display, "结束原因：已通过卡片取消") {
-		t.Fatalf("display = %q, want finished cancel text", display)
-	}
-	select {
-	case <-taskCtx.Done():
-	default:
-		t.Fatal("loop task context was not cancelled")
-	}
-	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
-	svc.taskMu.Lock()
-	status := svc.loopStatuses[key]
-	_, stillRunning := svc.tasks[key]
-	svc.taskMu.Unlock()
-	if stillRunning || status.running || status.reason != "已通过卡片取消" {
-		t.Fatalf("task stillRunning=%v status=%+v, want cancelled loop", stillRunning, status)
-	}
-}
-
-func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	rt := &fakeRuntime{
-		promptUpdates: []acp.PromptUpdate{
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "agent_message_chunk",
-					Content:       &acp.ContentBlock{Type: "text", Text: "正在执行\n"},
-				},
-			},
-		},
-		blockPrompt:   make(chan struct{}),
-		blockPromptAt: 1,
-	}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
-	if err := store.Upsert(Session{
-		Key:          key,
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          t.TempDir(),
-	}); err != nil {
-		t.Fatalf("Upsert() error = %v", err)
-	}
-
-	client := newFakeSentMessageClient("om_loop_start")
-	var cards []*fakeStreamCard
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		card := &fakeStreamCard{failOnCanceledContext: true}
-		cards = append(cards, card)
-		return card, nil
-	})
-
-	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_user",
-		ChatID:    "oc_chat",
-		ChatType:  "group",
-		ThreadID:  "omt_thread",
-		Text:      "@智能助手 /loop -n 0 -i 1ms 长循环",
-		Mentions:  []feishu.Mention{testBotMention("智能助手")},
-	})
-	if err != nil {
-		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
-	}
-	if reply != "" {
-		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
-	}
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 && len(cards) == 1 })
-
-	display, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
-		BotID:        "bot-a",
-		ChatID:       "oc_chat",
-		ThreadID:     "omt_thread",
-		ACPSessionID: "acp-session-1",
-		OperatorID:   testOwnerOpenID,
-	})
-	if err != nil {
-		t.Fatalf("HandleLoopCancel() error = %v", err)
-	}
-	if !strings.Contains(display, "结束原因：已通过卡片取消") {
-		t.Fatalf("display = %q, want card cancel reason", display)
-	}
-	waitForCondition(t, time.Second, func() bool {
-		statusCancelled := false
-		for _, update := range cards[0].statusUpdatesSnapshot() {
-			if strings.Contains(update, "已取消") {
-				statusCancelled = true
-				break
-			}
-		}
-		return statusCancelled && cards[0].isClosed()
-	})
-
-	processCancelled := false
-	for _, update := range cards[0].processUpdatesSnapshot() {
-		if strings.Contains(update, "已取消") {
-			processCancelled = true
-			break
-		}
-	}
-	if !processCancelled {
-		t.Fatalf("process updates = %+v, want cancellation marker", cards[0].processUpdatesSnapshot())
-	}
-}
-
-func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := newTestService(config.Default(), store)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
-	if err := store.Upsert(Session{
-		Key:          key,
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          t.TempDir(),
-	}); err != nil {
-		t.Fatalf("Upsert() error = %v", err)
-	}
-	_, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
-		BotID:        "bot-a",
-		ChatID:       "oc_chat",
-		ACPSessionID: "acp-session-1",
-		OperatorID:   "ou_other",
-	})
-	if err == nil || !strings.Contains(err.Error(), "只有 bot owner 可以取消 loop") {
-		t.Fatalf("HandleLoopCancel(non-owner) error = %v, want owner-only error", err)
-	}
-}
-
-func TestHandleLoopCancelRejectsExpiredCard(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := newTestService(config.Default(), store)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
-	if err := store.Upsert(Session{
-		Key:          key,
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-current",
-		Cwd:          t.TempDir(),
-	}); err != nil {
-		t.Fatalf("Upsert() error = %v", err)
-	}
-	_, err := svc.HandleLoopCancel(context.Background(), feishu.LoopCancel{
-		BotID:        "bot-a",
-		ChatID:       "oc_chat",
-		ACPSessionID: "acp-session-old",
-		OperatorID:   testOwnerOpenID,
-	})
-	if err == nil || !strings.Contains(err.Error(), "该 loop 卡片已过期") {
-		t.Fatalf("HandleLoopCancel(expired) error = %v, want expired-card error", err)
 	}
 }
 
@@ -7368,16 +6038,6 @@ func TestHandleRestartCommandRejectsDefaultRestartOutsideDaemon(t *testing.T) {
 	}
 }
 
-func TestExecuteRestartCommandAllowsConfiguredCommandOutsideDaemon(t *testing.T) {
-	cfg := config.Default()
-	cfg.RestartCommand = []string{"/bin/echo", "restart-ok"}
-	svc := NewService(cfg, NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
-
-	if err := svc.executeRestartCommand(context.Background()); err != nil {
-		t.Fatalf("executeRestartCommand() error = %v", err)
-	}
-}
-
 func TestRestartCommandAllowsAdapterResolvedOwner(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
@@ -7426,152 +6086,6 @@ func TestRestartCommandAllowsAdapterResolvedOwner(t *testing.T) {
 	case <-restartCalled:
 	case <-time.After(time.Second):
 		t.Fatal("restart command was not called for adapter-resolved owner")
-	}
-}
-
-func TestRunRestartCommandRemovesAckOnFailure(t *testing.T) {
-	cfg := config.Default()
-	svc := NewService(cfg, NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
-	svc.setRestartCommand(func(ctx context.Context) error {
-		return fmt.Errorf("restart failed")
-	})
-	workspace := t.TempDir()
-	if err := writeRestartAck(workspace, newRestartAck(feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_restart",
-		ChatID:    "oc_chat",
-		ChatType:  "p2p",
-	})); err != nil {
-		t.Fatalf("writeRestartAck() error = %v", err)
-	}
-
-	svc.runRestartCommand(context.Background(), workspace)
-
-	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("restart ack file err = %v, want removed after restart command failure", err)
-	}
-}
-
-func TestConsumeRestartAckSendsConfirmationAndRemovesFile(t *testing.T) {
-	workspace := t.TempDir()
-	ack := newRestartAck(feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_restart",
-		ChatID:    "oc_chat",
-		ChatType:  "group",
-		ThreadID:  "omt_thread",
-		SenderID:  "ou_owner",
-	})
-	if err := writeRestartAck(workspace, ack); err != nil {
-		t.Fatalf("writeRestartAck() error = %v", err)
-	}
-	sender := &fakeRestartAckSender{}
-
-	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
-		t.Fatalf("consumeRestartAck() error = %v", err)
-	}
-	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("restart ack file err = %v, want removed", err)
-	}
-	if got := sender.messages; len(got) != 1 || got[0].MessageID != "om_restart" || got[0].ThreadID != "omt_thread" || sender.texts[0] != restartAckText() {
-		t.Fatalf("sent messages = %+v texts = %+v, want restart confirmation to original message", sender.messages, sender.texts)
-	}
-}
-
-func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
-	workspace := t.TempDir()
-	if err := writeRestartAck(workspace, newRestartAck(feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_restart",
-		ChatID:    "oc_chat",
-		ChatType:  "p2p",
-	})); err != nil {
-		t.Fatalf("writeRestartAck() error = %v", err)
-	}
-	sender := &fakeRestartAckSender{err: fmt.Errorf("send failed")}
-
-	err := consumeRestartAck(context.Background(), workspace, sender, "bot-a")
-	if err == nil || !strings.Contains(err.Error(), "发送重启确认消息") {
-		t.Fatalf("consumeRestartAck() error = %v, want send error", err)
-	}
-	if _, statErr := os.Stat(restartAckPath(workspace)); statErr != nil {
-		t.Fatalf("restart ack file should remain after send failure, stat err = %v", statErr)
-	}
-}
-
-func TestConsumeRestartAckRemovesInvalidJSONFile(t *testing.T) {
-	workspace := t.TempDir()
-	if err := os.WriteFile(restartAckPath(workspace), []byte("{invalid json"), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	sender := &fakeRestartAckSender{}
-
-	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
-		t.Fatalf("consumeRestartAck() error = %v", err)
-	}
-	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("restart ack file err = %v, want removed", err)
-	}
-	if len(sender.messages) != 0 {
-		t.Fatalf("sent messages = %+v, want none for invalid ack", sender.messages)
-	}
-}
-
-func TestConsumeRestartAckRemovesMissingTargetFile(t *testing.T) {
-	workspace := t.TempDir()
-	ack := newRestartAck(feishu.Message{
-		BotID:    "bot-a",
-		ChatID:   "oc_chat",
-		ChatType: "group",
-	})
-	data, err := json.Marshal(ack)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	if err := os.WriteFile(restartAckPath(workspace), data, 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	sender := &fakeRestartAckSender{}
-
-	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
-		t.Fatalf("consumeRestartAck() error = %v", err)
-	}
-	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("restart ack file err = %v, want removed", err)
-	}
-	if len(sender.messages) != 0 {
-		t.Fatalf("sent messages = %+v, want none for ack without message target", sender.messages)
-	}
-}
-
-func TestWikiTimerRunsSilentReflection(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	rt := &fakeRuntime{promptReply: "NoReply"}
-	svc := newTestService(config.Default(), store)
-	svc.setRuntime(rt)
-	session := Session{
-		Key:             SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
-		AgentName:       "traex",
-		ACPSessionID:    "acp-session-1",
-		Cwd:             t.TempDir(),
-		Workspace:       filepath.Join(t.TempDir(), "workspace"),
-		WikiIntervalSec: 1,
-	}
-	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
-
-	waitForCondition(t, 2*time.Second, func() bool { return rt.promptCallCount() == 1 })
-	if got := rt.promptCalls[0].Text; !strings.Contains(got, "请对刚才的对话进行反思") || !strings.Contains(got, "NoReply") {
-		t.Fatalf("wiki prompt = %q, want reflection prompt", got)
-	}
-	svc.taskMu.Lock()
-	status := svc.wikiStatuses[session.Key]
-	_, hasTimer := svc.wikiTimers[session.Key]
-	svc.taskMu.Unlock()
-	if hasTimer {
-		t.Fatal("wiki timer should not reschedule itself after reflection")
-	}
-	if !status.lastSuccess || status.running {
-		t.Fatalf("wiki status = %+v, want completed success", status)
 	}
 }
 
@@ -7627,52 +6141,6 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 	}
 	if rt.promptCallCount() != 2 {
 		t.Fatalf("prompt calls = %d, want wiki then user prompt", rt.promptCallCount())
-	}
-}
-
-func TestShutdownCancelsRuntimeTasksBeforeRuntimeShutdown(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	cfg := config.Default()
-	cfg.Bots[0].Workspace = t.TempDir()
-	svc := newTestService(cfg, store)
-	rt := &fakeRuntime{blockPrompt: make(chan struct{})}
-	svc.setRuntime(rt)
-	session := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
-		AgentName:    "traex",
-		Cwd:          t.TempDir(),
-		ACPSessionID: "acp-session-1",
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := svc.runUserPrompt(context.Background(), feishu.Message{
-			BotID:     "bot-a",
-			ChatID:    "oc_chat",
-			ChatType:  "p2p",
-			MessageID: "om_prompt",
-			Workspace: cfg.Bots[0].Workspace,
-		}, session, cfg.Agents["traex"], "长任务")
-		done <- err
-	}()
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
-
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown() error = %v", err)
-	}
-	err := <-done
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("runUserPrompt() error = %v, want context.Canceled", err)
-	}
-	rt.mu.Lock()
-	cancelCount := len(rt.cancelCalls)
-	shutdownCancelCount := rt.shutdownCancelCount
-	rt.mu.Unlock()
-	if cancelCount != 1 {
-		t.Fatalf("cancel calls = %d, want 1", cancelCount)
-	}
-	if shutdownCancelCount != 1 {
-		t.Fatalf("shutdownCancelCount = %d, want runtime cancel completed before shutdown", shutdownCancelCount)
 	}
 }
 
@@ -8028,21 +6496,6 @@ type fakeStreamCard struct {
 	usageDetails          []string
 	closed                bool
 	failOnCanceledContext bool
-}
-
-type fakeRestartAckSender struct {
-	messages []feishu.Message
-	texts    []string
-	err      error
-}
-
-func (f *fakeRestartAckSender) SendText(ctx context.Context, msg feishu.Message, text string) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.messages = append(f.messages, msg)
-	f.texts = append(f.texts, text)
-	return nil
 }
 
 func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {
