@@ -3023,7 +3023,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 2 ||
 		got[0] != "💬 收到。现在开始。" ||
-		got[1] != "💬 收到。现在开始。\n⏳ exec_command" {
+		got[1] != "💬 收到。现在开始。\n\n⏳ exec_command" {
 		t.Fatalf("processUpdates = %+v, want immediate tool update without default thought display", got)
 	}
 	if !card.isClosed() {
@@ -3621,6 +3621,93 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 		t.Fatalf("processUpdates = %+v, want plan process update", got)
 	}
 	want := "📌 计划\n- ✅ 读取现有实现\n- 🔄 补过程消息展示"
+	if got[len(got)-1] != want {
+		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
+	}
+}
+
+func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "完成。",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "plan",
+					PlanEntries: []acp.PlanEntry{
+						{Content: "确认依赖和实体定义", Status: "completed"},
+						{Content: "梳理仓库 Mongo 约定", Status: "in_progress"},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Status:        "completed",
+					Title:         "go test ./...",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "status",
+					Message:       "继续读取实体定义",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	got := cards[0].processUpdatesSnapshot()
+	if len(got) == 0 {
+		t.Fatalf("processUpdates = %+v, want process updates", got)
+	}
+	want := strings.Join([]string{
+		"📌 计划",
+		"- ✅ 确认依赖和实体定义",
+		"- 🔄 梳理仓库 Mongo 约定",
+		"",
+		"✅ go test ./...",
+		"",
+		"💬 继续读取实体定义",
+	}, "\n")
 	if got[len(got)-1] != want {
 		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
 	}

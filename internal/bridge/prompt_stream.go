@@ -256,7 +256,7 @@ func (s *promptCardStream) updateProcessWithContext(ctx context.Context, text st
 	}
 	s.mu.Lock()
 	s.process = append(s.process, normalizeStreamMarkdown(text))
-	processText := truncateProcessText(strings.Join(s.process, "\n"))
+	processText := processPanelText(s.process)
 	s.mu.Unlock()
 	s.queueProcessUpdateWithContext(ctx, card, processText, false)
 }
@@ -340,7 +340,7 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 			line:   len(s.process) - 1,
 			active: true,
 		})
-		return truncateProcessText(strings.Join(s.process, "\n"))
+		return processPanelText(s.process)
 	}
 	if idx := s.findToolRowLocked(normalizedTitle); idx >= 0 {
 		row := &s.tools[idx]
@@ -351,10 +351,10 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 			row.line = len(s.process) - 1
 		}
 		row.active = false
-		return truncateProcessText(strings.Join(s.process, "\n"))
+		return processPanelText(s.process)
 	}
 	s.process = append(s.process, normalizeStreamMarkdown(line))
-	return truncateProcessText(strings.Join(s.process, "\n"))
+	return processPanelText(s.process)
 }
 
 func (s *promptCardStream) latestActiveToolTitleLocked() string {
@@ -431,9 +431,13 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 		s.streaming = true
 		s.activeStreamClass = class
 	}
-	processText := truncateProcessText(strings.Join(s.process, "\n"))
+	processText := processPanelText(s.process)
 	s.mu.Unlock()
 	s.queueProcessUpdate(card, processText, false)
+}
+
+func processPanelText(entries []string) string {
+	return truncateProcessText(strings.Join(entries, "\n\n"))
 }
 
 func (s *promptCardStream) finishProcessStream() {

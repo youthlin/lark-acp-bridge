@@ -63,6 +63,9 @@ func appendLineBreak(out *strings.Builder) {
 }
 
 func isMarkdownBlockStart(line string) bool {
+	if isProcessMarkerLine(line) {
+		return true
+	}
 	if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ">") || strings.HasPrefix(line, "|") {
 		return true
 	}
@@ -77,6 +80,15 @@ func isMarkdownBlockStart(line string) bool {
 			if line[i] < '0' || line[i] > '9' {
 				return false
 			}
+		}
+	}
+	return false
+}
+
+func isProcessMarkerLine(line string) bool {
+	for _, marker := range []string{"💬 ", "📌 ", "🧠 ", "⏳ ", "✅ ", "❌ "} {
+		if strings.HasPrefix(line, marker) {
+			return true
 		}
 	}
 	return false

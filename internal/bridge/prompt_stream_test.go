@@ -129,7 +129,7 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 		t.Fatalf("processUpdates = %+v, want second process update throttled", got)
 	}
 	stream.close()
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\ntwo" {
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\n\ntwo" {
 		t.Fatalf("processUpdates = %+v, want pending process flushed on close", got)
 	}
 }
@@ -199,6 +199,26 @@ func TestNormalizeStreamMarkdownFoldsSoftLineBreaks(t *testing.T) {
 		"line 1",
 		"line 2",
 		"```",
+	}, "\n")
+	if got := normalizeStreamMarkdown(input); got != want {
+		t.Fatalf("normalizeStreamMarkdown() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeStreamMarkdownKeepsProcessMarkersOnSeparateLines(t *testing.T) {
+	input := strings.Join([]string{
+		"📌 计划",
+		"- ✅ 读取现有实现",
+		"- 🔄 补过程消息展示",
+		"✅ go test ./...",
+		"💬 继续处理",
+	}, "\n")
+	want := strings.Join([]string{
+		"📌 计划",
+		"- ✅ 读取现有实现",
+		"- 🔄 补过程消息展示",
+		"✅ go test ./...",
+		"💬 继续处理",
 	}, "\n")
 	if got := normalizeStreamMarkdown(input); got != want {
 		t.Fatalf("normalizeStreamMarkdown() = %q, want %q", got, want)
