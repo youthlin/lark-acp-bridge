@@ -10,6 +10,22 @@ import (
 	"testing"
 )
 
+func configAgentListNames(agentList []NamedAgentConfig) []string {
+	names := make([]string, 0, len(agentList))
+	for _, agent := range agentList {
+		names = append(names, agent.Name)
+	}
+	return names
+}
+
+func testConfigWithAgent(name string, agent AgentConfig) Config {
+	return Config{
+		AgentList: []NamedAgentConfig{
+			{Name: name, AgentConfig: agent},
+		},
+	}
+}
+
 func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -41,7 +57,10 @@ func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	} else if !info.IsDir() {
 		t.Fatalf("workspace is not dir: %s", wantWorkspace)
 	}
-	agent := result.Config.Agents["traex"]
+	agent, ok := result.Config.Agent("traex")
+	if !ok {
+		t.Fatalf("missing traex agent: %#v", result.Config.AgentList)
+	}
 	if agent.DefaultCwd != home {
 		t.Fatalf("DefaultCwd = %q, want %q", agent.DefaultCwd, home)
 	}
@@ -68,8 +87,12 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("Unmarshal(config.example.json) error = %v", err)
 	}
-	got := cfg.Agents["traex"].Args
-	want := Default().Agents["traex"].Args
+	traex, ok := cfg.Agent("traex")
+	if !ok {
+		t.Fatalf("config.example.json AgentList = %#v, want traex agent", cfg.AgentList)
+	}
+	got := traex.Args
+	want := Default().AgentList[0].Args
 	if !slices.Equal(got, want) {
 		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
 	}
@@ -90,13 +113,14 @@ func TestLoadExpandsHomePath(t *testing.T) {
       "workspace": "~/bridge/main"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "~/go/src"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -107,8 +131,12 @@ func TestLoadExpandsHomePath(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	want := filepath.Join(home, "go/src")
-	if cfg.Agents["traex"].DefaultCwd != want {
-		t.Fatalf("DefaultCwd = %q, want %q", cfg.Agents["traex"].DefaultCwd, want)
+	agent, ok := cfg.Agent("traex")
+	if !ok {
+		t.Fatalf("missing traex agent: %#v", cfg.AgentList)
+	}
+	if agent.DefaultCwd != want {
+		t.Fatalf("DefaultCwd = %q, want %q", agent.DefaultCwd, want)
 	}
 	wantWorkspace := filepath.Join(home, "bridge/main")
 	if cfg.Bots[0].Workspace != wantWorkspace {
@@ -116,6 +144,57 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 	if cfg.MissingBotConfig() {
 		t.Fatalf("MissingBotConfig() = true, want false")
+	}
+}
+
+func TestLoadAgentListPreservesConfiguredOrder(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "main",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/main"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME/traex"
+    },
+    {
+      "name": "claude",
+      "command": "claude",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME/claude"
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got := configAgentListNames(cfg.AgentList)
+	want := []string{"traex", "claude"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("AgentList names = %#v, want %#v", got, want)
+	}
+	agent, ok := cfg.Agent("claude")
+	if !ok {
+		t.Fatalf("missing claude agent: %#v", cfg.AgentList)
+	}
+	if agent.DefaultCwd != filepath.Join(home, "claude") {
+		t.Fatalf("claude default cwd = %q, want expanded path", agent.DefaultCwd)
 	}
 }
 
@@ -132,13 +211,14 @@ func TestLoadTrimsBotID(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/main"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -168,13 +248,14 @@ func TestLoadNormalizesBotOwnerOpenIDs(t *testing.T) {
       "owner_open_ids": [" ou_owner ", "", "ou_owner", "ou_backup"]
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -211,13 +292,14 @@ func TestLoadNormalizesBotOpenID(t *testing.T) {
       "bot_open_id": " ou_bot "
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -251,13 +333,14 @@ func TestLoadRejectsDuplicateBotID(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/b"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -288,13 +371,14 @@ func TestLoadRejectsDuplicateBotIDAfterTrim(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/b"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -326,13 +410,14 @@ func TestLoadRejectsDuplicateBotWorkspace(t *testing.T) {
       "workspace": "~/.lark-acp-bridge/bots/shared"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -358,13 +443,14 @@ func TestLoadTrimsAgentName(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
-  "agents": {
-    " traex ": {
+  "agent_list": [
+    {
+      "name": " traex ",
       "command": "traex",
       "args": ["acp", "serve"],
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -374,15 +460,12 @@ func TestLoadTrimsAgentName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if _, ok := cfg.Agents["traex"]; !ok {
-		t.Fatalf("Agents = %#v, want trimmed traex key", cfg.Agents)
-	}
-	if _, ok := cfg.Agents[" traex "]; ok {
-		t.Fatalf("Agents = %#v, want raw agent key removed", cfg.Agents)
+	if got := configAgentListNames(cfg.AgentList); !slices.Equal(got, []string{"traex"}) {
+		t.Fatalf("AgentList names = %#v, want trimmed traex", got)
 	}
 }
 
-func TestLoadRejectsDuplicateAgentNameAfterTrim(t *testing.T) {
+func TestLoadTrimsAgentListName(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
@@ -396,16 +479,54 @@ func TestLoadRejectsDuplicateAgentNameAfterTrim(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
-  "agents": {
-    " same ": {
+  "agent_list": [
+    {
+      "name": " traex ",
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := configAgentListNames(cfg.AgentList); !slices.Equal(got, []string{"traex"}) {
+		t.Fatalf("AgentList names = %#v, want trimmed traex", got)
+	}
+}
+
+func TestLoadRejectsDuplicateAgentListNameAfterTrim(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_a",
+      "app_secret": "secret",
+      "workspace": "$HOME/.lark-acp-bridge/bots/default"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": " same ",
       "command": "traex",
       "args": ["acp", "serve"]
     },
-    "same": {
+    {
+      "name": "same",
       "command": "other",
       "args": ["acp", "serve"]
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -423,11 +544,7 @@ func TestValidateAgentCommandsAcceptsPathCommand(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command})
 
 	if err := cfg.ValidateAgentCommands(); err != nil {
 		t.Fatalf("ValidateAgentCommands() error = %v", err)
@@ -441,11 +558,7 @@ func TestValidateAgentCommandsAcceptsPathLookupCommand(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	t.Setenv("PATH", dir)
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: "fake-acp"},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: "fake-acp"})
 
 	if err := cfg.ValidateAgentCommands(); err != nil {
 		t.Fatalf("ValidateAgentCommands() error = %v", err)
@@ -454,11 +567,7 @@ func TestValidateAgentCommandsAcceptsPathLookupCommand(t *testing.T) {
 
 func TestValidateAgentCommandsRejectsMissingCommand(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"missing": {Command: "missing-acp-server"},
-		},
-	}
+	cfg := testConfigWithAgent("missing", AgentConfig{Command: "missing-acp-server"})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "missing" 启动命令不存在`) {
@@ -467,11 +576,7 @@ func TestValidateAgentCommandsRejectsMissingCommand(t *testing.T) {
 }
 
 func TestValidateAgentCommandsRejectsEmptyCommand(t *testing.T) {
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"empty": {Command: " "},
-		},
-	}
+	cfg := testConfigWithAgent("empty", AgentConfig{Command: " "})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "empty" 启动命令为空`) {
@@ -485,11 +590,7 @@ func TestValidateAgentCommandsRejectsBlankAgentName(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"  ": {Command: command},
-		},
-	}
+	cfg := testConfigWithAgent("  ", AgentConfig{Command: command})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), "agent 名称不能为空") {
@@ -509,12 +610,13 @@ func TestLoadNormalizesRestartCommand(t *testing.T) {
       "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve"]
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -541,15 +643,16 @@ func TestWriteResolvedBotFieldsFillsEmptyFields(t *testing.T) {
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": [
         "acp",
         "serve"
       ]
     }
-  },
+  ],
   "custom": true
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
@@ -615,15 +718,16 @@ func TestWriteResolvedBotFieldsDoesNotOverwriteConfiguredFields(t *testing.T) {
       ]
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": [
         "acp",
         "serve"
       ]
     }
-  }
+  ]
 }`)
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile(config) error = %v", err)
@@ -679,11 +783,7 @@ func TestWriteCleansTemporaryFileWhenAtomicReplaceFails(t *testing.T) {
 
 func TestValidateAgentCommandsRejectsDirectoryPath(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"dir": {Command: dir},
-		},
-	}
+	cfg := testConfigWithAgent("dir", AgentConfig{Command: dir})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "dir" 启动命令是目录`) {
@@ -697,11 +797,7 @@ func TestValidateAgentCommandsRejectsNonExecutablePath(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "fake" 启动命令不可执行`) {
@@ -719,11 +815,7 @@ func TestValidateAgentCommandsAcceptsDefaultCwdDirectory(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o755); err != nil {
 		t.Fatalf("Mkdir(default cwd) error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command, DefaultCwd: cwd},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command, DefaultCwd: cwd})
 
 	if err := cfg.ValidateAgentCommands(); err != nil {
 		t.Fatalf("ValidateAgentCommands() error = %v", err)
@@ -736,11 +828,7 @@ func TestValidateAgentCommandsRejectsMissingDefaultCwd(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command, DefaultCwd: filepath.Join(dir, "missing")},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command, DefaultCwd: filepath.Join(dir, "missing")})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "fake" 默认工作目录不可访问`) {
@@ -758,11 +846,7 @@ func TestValidateAgentCommandsRejectsDefaultCwdFile(t *testing.T) {
 	if err := os.WriteFile(cwd, []byte("not a dir\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(default cwd) error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command, DefaultCwd: cwd},
-		},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command, DefaultCwd: cwd})
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), `agent "fake" 默认工作目录不是目录`) {
@@ -776,12 +860,8 @@ func TestValidateAgentCommandsAcceptsRestartCommandPath(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command},
-		},
-		RestartCommand: []string{command},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command})
+	cfg.RestartCommand = []string{command}
 
 	if err := cfg.ValidateAgentCommands(); err != nil {
 		t.Fatalf("ValidateAgentCommands() error = %v", err)
@@ -795,12 +875,8 @@ func TestValidateAgentCommandsAcceptsRestartCommandPathLookup(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	t.Setenv("PATH", dir)
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: "restart-bridge"},
-		},
-		RestartCommand: []string{"restart-bridge"},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: "restart-bridge"})
+	cfg.RestartCommand = []string{"restart-bridge"}
 
 	if err := cfg.ValidateAgentCommands(); err != nil {
 		t.Fatalf("ValidateAgentCommands() error = %v", err)
@@ -814,12 +890,8 @@ func TestValidateAgentCommandsRejectsMissingRestartCommand(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	t.Setenv("PATH", dir)
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command},
-		},
-		RestartCommand: []string{"missing-restart-command"},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command})
+	cfg.RestartCommand = []string{"missing-restart-command"}
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令不存在") {
@@ -833,12 +905,8 @@ func TestValidateAgentCommandsRejectsRestartCommandDirectoryPath(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: command},
-		},
-		RestartCommand: []string{dir},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: command})
+	cfg.RestartCommand = []string{dir}
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令是目录") {
@@ -856,12 +924,8 @@ func TestValidateAgentCommandsRejectsNonExecutableRestartCommandPath(t *testing.
 	if err := os.WriteFile(restartCommand, []byte("#!/bin/sh\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(restartCommand) error = %v", err)
 	}
-	cfg := Config{
-		Agents: map[string]AgentConfig{
-			"fake": {Command: agentCommand},
-		},
-		RestartCommand: []string{restartCommand},
-	}
+	cfg := testConfigWithAgent("fake", AgentConfig{Command: agentCommand})
+	cfg.RestartCommand = []string{restartCommand}
 
 	err := cfg.ValidateAgentCommands()
 	if err == nil || !strings.Contains(err.Error(), "restart_command 启动命令不可执行") {

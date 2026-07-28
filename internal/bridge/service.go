@@ -42,7 +42,7 @@ type Service struct {
 func NewService(cfg config.Config, store *SessionStore) *Service {
 	s := &Service{
 		cfg:             cfg,
-		registry:        acp.NewRegistry(cfg.Agents),
+		registry:        acp.NewRegistry(cfg),
 		stores:          make(map[string]*SessionStore),
 		runtime:         newRuntimeManager(),
 		tasks:           make(map[SessionKey]*runningTask),

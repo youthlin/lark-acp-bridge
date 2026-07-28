@@ -68,7 +68,7 @@ func TestShutdownCancelsRuntimeTasksBeforeRuntimeShutdown(t *testing.T) {
 			ChatType:  "p2p",
 			MessageID: "om_prompt",
 			Workspace: cfg.Bots[0].Workspace,
-		}, session, cfg.Agents["traex"], "长任务")
+		}, session, mustConfigAgent(t, cfg, "traex"), "长任务")
 		done <- err
 	}()
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })

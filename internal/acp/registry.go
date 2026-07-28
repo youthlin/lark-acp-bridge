@@ -1,32 +1,37 @@
 package acp
 
 import (
-	"maps"
-	"sort"
-
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
 type Registry struct {
-	agents map[string]config.AgentConfig
+	byName map[string]config.AgentConfig
+	names  []string
 }
 
-func NewRegistry(agents map[string]config.AgentConfig) *Registry {
-	copied := make(map[string]config.AgentConfig, len(agents))
-	maps.Copy(copied, agents)
-	return &Registry{agents: copied}
+func NewRegistry(cfg config.Config) *Registry {
+	byName := config.AgentMap(cfg.AgentList)
+	names := make([]string, 0, len(byName))
+	seen := make(map[string]struct{}, len(byName))
+	for _, agent := range cfg.AgentList {
+		if _, ok := byName[agent.Name]; !ok {
+			continue
+		}
+		if _, ok := seen[agent.Name]; ok {
+			continue
+		}
+		seen[agent.Name] = struct{}{}
+		names = append(names, agent.Name)
+	}
+	return &Registry{byName: byName, names: names}
 }
 
 func (r *Registry) Get(name string) (config.AgentConfig, bool) {
-	agent, ok := r.agents[name]
+	agent, ok := r.byName[name]
 	return agent, ok
 }
 
 func (r *Registry) Names() []string {
-	names := make([]string, 0, len(r.agents))
-	for name := range r.agents {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := append([]string(nil), r.names...)
 	return names
 }

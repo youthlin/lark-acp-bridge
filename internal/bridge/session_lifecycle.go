@@ -48,10 +48,10 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	} else if !info.IsDir() {
 		return Session{}, config.AgentConfig{}, "", "工作目录不是目录：" + cwd
 	}
-	agentName := s.defaultAgentName()
+	agentName := s.chatAgentName(msg)
 	agent, ok := s.registry.Get(agentName)
 	if !ok {
-		return Session{}, config.AgentConfig{}, "", "未找到默认 agent 配置。"
+		return Session{}, config.AgentConfig{}, "", "未找到当前聊天选择的 agent 配置：" + agentName
 	}
 	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
@@ -220,10 +220,13 @@ func (s *Service) defaultNewSessionCwd(msg feishu.Message) (string, string, stri
 	if session, ok := s.findSession(msg); ok && session.Cwd != "" {
 		return session.Cwd, "当前会话已有会话", ""
 	}
-	agentName := s.defaultAgentName()
+	agentName := s.chatAgentName(msg)
 	agent, ok := s.registry.Get(agentName)
 	if !ok || strings.TrimSpace(agent.DefaultCwd) == "" {
-		return "", "", "当前会话还没有会话映射，且默认 agent 未配置 default_cwd。请使用 /new <cwd> 指定工作目录。"
+		if agentName == "" {
+			return "", "", "当前会话还没有会话映射，且未配置 ACP agent。请使用 /new <cwd> 指定工作目录。"
+		}
+		return "", "", "当前会话还没有会话映射，且当前 agent " + agentName + " 未配置 default_cwd。请使用 /new <cwd> 指定工作目录。"
 	}
 	return agent.DefaultCwd, "默认配置", ""
 }
@@ -327,6 +330,19 @@ func (s *Service) defaultAgentName() string {
 		return ""
 	}
 	return names[0]
+}
+
+func (s *Service) chatAgentName(msg feishu.Message) string {
+	chat := s.chatConfigForMessage(msg)
+	if strings.TrimSpace(chat.AgentName) != "" {
+		return chat.AgentName
+	}
+	if session, ok := s.findSession(msg); ok {
+		if _, ok := s.registry.Get(session.AgentName); ok {
+			return session.AgentName
+		}
+	}
+	return s.defaultAgentName()
 }
 
 func (s *Service) storeForMessage(msg feishu.Message) *SessionStore {

@@ -28,6 +28,7 @@ func (k ChatKey) Valid() bool {
 
 type ChatConfig struct {
 	Key              ChatKey   `json:"key"`
+	AgentName        string    `json:"agent_name,omitempty"`
 	MentionOptional  bool      `json:"mention_optional,omitempty"`
 	WikiDisabled     bool      `json:"wiki_disabled,omitempty"`
 	WikiIntervalSec  int       `json:"wiki_interval_sec,omitempty"`

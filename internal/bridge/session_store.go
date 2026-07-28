@@ -331,6 +331,7 @@ func normalizeSessionForStore(session Session) Session {
 
 func normalizeChatForStore(chat ChatConfig) ChatConfig {
 	chat.Key = normalizeChatKey(chat.Key)
+	chat.AgentName = strings.TrimSpace(chat.AgentName)
 	return chat
 }
 

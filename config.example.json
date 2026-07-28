@@ -9,12 +9,13 @@
       "owner_open_ids": []
     }
   ],
-  "agents": {
-    "traex": {
+  "agent_list": [
+    {
+      "name": "traex",
       "command": "traex",
       "args": ["acp", "serve", "-c", "permission_mode=auto"],
       "env": {},
       "default_cwd": "$HOME"
     }
-  }
+  ]
 }

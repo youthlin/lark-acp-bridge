@@ -45,6 +45,14 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
 		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
+	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
+		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
+		if errText != "" {
+			return preparedPrompt{errText: errText}, nil
+		}
+		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		return preparedPrompt{session: created, agent: agent, text: text}, nil
+	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
 		return preparedPrompt{}, fmt.Errorf("未找到 agent 配置: %s", session.AgentName)

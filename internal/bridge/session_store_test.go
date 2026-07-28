@@ -172,6 +172,7 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		Chats: []ChatConfig{
 			{
 				Key:       ChatKey{BotID: " bot-a ", ChatID: " oc_chat "},
+				AgentName: " claude ",
 				HideTools: true,
 			},
 		},
@@ -207,8 +208,8 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("GetChat(normalized key) ok = false, want true")
 	}
-	if chat.Key != (ChatKey{BotID: "bot-a", ChatID: "oc_chat"}) || !chat.HideTools {
-		t.Fatalf("chat = %+v, want normalized key and preserved fields", chat)
+	if chat.Key != (ChatKey{BotID: "bot-a", ChatID: "oc_chat"}) || chat.AgentName != "claude" || !chat.HideTools {
+		t.Fatalf("chat = %+v, want normalized key/agent and preserved fields", chat)
 	}
 
 	history := store.ListByChat(" bot-a ", " oc_chat ")

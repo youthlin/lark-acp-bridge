@@ -25,6 +25,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"当前支持的命令：",
 			"/help - 查看帮助",
 			"/new [cwd] [title] - 为当前会话创建新的 ACP 会话映射",
+			"/agent [name] - 查看或切换当前聊天默认使用的 ACP agent",
 			"/session list - 列出当前聊天的历史 ACP 会话",
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
@@ -54,6 +55,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			return "话题群内不支持使用 /new 手动切换会话；新发一条话题消息会自动创建独立会话。"
 		}
 		return s.newSession(ctx, fields, msg)
+	case "/agent":
+		return s.handleAgentCommand(ctx, text, msg)
 	case "/session":
 		if isTopicGroupMessage(msg) {
 			return "话题群内不支持使用 /session 命令；每条话题会自动维护独立会话。"
@@ -215,6 +218,7 @@ func (s *Service) status(msg feishu.Message) string {
 	lines := []string{
 		"服务运行中。",
 		"已配置 ACP agent：" + strings.Join(s.registry.Names(), ", "),
+		"当前聊天默认 agent：" + s.chatAgentName(msg),
 		"当前 bot：" + displayBotID(msg.BotID),
 	}
 	if strings.TrimSpace(msg.Workspace) != "" {

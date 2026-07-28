@@ -14,9 +14,14 @@ import (
 const appName = "lark-acp-bridge"
 
 type Config struct {
-	Agents         map[string]AgentConfig `json:"agents"`
-	Bots           []BotConfig            `json:"bots"`
-	RestartCommand []string               `json:"restart_command,omitempty"`
+	AgentList      []NamedAgentConfig `json:"agent_list,omitempty"`
+	Bots           []BotConfig        `json:"bots"`
+	RestartCommand []string           `json:"restart_command,omitempty"`
+}
+
+type NamedAgentConfig struct {
+	Name string `json:"name"`
+	AgentConfig
 }
 
 type AgentConfig struct {
@@ -36,6 +41,11 @@ type BotConfig struct {
 }
 
 func Default() Config {
+	traex := AgentConfig{
+		Command:    "traex",
+		Args:       []string{"acp", "serve", "-c", "permission_mode=auto"},
+		DefaultCwd: "$HOME",
+	}
 	return Config{
 		Bots: []BotConfig{
 			{
@@ -45,12 +55,8 @@ func Default() Config {
 				Workspace: "$HOME/." + appName + "/bots/default",
 			},
 		},
-		Agents: map[string]AgentConfig{
-			"traex": {
-				Command:    "traex",
-				Args:       []string{"acp", "serve", "-c", "permission_mode=auto"},
-				DefaultCwd: "$HOME",
-			},
+		AgentList: []NamedAgentConfig{
+			{Name: "traex", AgentConfig: traex},
 		},
 	}
 }
@@ -125,55 +131,13 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("读取配置文件: %w", err)
 	}
-	explicitAgents, hasExplicitAgents, err := configuredAgents(data)
-	if err != nil {
-		return Config{}, err
-	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("解析配置文件: %w", err)
-	}
-	if hasExplicitAgents {
-		agents := cloneAgents(Default().Agents)
-		for name, agent := range explicitAgents {
-			agents[name] = agent
-		}
-		cfg.Agents = agents
 	}
 	if err := normalize(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
-}
-
-func configuredAgents(data []byte) (map[string]AgentConfig, bool, error) {
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, false, nil
-	}
-	raw, ok := root["agents"]
-	if !ok {
-		return nil, false, nil
-	}
-	var agents map[string]AgentConfig
-	if err := json.Unmarshal(raw, &agents); err != nil {
-		return nil, true, fmt.Errorf("解析配置 agents: %w", err)
-	}
-	normalized, err := normalizeAgents(agents)
-	if err != nil {
-		return nil, true, err
-	}
-	return normalized, true, nil
-}
-
-func cloneAgents(agents map[string]AgentConfig) map[string]AgentConfig {
-	if len(agents) == 0 {
-		return nil
-	}
-	cloned := make(map[string]AgentConfig, len(agents))
-	for name, agent := range agents {
-		cloned[name] = agent
-	}
-	return cloned
 }
 
 func Write(path string, cfg Config) error {
@@ -354,13 +318,16 @@ func (c Config) MissingBotConfig() bool {
 }
 
 func (c Config) ValidateAgentCommands() error {
-	if len(c.Agents) == 0 {
+	agentList, err := normalizeAgentList(c.AgentList)
+	if err != nil {
+		return err
+	}
+	if len(agentList) == 0 {
 		return fmt.Errorf("未配置 ACP agent")
 	}
-	for name, agent := range c.Agents {
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("agent 名称不能为空")
-		}
+	for _, named := range agentList {
+		name := named.Name
+		agent := named.AgentConfig
 		label := fmt.Sprintf("agent %q 启动命令", name)
 		if err := validateExecutableCommand(label, agent.Command); err != nil {
 			return err
@@ -467,44 +434,83 @@ func normalize(cfg *Config) error {
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
 		cfg.Bots[i] = bot
 	}
-	if len(cfg.Agents) == 0 {
-		cfg.Agents = Default().Agents
+	if len(cfg.AgentList) == 0 {
+		cfg.AgentList = Default().AgentList
 	}
-	agents, err := normalizeAgents(cfg.Agents)
+	agentList, err := normalizeAgentList(cfg.AgentList)
 	if err != nil {
 		return err
 	}
-	cfg.Agents = agents
+	cfg.AgentList = agentList
 	cfg.RestartCommand = normalizeCommand(cfg.RestartCommand)
-	for name, agent := range cfg.Agents {
+	for i, named := range cfg.AgentList {
+		agent := named.AgentConfig
 		if agent.DefaultCwd != "" {
 			expanded, err := ExpandPath(agent.DefaultCwd)
 			if err != nil {
-				return fmt.Errorf("展开 agent %q 的默认工作目录: %w", name, err)
+				return fmt.Errorf("展开 agent %q 的默认工作目录: %w", named.Name, err)
 			}
 			agent.DefaultCwd = expanded
-			cfg.Agents[name] = agent
+			named.AgentConfig = agent
+			cfg.AgentList[i] = named
 		}
 	}
 	return nil
 }
 
-func normalizeAgents(agents map[string]AgentConfig) (map[string]AgentConfig, error) {
-	if len(agents) == 0 {
+func normalizeAgentList(agentList []NamedAgentConfig) ([]NamedAgentConfig, error) {
+	if len(agentList) == 0 {
 		return nil, nil
 	}
-	normalized := make(map[string]AgentConfig, len(agents))
-	for name, agent := range agents {
-		name = strings.TrimSpace(name)
+	seen := make(map[string]struct{}, len(agentList))
+	normalized := make([]NamedAgentConfig, 0, len(agentList))
+	for _, named := range agentList {
+		name := strings.TrimSpace(named.Name)
 		if name == "" {
 			return nil, fmt.Errorf("agent 名称不能为空")
 		}
-		if _, ok := normalized[name]; ok {
+		if _, ok := seen[name]; ok {
 			return nil, fmt.Errorf("agent 名称重复: %s", name)
 		}
-		normalized[name] = agent
+		seen[name] = struct{}{}
+		named.Name = name
+		normalized = append(normalized, named)
 	}
 	return normalized, nil
+}
+
+func AgentMap(agentList []NamedAgentConfig) map[string]AgentConfig {
+	if len(agentList) == 0 {
+		return nil
+	}
+	byName := make(map[string]AgentConfig, len(agentList))
+	for _, named := range agentList {
+		byName[named.Name] = named.AgentConfig
+	}
+	return byName
+}
+
+func (c Config) Agent(name string) (AgentConfig, bool) {
+	for _, named := range c.AgentList {
+		if named.Name == name {
+			return named.AgentConfig, true
+		}
+	}
+	return AgentConfig{}, false
+}
+
+func (c *Config) SetAgent(name string, agent AgentConfig) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	for i, named := range c.AgentList {
+		if named.Name == name {
+			c.AgentList[i].AgentConfig = agent
+			return
+		}
+	}
+	c.AgentList = append(c.AgentList, NamedAgentConfig{Name: name, AgentConfig: agent})
 }
 
 func normalizeOpenIDs(ids []string) []string {

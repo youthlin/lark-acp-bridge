@@ -16,7 +16,7 @@ import (
 
 // Start 启动服务
 func (s *Service) Start(ctx context.Context) error {
-	if len(s.cfg.Agents) == 0 {
+	if len(s.registry.Names()) == 0 {
 		return fmt.Errorf("未配置 ACP agent")
 	}
 

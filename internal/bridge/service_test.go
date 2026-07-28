@@ -34,6 +34,15 @@ func newTestService(cfg config.Config, store *SessionStore) *Service {
 	return NewService(cfg, store)
 }
 
+func mustConfigAgent(t testing.TB, cfg config.Config, name string) config.AgentConfig {
+	t.Helper()
+	agent, ok := cfg.Agent(name)
+	if !ok {
+		t.Fatalf("missing config agent %q in %#v", name, cfg.AgentList)
+	}
+	return agent
+}
+
 func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg feishu.Message) (string, error) {
 	t.Helper()
 	if strings.TrimSpace(msg.BotOpenID) == "" {
@@ -380,6 +389,199 @@ func TestHandleFeishuMessageDebugCommandTogglesProgramLevel(t *testing.T) {
 	}
 	if !strings.Contains(reply, "已关闭 bridge debug 日志") || !strings.Contains(reply, "关闭") {
 		t.Fatalf("reply = %q, want debug disabled reply", reply)
+	}
+}
+
+func TestHandleFeishuMessageAgentCommandSwitchesChatDefault(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	traexDir := t.TempDir()
+	claudeDir := t.TempDir()
+	cfg := config.Default()
+	traex := mustConfigAgent(t, cfg, "traex")
+	traex.DefaultCwd = traexDir
+	cfg.SetAgent("traex", traex)
+	cfg.SetAgent("claude", config.AgentConfig{
+		Command:    "claude",
+		Args:       []string{"acp", "serve"},
+		DefaultCwd: claudeDir,
+	})
+	cfg.AgentList = []config.NamedAgentConfig{
+		{Name: "traex", AgentConfig: mustConfigAgent(t, cfg, "traex")},
+		{Name: "claude", AgentConfig: mustConfigAgent(t, cfg, "claude")},
+	}
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-claude"}, promptReply: "ACP 回复"}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/agent",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/agent) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前聊天默认 agent：") || !strings.Contains(reply, "traex") || !strings.Contains(reply, "claude") {
+		t.Fatalf("reply = %q, want current and available agents", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/agent claude",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/agent claude) error = %v", err)
+	}
+	if !strings.Contains(reply, "已设置当前聊天默认 agent：claude") {
+		t.Fatalf("reply = %q, want switch confirmation", reply)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: msg.BotID, ChatID: msg.ChatID})
+	if !ok || chat.AgentName != "claude" {
+		t.Fatalf("chat = %+v ok=%v, want agent claude", chat, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	if !strings.Contains(reply, "agent：claude") || !strings.Contains(reply, "cwd："+claudeDir) {
+		t.Fatalf("reply = %q, want claude agent and cwd", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].AgentName != "claude" || rt.newCalls[0].Cwd != claudeDir {
+		t.Fatalf("newCalls = %+v, want claude session", rt.newCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    msg.BotID,
+		ChatID:   msg.ChatID,
+		ChatType: msg.ChatType,
+		Text:     "/agent missing",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/agent missing) error = %v", err)
+	}
+	if !strings.Contains(reply, "未知 agent：missing") || !strings.Contains(reply, "当前聊天默认 agent：claude") {
+		t.Fatalf("reply = %q, want unknown agent and current status", reply)
+	}
+}
+
+func TestHandleFeishuMessageNewUsesFirstAgentListEntryByDefault(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	traexDir := t.TempDir()
+	claudeDir := t.TempDir()
+	cfg := config.Default()
+	cfg.AgentList = []config.NamedAgentConfig{
+		{
+			Name: "traex",
+			AgentConfig: config.AgentConfig{
+				Command:    "traex",
+				Args:       []string{"acp", "serve"},
+				DefaultCwd: traexDir,
+			},
+		},
+		{
+			Name: "claude",
+			AgentConfig: config.AgentConfig{
+				Command:    "claude",
+				Args:       []string{"acp", "serve"},
+				DefaultCwd: claudeDir,
+			},
+		},
+	}
+	svc := newTestService(cfg, store)
+	rt := &fakeRuntime{newSessionID: "acp-session-traex"}
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	if !strings.Contains(reply, "agent：traex") || !strings.Contains(reply, "cwd："+traexDir) {
+		t.Fatalf("reply = %q, want first agent_list entry traex", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].AgentName != "traex" || rt.newCalls[0].Cwd != traexDir {
+		t.Fatalf("newCalls = %+v, want traex session from first agent_list entry", rt.newCalls)
+	}
+}
+
+func TestHandleFeishuMessagePromptRecreatesSessionAfterAgentSwitch(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	cfg.SetAgent("claude", config.AgentConfig{
+		Command:    "claude",
+		Args:       []string{"acp", "serve"},
+		DefaultCwd: t.TempDir(),
+	})
+	cfg.AgentList = []config.NamedAgentConfig{
+		{Name: "traex", AgentConfig: mustConfigAgent(t, cfg, "traex")},
+		{Name: "claude", AgentConfig: mustConfigAgent(t, cfg, "claude")},
+	}
+	rt := &fakeRuntime{newSessionID: "acp-session-claude", promptReply: "ACP 回复"}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		Title:        "old session",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-traex",
+		Cwd:          workDir,
+	}); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    key.BotID,
+		ChatID:   key.ChatID,
+		ChatType: "p2p",
+		Text:     "/agent claude",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/agent claude) error = %v", err)
+	}
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     key.BotID,
+		ChatID:    key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_msg",
+		Text:      "继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].AgentName != "claude" || rt.newCalls[0].Cwd != workDir {
+		t.Fatalf("newCalls = %+v, want recreated claude session with existing cwd", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.AgentName != "claude" {
+		t.Fatalf("promptCalls = %+v, want prompt on claude session", rt.promptCalls)
+	}
+	session, ok := store.Get(key)
+	if !ok || session.AgentName != "claude" || session.ACPSessionID != "acp-session-claude" {
+		t.Fatalf("session = %+v ok=%v, want current claude session", session, ok)
 	}
 }
 
@@ -1205,9 +1407,9 @@ func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 func TestHandleFeishuMessageShowCommandSurvivesNewSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionID: "acp-session-new",
 		promptResult: acp.PromptResult{
@@ -1322,9 +1524,9 @@ func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-new"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1356,9 +1558,9 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1399,9 +1601,9 @@ func TestHandleFeishuMessagePersistsNewSessionInfoMeta(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionInfo: acp.SessionInfo{
 			SessionID: "acp-session-1",
@@ -1522,9 +1724,9 @@ func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1575,9 +1777,9 @@ func TestHandleFeishuMessageIncludesImageReplyContextInPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	imagePath := filepath.Join(t.TempDir(), "cache", "img_test_reply_image.png")
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1621,9 +1823,9 @@ func TestHandleFeishuImageMessagePromptsWithLocalPath(t *testing.T) {
 	workDir := t.TempDir()
 	imagePath := filepath.Join(t.TempDir(), "cache", "img_v3_direct.png")
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1687,9 +1889,9 @@ func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	firstDir := t.TempDir()
 	secondDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = firstDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1765,9 +1967,9 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1816,9 +2018,9 @@ func TestHandleFeishuGroupChatRequiresMentionByDefault(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1863,9 +2065,9 @@ func TestHandleFeishuGroupChatStartsReactionOnlyWhenMessageIsProcessed(t *testin
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -1917,9 +2119,9 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -2074,9 +2276,9 @@ func TestHandleFeishuPrivateChatIgnoresAtConfigAndAlwaysResponds(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -2122,9 +2324,9 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}, promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -2663,9 +2865,9 @@ func TestHandleFeishuAutoSessionUsesFirstPromptAsTitle(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -2989,9 +3191,9 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
@@ -3075,9 +3277,9 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	if err := store.UpsertChat(ChatConfig{
@@ -3177,9 +3379,9 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	if err := store.UpsertChat(ChatConfig{
@@ -3439,9 +3641,9 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	if err := store.UpsertChat(ChatConfig{
@@ -3516,9 +3718,9 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	if err := store.UpsertChat(ChatConfig{
@@ -3588,9 +3790,9 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
@@ -3667,9 +3869,9 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
@@ -3750,9 +3952,9 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
@@ -3818,9 +4020,9 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
@@ -4121,9 +4323,9 @@ func TestPromptRuntimeWaitsForInFlightDebouncedCardFlush(t *testing.T) {
 		},
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 
@@ -4194,9 +4396,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithBootstrapContext(t *testing.T)
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "请先告诉我基础设置。"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -4510,9 +4712,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -4742,9 +4944,9 @@ func TestHandleFeishuMessageNewWithoutCwdUsesDefaultCwd(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 
@@ -4767,9 +4969,9 @@ func TestHandleFeishuMessageNewWithoutCwdReusesCurrentSessionCwd(t *testing.T) {
 	firstDir := t.TempDir()
 	defaultDir := t.TempDir()
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = defaultDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	msg := feishu.Message{
@@ -4815,9 +5017,9 @@ func TestHandleFeishuMessageNewRelativeCwd(t *testing.T) {
 		}
 	}
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = defaultDir
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	svc := NewService(cfg, store)
 	svc.setRuntime(&fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2", "acp-session-3"}})
 	msg := feishu.Message{
@@ -4869,9 +5071,9 @@ func TestHandleFeishuMessageNewRelativeCwd(t *testing.T) {
 func TestHandleFeishuMessageNewRejectsMissingExplicitCwd(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -4898,9 +5100,9 @@ func TestHandleFeishuMessageNewRejectsMissingExplicitCwd(t *testing.T) {
 func TestHandleFeishuMessageNewRejectsExplicitCwdFile(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-1"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -5074,9 +5276,9 @@ func TestHandleWikiCommandRejectsSubSecondInterval(t *testing.T) {
 func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-new"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -5119,7 +5321,7 @@ func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 	if !ok || chat.WikiIntervalSec != 1 || chat.WikiDisabled {
 		t.Fatalf("chat config = %+v, %v; want wiki interval to survive /new", chat, ok)
 	}
-	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
 	t.Cleanup(func() { svc.cancelWikiTimer(session.Key) })
 	svc.taskMu.Lock()
 	_, hasTimer := svc.wikiTimers[session.Key]
@@ -5132,9 +5334,9 @@ func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionID:     "acp-session-new",
 		promptReply:      "NoReply",
@@ -5209,9 +5411,9 @@ func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
 func TestNewSessionRuntimeFailureRestoresPendingWiki(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionError: errors.New("boom"),
 		promptReply:     "NoReply",
@@ -5259,9 +5461,9 @@ func TestNewSessionRuntimeFailureRestoresPendingWiki(t *testing.T) {
 func TestNewSessionInvalidRequestKeepsPendingWiki(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = ""
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{newSessionID: "acp-session-new", promptReply: "NoReply"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -5285,7 +5487,7 @@ func TestNewSessionInvalidRequestKeepsPendingWiki(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/new invalid) error = %v", err)
 	}
-	if !strings.Contains(reply, "默认 agent 未配置 default_cwd") {
+	if !strings.Contains(reply, "当前 agent traex 未配置 default_cwd") {
 		t.Fatalf("reply = %q, want missing cwd warning", reply)
 	}
 	svc.taskMu.Lock()
@@ -5302,9 +5504,9 @@ func TestNewSessionInvalidRequestKeepsPendingWiki(t *testing.T) {
 func TestWikiOffCancelsRunningWikiRuntimeReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
-	agent := cfg.Agents["traex"]
+	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
-	cfg.Agents["traex"] = agent
+	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionID:     "acp-session-new",
 		promptReply:      "NoReply",
@@ -5382,7 +5584,7 @@ func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
-	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
 	t.Cleanup(func() { svc.cancelWikiTimer(key) })
 	svc.taskMu.Lock()
 	beforeGeneration := svc.wikiGenerations[key]
@@ -5432,7 +5634,7 @@ func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
-	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
 	t.Cleanup(func() { svc.cancelWikiTimer(key) })
 	svc.taskMu.Lock()
 	beforeGeneration := svc.wikiGenerations[key]
@@ -6346,7 +6548,7 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 	svc.taskMu.Unlock()
 	wikiDone := make(chan struct{})
 	go func() {
-		svc.runWikiTimer(key, 1, session, config.Default().Agents["traex"])
+		svc.runWikiTimer(key, 1, session, mustConfigAgent(t, config.Default(), "traex"))
 		close(wikiDone)
 	}()
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })

@@ -22,7 +22,7 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 		Workspace:       filepath.Join(t.TempDir(), "workspace"),
 		WikiIntervalSec: 1,
 	}
-	svc.scheduleWikiAfterUserPrompt(session, config.Default().Agents["traex"])
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
 
 	waitForCondition(t, 2*time.Second, func() bool { return rt.promptCallCount() == 1 })
 	if got := rt.promptCalls[0].Text; !strings.Contains(got, "请对刚才的对话进行反思") || !strings.Contains(got, "NoReply") {

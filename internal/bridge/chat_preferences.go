@@ -162,6 +162,50 @@ func formatShowStatus(chat ChatConfig) string {
 	}, "\n")
 }
 
+func (s *Service) handleAgentCommand(ctx context.Context, text string, msg feishu.Message) string {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return "会话持久化未初始化。"
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 1 || len(fields) == 2 && strings.EqualFold(strings.TrimSpace(fields[1]), "status") {
+		return s.formatAgentStatus(msg)
+	}
+	if len(fields) != 2 {
+		return "请使用 /agent 或 /agent <name>。"
+	}
+	agentName := strings.TrimSpace(fields[1])
+	if _, ok := s.registry.Get(agentName); !ok {
+		return "未知 agent：" + agentName + "\n\n" + s.formatAgentStatus(msg)
+	}
+	chat := s.chatConfigForMessage(msg)
+	chat.AgentName = agentName
+	if err := store.UpsertChat(chat); err != nil {
+		slog.ErrorContext(ctx, "保存聊天 agent 配置失败", "chat", msg.ChatID, "agent", agentName, "错误", err)
+		return "保存聊天 agent 配置失败：" + err.Error()
+	}
+	lines := []string{
+		"已设置当前聊天默认 agent：" + agentName,
+	}
+	if session, ok := s.findSession(msg); ok && strings.TrimSpace(session.AgentName) != "" && session.AgentName != agentName {
+		lines = append(lines, "当前已有会话仍使用 agent："+session.AgentName+"；下一条普通消息或 /new 会使用新的默认 agent。")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Service) formatAgentStatus(msg feishu.Message) string {
+	names := s.registry.Names()
+	current := s.chatAgentName(msg)
+	lines := []string{
+		"当前聊天默认 agent：" + current,
+		"可用 agent：" + strings.Join(names, ", "),
+	}
+	if session, ok := s.findSession(msg); ok && strings.TrimSpace(session.AgentName) != "" {
+		lines = append(lines, sessionLabel(msg)+"当前使用 agent："+session.AgentName)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func chatThoughtsVisible(chat ChatConfig) bool {
 	return chat.ShowThoughts && !chat.HideThoughts
 }
