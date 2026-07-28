@@ -23,6 +23,7 @@ type promptCardStream struct {
 	ready             chan struct{}
 	started           bool
 	showStepMessages  bool
+	showPlans         bool
 	showThoughts      bool
 	showTools         bool
 	showStatusBar     bool
@@ -54,7 +55,8 @@ func newPromptCardStream(ctx context.Context, msg feishu.Message, session Sessio
 		session:          session,
 		available:        true,
 		showStepMessages: !show.HideStepMessages,
-		showThoughts:     !show.HideThoughts,
+		showPlans:        !show.HidePlans,
+		showThoughts:     chatThoughtsVisible(show),
 		showTools:        !show.HideTools,
 		showStatusBar:    !show.HideStatusBar,
 		showUsageDetail:  !show.HideUsageDetail,
@@ -221,6 +223,17 @@ func (s *promptCardStream) updateThoughtStream(text string) {
 	s.updateProcessStreamText(promptProcessThought, "🧠 "+text, false)
 }
 
+func (s *promptCardStream) updatePlanStream(text string) {
+	if !s.showPlans {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.updateProcessStreamText(promptProcessPlan, "📌 "+text, false)
+}
+
 func (s *promptCardStream) updateToolStream(text string) {
 	if !s.showTools {
 		return
@@ -255,6 +268,10 @@ func (s *promptCardStream) updatePromptUpdate(update acp.PromptUpdate) {
 	kind := promptUpdateKind(update)
 	if isThoughtUpdateKind(kind) {
 		if !s.showThoughts {
+			return
+		}
+	} else if isPlanUpdateKind(kind) {
+		if !s.showPlans {
 			return
 		}
 	} else if !s.showStepMessages {
@@ -389,6 +406,7 @@ const (
 	promptProcessNone    promptProcessClass = ""
 	promptProcessStep    promptProcessClass = "step"
 	promptProcessThought promptProcessClass = "thought"
+	promptProcessPlan    promptProcessClass = "plan"
 	promptProcessTool    promptProcessClass = "tool"
 )
 

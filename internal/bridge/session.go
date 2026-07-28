@@ -32,6 +32,8 @@ type ChatConfig struct {
 	WikiDisabled     bool      `json:"wiki_disabled,omitempty"`
 	WikiIntervalSec  int       `json:"wiki_interval_sec,omitempty"`
 	HideStepMessages bool      `json:"hide_step_messages,omitempty"`
+	HidePlans        bool      `json:"hide_plans,omitempty"`
+	ShowThoughts     bool      `json:"show_thoughts,omitempty"`
 	HideThoughts     bool      `json:"hide_thoughts,omitempty"`
 	HideTools        bool      `json:"hide_tools,omitempty"`
 	HideStatusBar    bool      `json:"hide_status_bar,omitempty"`
@@ -54,6 +56,8 @@ type Session struct {
 	WikiDisabled      bool                      `json:"wiki_disabled,omitempty"`
 	WikiIntervalSec   int                       `json:"wiki_interval_sec,omitempty"`
 	HideStepMessages  bool                      `json:"hide_step_messages,omitempty"`
+	HidePlans         bool                      `json:"hide_plans,omitempty"`
+	ShowThoughts      bool                      `json:"show_thoughts,omitempty"`
 	HideThoughts      bool                      `json:"hide_thoughts,omitempty"`
 	HideTools         bool                      `json:"hide_tools,omitempty"`
 	HideStatusBar     bool                      `json:"hide_status_bar,omitempty"`

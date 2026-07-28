@@ -13,6 +13,7 @@ const (
 	promptChunkTargetProcess        = "process"
 	promptChunkTargetProcessMessage = "process_message"
 	promptChunkTargetThought        = "thought"
+	promptChunkTargetPlan           = "plan"
 	promptChunkTargetTool           = "tool"
 )
 
@@ -177,6 +178,13 @@ func (a *promptChunkAccumulator) applyFlush(flush promptChunkFlush) {
 	case promptChunkTargetThought:
 		if flush.text != "" {
 			a.stream.updateThoughtStream(flush.text)
+		}
+		if flush.finish {
+			a.stream.finishProcessStream()
+		}
+	case promptChunkTargetPlan:
+		if flush.text != "" {
+			a.stream.updatePlanStream(flush.text)
 		}
 		if flush.finish {
 			a.stream.finishProcessStream()

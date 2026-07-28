@@ -215,7 +215,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/mode`：打开飞书模式选择卡片，通过下拉列表设置当前会话模式。
 - `/mode <mode>`：通过 ACP `session/set_config_option` 设置当前会话模式。
-- `/show step|thought|tool|status|used on|off`：设置当前聊天流式卡片展示项。默认都开启；`step` 控制 `💬` 过程消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出，`status` 控制底部状态栏，`used` 控制用量明细。前三项都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
+- `/show step|plan|thought|tool|status|used on|off`：设置当前聊天流式卡片展示项。默认展示 `step`、`plan`、`tool`、`status` 和 `used`，`thought` 默认关闭，需显式开启；`step` 控制 `💬` 过程消息，`plan` 控制 `📌` 计划消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出，`status` 控制底部状态栏，`used` 控制用量明细。`step`、`plan`、`thought`、`tool` 都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
 - `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
 - `/restart`：仅 bot owner 可用。旧进程会先回复“准备重启”并写入 `$BOT_WORKSPACE/restart_ack.json`，然后执行 `restart_command`；内置后台 daemon 子进程也可在未配置 `restart_command` 时使用内置后台 restart。新进程启动后会向原消息回复“已重启”并删除回执文件。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开 `traex acp serve` 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问目录，支持绝对路径、`~/path`、`./path` 和 `../path`；相对路径优先基于当前会话已有 `cwd` 解析，首次创建则基于配置里的 `default_cwd` 解析。不传 `cwd` 时优先沿用当前会话已有的 `cwd`，首次创建则使用配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。如果旧会话有尚未触发的 wiki 反思轮次，`/new` 会将其放到独立 wiki runtime key 后台执行，不等待反思完成；该后台反思不会被新会话后续普通消息取消。如果新 ACP session 创建或持久化失败，原 pending wiki 定时器会恢复。

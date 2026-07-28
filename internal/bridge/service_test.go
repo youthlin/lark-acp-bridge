@@ -1070,7 +1070,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/show thought off) error = %v", err)
 	}
-	for _, want := range []string{"已关闭思考消息展示", "过程消息：开启", "思考消息：关闭", "工具调用：开启", "状态栏：开启", "用量明细：开启"} {
+	for _, want := range []string{"已关闭思考消息展示", "过程消息：开启", "计划：开启", "思考消息：关闭", "工具调用：开启", "状态栏：开启", "用量明细：开启"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
@@ -1079,8 +1079,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if !ok {
 		t.Fatal("chat config not found")
 	}
-	if !updated.HideThoughts || updated.HideStepMessages || updated.HideTools {
-		t.Fatalf("chat display flags = step:%v thought:%v tool:%v, want only thoughts hidden", updated.HideStepMessages, updated.HideThoughts, updated.HideTools)
+	if !updated.HideThoughts || updated.ShowThoughts || updated.HideStepMessages || updated.HidePlans || updated.HideTools {
+		t.Fatalf("chat display flags = step:%v plan:%v showThought:%v thought:%v tool:%v, want only thoughts hidden", updated.HideStepMessages, updated.HidePlans, updated.ShowThoughts, updated.HideThoughts, updated.HideTools)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1096,8 +1096,25 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		t.Fatalf("reply = %q, want thought display enabled", reply)
 	}
 	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
-	if updated.HideThoughts {
-		t.Fatalf("HideThoughts = true, want false after /show thought on")
+	if !updated.ShowThoughts || updated.HideThoughts {
+		t.Fatalf("thought flags = show:%v hide:%v, want visible after /show thought on", updated.ShowThoughts, updated.HideThoughts)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+		Text:     "/show plan off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show plan off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭计划展示") || !strings.Contains(reply, "计划：关闭") {
+		t.Fatalf("reply = %q, want plan display disabled", reply)
+	}
+	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	if !updated.HidePlans {
+		t.Fatalf("HidePlans = false, want true after /show plan off")
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -1153,6 +1170,21 @@ func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		Text:     "/show",
+		ChatType: "p2p",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/show) error = %v", err)
+	}
+	for _, want := range []string{"计划：开启", "思考消息：关闭"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want default %q", reply, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
 		Text:     "/show step off",
@@ -2989,11 +3021,10 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	if got := card.textUpdatesSnapshot(); len(got) != 2 || got[0] != "收到。现在开始。" || got[1] != "工具处理完成。" {
 		t.Fatalf("textUpdates = %+v, want pre-tool text kept until final candidate replaces it", got)
 	}
-	if got := card.processUpdatesSnapshot(); len(got) != 3 ||
+	if got := card.processUpdatesSnapshot(); len(got) != 2 ||
 		got[0] != "💬 收到。现在开始。" ||
-		got[1] != "💬 收到。现在开始。\n⏳ exec_command" ||
-		got[2] != "💬 收到。现在开始。\n⏳ exec_command\n🧠 The user wants an English paragraph." {
-		t.Fatalf("processUpdates = %+v, want immediate tool update and final normalized process update", got)
+		got[1] != "💬 收到。现在开始。\n⏳ exec_command" {
+		t.Fatalf("processUpdates = %+v, want immediate tool update without default thought display", got)
 	}
 	if !card.isClosed() {
 		t.Fatalf("stream card should be closed")
@@ -3049,6 +3080,12 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 	cfg.Agents["traex"] = agent
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
+	if err := store.UpsertChat(ChatConfig{
+		Key:          chatKeyFromMessage(feishu.Message{BotID: "bot-a", ChatID: "oc_private"}),
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(chat) error = %v", err)
+	}
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
@@ -3145,6 +3182,12 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 	cfg.Agents["traex"] = agent
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
+	if err := store.UpsertChat(ChatConfig{
+		Key:          chatKeyFromMessage(feishu.Message{BotID: "bot-a", ChatID: "oc_private"}),
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(chat) error = %v", err)
+	}
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
@@ -3401,6 +3444,12 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 	cfg.Agents["traex"] = agent
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
+	if err := store.UpsertChat(ChatConfig{
+		Key:          chatKeyFromMessage(feishu.Message{BotID: "bot-a", ChatID: "oc_private"}),
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(chat) error = %v", err)
+	}
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
@@ -3472,6 +3521,12 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 	cfg.Agents["traex"] = agent
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
+	if err := store.UpsertChat(ChatConfig{
+		Key:          chatKeyFromMessage(feishu.Message{BotID: "bot-a", ChatID: "oc_private"}),
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(chat) error = %v", err)
+	}
 	var cards []*fakeStreamCard
 	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
@@ -3504,6 +3559,70 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 	}
 	if strings.Contains(got[len(got)-1], "The\nuser\nsaid") {
 		t.Fatalf("last process update = %q, should not render one word per line", got[len(got)-1])
+	}
+}
+
+func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "完成。",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "plan",
+					PlanEntries: []acp.PlanEntry{
+						{Content: "读取现有实现", Status: "completed"},
+						{Meta: map[string]any{"activeForm": "补过程消息展示"}, Status: "in_progress"},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := cfg.Agents["traex"]
+	agent.DefaultCwd = t.TempDir()
+	cfg.Agents["traex"] = agent
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	got := cards[0].processUpdatesSnapshot()
+	if len(got) == 0 {
+		t.Fatalf("processUpdates = %+v, want plan process update", got)
+	}
+	want := "📌 计划\n- ✅ 读取现有实现\n- 🔄 补过程消息展示"
+	if got[len(got)-1] != want {
+		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
 	}
 }
 
@@ -3663,25 +3782,43 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 			name: "hide step",
 			mutate: func(chat *ChatConfig) {
 				chat.HideStepMessages = true
+				chat.ShowThoughts = true
 			},
-			want:     []string{"⏳ Run tests", "🧠 Thinking"},
+			want:     []string{"📌 计划", "Plan item", "⏳ Run tests", "🧠 Thinking"},
 			unwanted: []string{"💬 准备处理", "step chunk"},
+		},
+		{
+			name: "hide plan",
+			mutate: func(chat *ChatConfig) {
+				chat.HidePlans = true
+				chat.ShowThoughts = true
+			},
+			want:     []string{"💬 准备处理", "⏳ Run tests", "🧠 Thinking", "💬 step chunk"},
+			unwanted: []string{"📌 计划", "Plan item"},
 		},
 		{
 			name: "hide thought",
 			mutate: func(chat *ChatConfig) {
 				chat.HideThoughts = true
 			},
-			want:     []string{"💬 准备处理", "⏳ Run tests", "💬 step chunk"},
+			want:     []string{"💬 准备处理", "📌 计划", "Plan item", "⏳ Run tests", "💬 step chunk"},
 			unwanted: []string{"🧠 Thinking"},
 		},
 		{
 			name: "hide tool",
 			mutate: func(chat *ChatConfig) {
 				chat.HideTools = true
+				chat.ShowThoughts = true
 			},
-			want:     []string{"💬 准备处理", "🧠 Thinking", "💬 step chunk"},
+			want:     []string{"💬 准备处理", "📌 计划", "Plan item", "🧠 Thinking", "💬 step chunk"},
 			unwanted: []string{"Run tests", "tool output"},
+		},
+		{
+			name: "default hide thought",
+			mutate: func(chat *ChatConfig) {
+			},
+			want:     []string{"💬 准备处理", "📌 计划", "Plan item", "⏳ Run tests", "💬 step chunk"},
+			unwanted: []string{"🧠 Thinking"},
 		},
 	}
 
@@ -3704,6 +3841,12 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
 						SessionUpdate: "reasoning",
 						Message:       "Thinking",
+					}},
+					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+						SessionUpdate: "plan",
+						PlanEntries: []acp.PlanEntry{
+							{Content: "Plan item", Status: "in_progress"},
+						},
 					}},
 					{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
 						SessionUpdate: "tool_call",
@@ -3771,6 +3914,7 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	if err := store.UpsertChat(ChatConfig{
 		Key:              chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}),
 		HideStepMessages: true,
+		HidePlans:        true,
 		HideThoughts:     true,
 		HideTools:        true,
 	}); err != nil {

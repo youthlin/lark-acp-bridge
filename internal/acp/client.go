@@ -149,10 +149,18 @@ type SessionUpdate struct {
 	ConfigOptions     []SessionConfigOption `json:"configOptions,omitempty"`
 	Models            *SessionModelState    `json:"models,omitempty"`
 	Mode              *SessionModeState     `json:"mode,omitempty"`
+	PlanEntries       []PlanEntry           `json:"entries,omitempty"`
 	Used              int64                 `json:"used,omitempty"`
 	Size              int64                 `json:"size,omitempty"`
 	Cost              *UsageCost            `json:"cost,omitempty"`
 	Raw               json.RawMessage       `json:"-"`
+}
+
+type PlanEntry struct {
+	Content    string         `json:"content,omitempty"`
+	Status     string         `json:"status,omitempty"`
+	ActiveForm string         `json:"activeForm,omitempty"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 func (u *SessionUpdate) UnmarshalJSON(data []byte) error {

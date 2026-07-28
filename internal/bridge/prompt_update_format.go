@@ -26,7 +26,9 @@ func formatPromptUpdate(update acp.PromptUpdate) string {
 		return ""
 	case "agent_message", "assistant_message", "message":
 		return formatProcessMessageText(truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes))
-	case "plan", "thought", "reasoning":
+	case "plan":
+		return formatPlanProcessText(truncateRunes(planUpdateText(u), maxPromptUpdateRunes))
+	case "thought", "reasoning":
 		return formatThoughtProcessText(truncateRunes(firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw)), maxPromptUpdateRunes))
 	case "status", "progress":
 		text := firstNonEmpty(u.Message, u.Status, contentText(u.Content), rawText(u.Raw))
@@ -53,6 +55,47 @@ func formatThoughtProcessText(text string) string {
 		return ""
 	}
 	return "🧠 " + text
+}
+
+func formatPlanProcessText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "- ") || strings.Contains(text, "\n- ") {
+		return "📌 计划\n" + text
+	}
+	return "📌 " + text
+}
+
+func planUpdateText(u acp.SessionUpdate) string {
+	if len(u.PlanEntries) > 0 {
+		lines := make([]string, 0, len(u.PlanEntries))
+		for _, entry := range u.PlanEntries {
+			content := firstNonEmpty(entry.ActiveForm, metaString(entry.Meta, "activeForm"), entry.Content)
+			if content == "" {
+				continue
+			}
+			lines = append(lines, "- "+planStatusIcon(entry.Status)+" "+content)
+		}
+		if len(lines) > 0 {
+			return strings.Join(lines, "\n")
+		}
+	}
+	return firstNonEmpty(u.Message, contentText(u.Content), rawText(u.Raw))
+}
+
+func planStatusIcon(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "success", "succeeded", "done":
+		return "✅"
+	case "in_progress", "running":
+		return "🔄"
+	case "pending", "":
+		return "⏳"
+	default:
+		return "•"
+	}
 }
 
 func isToolPromptUpdateKind(kind string) bool {
@@ -140,6 +183,8 @@ func promptUpdateChunk(update acp.PromptUpdate) (promptChunk, bool) {
 		target = promptChunkTargetTool
 	} else if isThoughtUpdateKind(kind) {
 		target = promptChunkTargetThought
+	} else if isPlanUpdateKind(kind) {
+		target = promptChunkTargetPlan
 	} else if streamName := promptChunkStreamName(kind); streamName != "" {
 		key = streamName
 	}
@@ -164,12 +209,38 @@ func isToolChunkUpdateKind(kind string) bool {
 
 func isThoughtUpdateKind(kind string) bool {
 	switch kind {
-	case "agent_thought_chunk", "thought_chunk", "reasoning_chunk", "plan_chunk",
-		"thought", "reasoning", "plan":
+	case "agent_thought_chunk", "thought_chunk", "reasoning_chunk",
+		"thought", "reasoning":
 		return true
 	default:
 		return strings.Contains(kind, "thought") || strings.Contains(kind, "reasoning")
 	}
+}
+
+func isPlanUpdateKind(kind string) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "plan", "plan_chunk", "agent_plan", "agent_plan_chunk":
+		return true
+	default:
+		return promptUpdateKindHasToken(kind, "plan")
+	}
+}
+
+func promptUpdateKindHasToken(kind, token string) bool {
+	for _, part := range strings.FieldsFunc(kind, func(r rune) bool {
+		switch r {
+		case '_', '.', '-', '/', ':':
+			return true
+		default:
+			return false
+		}
+	}) {
+		if part == token {
+			return true
+		}
+	}
+	return false
 }
 
 func promptChunkStreamName(kind string) string {
@@ -300,6 +371,14 @@ func rawString(raw json.RawMessage, key string) string {
 		return ""
 	}
 	text, _ := value[key].(string)
+	return strings.TrimSpace(text)
+}
+
+func metaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	text, _ := meta[key].(string)
 	return strings.TrimSpace(text)
 }
 

@@ -41,7 +41,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/model <model> - 设置当前会话模型",
 			"/mode - 打开模式选择卡片",
 			"/mode <mode> - 设置当前会话模式",
-			"/show step|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
+			"/show step|plan|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
 			"/at status|on|off - 查看或设置当前群聊是否需要 at 才响应",
 			"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志",
 			"/restart - 重启 bridge 服务，重启完成后自动回复确认",

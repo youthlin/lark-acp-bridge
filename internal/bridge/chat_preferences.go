@@ -20,7 +20,7 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 		return formatShowStatus(chat)
 	}
 	if len(fields) != 3 {
-		return "请使用 /show step|thought|tool|status|used on|off。"
+		return showCommandUsage()
 	}
 	value, ok := parseShowSwitch(fields[2])
 	if !ok {
@@ -28,7 +28,7 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	}
 	target, ok := setChatShowOption(&chat, fields[1], value)
 	if !ok {
-		return "请使用 /show step|thought|tool|status|used on|off。"
+		return showCommandUsage()
 	}
 	if err := store.UpsertChat(chat); err != nil {
 		slog.ErrorContext(ctx, "保存展示配置失败", "错误", err)
@@ -39,6 +39,10 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 		state = "关闭"
 	}
 	return fmt.Sprintf("已%s%s。\n%s", state, target, formatShowStatus(chat))
+}
+
+func showCommandUsage() string {
+	return "请使用 /show step|plan|thought|tool|status|used on|off。"
 }
 
 func parseShowSwitch(value string) (bool, bool) {
@@ -60,7 +64,11 @@ func setChatShowOption(chat *ChatConfig, target string, visible bool) (string, b
 	case "step":
 		chat.HideStepMessages = !visible
 		return "过程消息展示", true
+	case "plan":
+		chat.HidePlans = !visible
+		return "计划展示", true
 	case "thought":
+		chat.ShowThoughts = visible
 		chat.HideThoughts = !visible
 		return "思考消息展示", true
 	case "tool":
@@ -90,6 +98,8 @@ func (s *Service) chatConfigForMessage(msg feishu.Message) ChatConfig {
 		chat.WikiDisabled = session.WikiDisabled
 		chat.WikiIntervalSec = session.WikiIntervalSec
 		chat.HideStepMessages = session.HideStepMessages
+		chat.HidePlans = session.HidePlans
+		chat.ShowThoughts = session.ShowThoughts
 		chat.HideThoughts = session.HideThoughts
 		chat.HideTools = session.HideTools
 		chat.HideStatusBar = session.HideStatusBar
@@ -116,6 +126,8 @@ func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu
 		WikiDisabled:     session.WikiDisabled,
 		WikiIntervalSec:  session.WikiIntervalSec,
 		HideStepMessages: session.HideStepMessages,
+		HidePlans:        session.HidePlans,
+		ShowThoughts:     session.ShowThoughts,
 		HideThoughts:     session.HideThoughts,
 		HideTools:        session.HideTools,
 		HideStatusBar:    session.HideStatusBar,
@@ -128,6 +140,8 @@ func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu
 
 func sessionHasShowConfig(session Session) bool {
 	return session.HideStepMessages ||
+		session.HidePlans ||
+		session.ShowThoughts ||
 		session.HideThoughts ||
 		session.HideTools ||
 		session.HideStatusBar ||
@@ -140,11 +154,16 @@ func formatShowStatus(chat ChatConfig) string {
 	return strings.Join([]string{
 		"当前会话流式卡片展示：",
 		"过程消息：" + showState(!chat.HideStepMessages),
-		"思考消息：" + showState(!chat.HideThoughts),
+		"计划：" + showState(!chat.HidePlans),
+		"思考消息：" + showState(chatThoughtsVisible(chat)),
 		"工具调用：" + showState(!chat.HideTools),
 		"状态栏：" + showState(!chat.HideStatusBar),
 		"用量明细：" + showState(!chat.HideUsageDetail),
 	}, "\n")
+}
+
+func chatThoughtsVisible(chat ChatConfig) bool {
+	return chat.ShowThoughts && !chat.HideThoughts
 }
 
 func showState(visible bool) string {
