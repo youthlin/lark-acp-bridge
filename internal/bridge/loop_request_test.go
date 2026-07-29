@@ -49,8 +49,14 @@ func TestLoopHowPrompt(t *testing.T) {
 	}
 	for _, want := range []string{
 		"修复 todo.md 中的优化项",
-		"请根据上面的目标生成一条可直接执行的 /loop 命令。",
-		"命令使用 /loop -t 0 -n 0 -i 30s 开头。",
+		"## /loop 命令格式",
+		"/loop [-t <duration|0>] [-n <non-negative integer>] [-i <duration>] <prompt>",
+		"-t <duration|0>：最长运行时间",
+		"-n <non-negative integer>：最大轮次",
+		"-i <duration>：每轮间隔",
+		"请根据用户目标生成一条可直接执行的 /loop 命令。",
+		"不要默认生成无限循环",
+		"只有用户明确要求持续、长期、一直、守护、直到完成且无需轮次上限时，才使用 -t 0 -n 0",
 		"每轮只推进一个最小、可独立验证的步骤",
 		"不要执行 git commit",
 		"最终只返回一条 /loop 命令",
@@ -59,6 +65,9 @@ func TestLoopHowPrompt(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
+	}
+	if strings.Contains(prompt, "命令使用 /loop -t 0 -n 0 -i 30s 开头") {
+		t.Fatalf("prompt = %q, should not force infinite loop command prefix", prompt)
 	}
 
 	if _, err := loopHowPrompt(" \n\t "); err == nil || !strings.Contains(err.Error(), "请提供想在循环中完成的目标") {

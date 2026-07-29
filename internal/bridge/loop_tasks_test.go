@@ -89,6 +89,8 @@ func TestHandleLoopHowCommandReturnsRecommendedCommand(t *testing.T) {
 	rt.mu.Unlock()
 	for _, want := range []string{
 		"持续修复 todo.md 中的优化项",
+		"## /loop 命令格式",
+		"不要默认生成无限循环",
 		"最终只返回一条 /loop 命令",
 	} {
 		if !strings.Contains(prompt, want) {
