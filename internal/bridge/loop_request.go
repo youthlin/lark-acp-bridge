@@ -121,3 +121,23 @@ func formatLoopRequest(req loopRequest) string {
 		"停止条件：agent 最终回复 DONE、达到最长运行、达到最大轮次，或发送新消息 / /loop stop。",
 	}, "\n")
 }
+
+func loopHowPrompt(goal string) (string, error) {
+	goal = strings.TrimSpace(goal)
+	if goal == "" {
+		return "", fmt.Errorf("请提供想在循环中完成的目标，例如 /loop how 持续修复 todo.md 中的优化项。")
+	}
+	return strings.Join([]string{
+		goal,
+		"",
+		"请根据上面的目标生成一条可直接执行的 /loop 命令。",
+		"要求：",
+		"- 命令使用 /loop -t 0 -n 0 -i 30s 开头。",
+		"- 把目标改写成适合自动循环执行的中文任务说明。",
+		"- 任务说明必须要求每轮只推进一个最小、可独立验证的步骤。",
+		"- 任务说明必须要求定位相关代码和测试、实现最小改动、补充或更新测试、运行相关验证。",
+		"- 任务说明必须要求不要执行 git commit，不要重启服务，不要修改与目标无关的代码。",
+		"- 任务说明必须要求完成目标、遇到需要用户决策的问题、测试环境阻塞，或继续执行没有新增价值时只回复 DONE。",
+		"- 最终只返回一条 /loop 命令，不要解释，不要使用 Markdown 代码块。",
+	}, "\n"), nil
+}

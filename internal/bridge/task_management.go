@@ -18,23 +18,33 @@ const (
 )
 
 type runningTask struct {
-	kind     taskKind
-	runtime  runtimeKey
-	cancel   context.CancelFunc
-	session  Session
-	agent    config.AgentConfig
-	onCancel func(context.Context, string)
+	kind               taskKind
+	runtime            runtimeKey
+	cancel             context.CancelFunc
+	session            Session
+	agent              config.AgentConfig
+	drainPendingAtAuto bool
+	onCancel           func(context.Context, string)
+}
+
+type runningTaskOptions struct {
+	drainPendingAtAuto bool
 }
 
 func (s *Service) startTask(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind) (context.Context, func()) {
+	return s.startTaskWithOptions(ctx, session, agent, kind, runningTaskOptions{})
+}
+
+func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func()) {
 	s.cancelWikiTimer(session.Key)
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
-		kind:    kind,
-		runtime: currentRuntimeKey(session.Key),
-		cancel:  cancel,
-		session: session,
-		agent:   agent,
+		kind:               kind,
+		runtime:            currentRuntimeKey(session.Key),
+		cancel:             cancel,
+		session:            session,
+		agent:              agent,
+		drainPendingAtAuto: opts.drainPendingAtAuto,
 	}
 
 	var previous *runningTask
@@ -43,9 +53,11 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 	s.tasks[session.Key] = task
 	s.taskMu.Unlock()
 	if previous != nil {
+		reason := replacementCancelReason(previous)
 		previous.cancel()
+		s.markCanceledTask(previous, reason)
 		if previous.onCancel != nil {
-			previous.onCancel(ctx, "已取消")
+			previous.onCancel(ctx, reason)
 		}
 		go s.cancelRuntimeTask(ctx, previous)
 	}
@@ -86,12 +98,37 @@ func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) 
 	delete(s.tasks, key)
 	s.taskMu.Unlock()
 	if task != nil {
+		reason := replacementCancelReason(task)
 		task.cancel()
+		s.markCanceledTask(task, reason)
 		if task.onCancel != nil {
-			task.onCancel(ctx, "已取消")
+			task.onCancel(ctx, reason)
 		}
 		go s.cancelRuntimeTask(ctx, task)
 	}
+}
+
+func replacementCancelReason(task *runningTask) string {
+	if task != nil && task.kind == taskKindLoop {
+		return "已被新消息打断"
+	}
+	return "已取消"
+}
+
+func (s *Service) markCanceledTask(task *runningTask, reason string) {
+	if task == nil || task.kind != taskKindLoop {
+		return
+	}
+	s.taskMu.Lock()
+	status, ok := s.loopStatuses[task.session.Key]
+	if ok {
+		status.running = false
+		status.ended = time.Now()
+		status.reason = reason
+		status.lastError = ""
+		s.loopStatuses[task.session.Key] = status
+	}
+	s.taskMu.Unlock()
 }
 
 func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {

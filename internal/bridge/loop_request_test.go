@@ -42,6 +42,30 @@ func TestParseLoopRequest(t *testing.T) {
 	}
 }
 
+func TestLoopHowPrompt(t *testing.T) {
+	prompt, err := loopHowPrompt("修复 todo.md 中的优化项")
+	if err != nil {
+		t.Fatalf("loopHowPrompt() error = %v", err)
+	}
+	for _, want := range []string{
+		"修复 todo.md 中的优化项",
+		"请根据上面的目标生成一条可直接执行的 /loop 命令。",
+		"命令使用 /loop -t 0 -n 0 -i 30s 开头。",
+		"每轮只推进一个最小、可独立验证的步骤",
+		"不要执行 git commit",
+		"最终只返回一条 /loop 命令",
+		"只回复 DONE",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+
+	if _, err := loopHowPrompt(" \n\t "); err == nil || !strings.Contains(err.Error(), "请提供想在循环中完成的目标") {
+		t.Fatalf("loopHowPrompt(blank) error = %v, want validation", err)
+	}
+}
+
 func TestLoopDone(t *testing.T) {
 	tests := []struct {
 		name string

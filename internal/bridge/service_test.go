@@ -27,6 +27,10 @@ func testBotMention(name string) feishu.Mention {
 	return feishu.Mention{ID: testBotOpenID, Name: name, Type: "bot"}
 }
 
+func testBotMentions() []feishu.Mention {
+	return []feishu.Mention{testBotMention("智能助手")}
+}
+
 func newTestService(cfg config.Config, store *SessionStore) *Service {
 	if len(cfg.Bots) > 0 && len(cfg.Bots[0].OwnerOpenIDs) == 0 {
 		cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
@@ -305,6 +309,12 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	}
 	if !strings.Contains(reply, "/debug status|on|off") {
 		t.Fatalf("reply = %q, want debug help", reply)
+	}
+	if !strings.Contains(reply, "/at - /at on: 必须at才响应; /at off auto|every") {
+		t.Fatalf("reply = %q, want at auto/every help", reply)
+	}
+	if !strings.Contains(reply, "/loop add <补充消息>|status|stop") {
+		t.Fatalf("reply = %q, want loop add help", reply)
 	}
 }
 
@@ -618,6 +628,8 @@ func TestHandleFeishuMessageCommandsListsACPCommands(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/cmds",
 	})
 	if err != nil {
@@ -645,6 +657,8 @@ func TestHandleFeishuMessageCommandsForwardsACPCommand(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/cmds /review 重点看测试",
 	})
 	if err != nil {
@@ -673,6 +687,8 @@ func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "//review 快速检查",
 	})
 	if err != nil {
@@ -697,6 +713,8 @@ func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/cmds /",
 	})
 	if err != nil {
@@ -777,6 +795,8 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config",
 	})
 	if err != nil {
@@ -792,6 +812,8 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config model",
 	})
 	if err != nil {
@@ -810,6 +832,8 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config reasoning High",
 	})
 	if err != nil {
@@ -863,6 +887,8 @@ func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config model",
 	})
 	if err != nil {
@@ -919,6 +945,8 @@ func TestHandleFeishuMessageConfigSetsBooleanOption(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config brave_mode on",
 	})
 	if err != nil {
@@ -965,6 +993,8 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config missing",
 	})
 	if err != nil {
@@ -978,6 +1008,8 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config reasoning extreme",
 	})
 	if err != nil {
@@ -991,6 +1023,8 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/config brave_mode maybe",
 	})
 	if err != nil {
@@ -1045,6 +1079,8 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/model",
 	})
 	if err != nil {
@@ -1060,6 +1096,8 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/model gpt-5.6",
 	})
 	if err != nil {
@@ -1113,6 +1151,8 @@ func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		SenderID: "ou_requester",
 		Text:     "/model",
 	})
@@ -1173,6 +1213,8 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/mode",
 	})
 	if err != nil {
@@ -1188,6 +1230,8 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/mode plan",
 	})
 	if err != nil {
@@ -1241,6 +1285,8 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		SenderID: "ou_requester",
 		Text:     "/mode",
 	})
@@ -1267,6 +1313,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show thought off",
 	})
 	if err != nil {
@@ -1289,6 +1337,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show thought on",
 	})
 	if err != nil {
@@ -1306,6 +1356,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show plan off",
 	})
 	if err != nil {
@@ -1323,6 +1375,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show STATUS off",
 	})
 	if err != nil {
@@ -1340,6 +1394,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show used off",
 	})
 	if err != nil {
@@ -1357,6 +1413,8 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 		BotID:    session.Key.BotID,
 		ChatID:   session.Key.ChatID,
 		ThreadID: session.Key.ThreadID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
 		Text:     "/show STATUS",
 	})
 	if err != nil {
@@ -1567,6 +1625,7 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
 		Text:      "@我的智能助手 你好",
 		Mentions: []feishu.Mention{
@@ -1619,6 +1678,7 @@ func TestHandleFeishuMessagePersistsNewSessionInfoMeta(t *testing.T) {
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
 		Text:      "@我的智能助手 你好",
 		Mentions: []feishu.Mention{
@@ -1665,7 +1725,9 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "继续",
 	})
 	if err != nil {
@@ -2014,6 +2076,104 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuGroupThreadReplyReusesChatSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_1",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			Text:      "@智能助手 你好",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_thread_reply",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			ThreadID:  "omt_group_thread",
+			RootID:    "om_group_1",
+			ParentID:  "om_group_1",
+			Text:      "@智能助手 继续",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", msg.MessageID, err)
+		}
+		if reply != "ACP 回复" {
+			t.Fatalf("reply = %q, want ACP reply", reply)
+		}
+	}
+	if len(rt.newCalls) != 1 {
+		t.Fatalf("newCalls = %+v, want ordinary group thread reply to reuse chat session", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want two prompts", rt.promptCalls)
+	}
+	if rt.newCalls[0].Key.ThreadID != "" || rt.promptCalls[1].Session.Key.ThreadID != "" {
+		t.Fatalf("session keys = new %+v prompt %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls[1].Session.Key)
+	}
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_group_thread"}); ok {
+		t.Fatalf("ordinary group thread reply should not create thread session")
+	}
+}
+
+func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  feishu.Message
+		want []SessionKey
+	}{
+		{
+			name: "ordinary group with thread id stays chat scoped",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ChatType: "group", ThreadID: "omt_group_thread"},
+			want: []SessionKey{{BotID: "bot-a", ChatID: "oc_group"}},
+		},
+		{
+			name: "unknown chat type with thread id stays chat scoped",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_unknown_thread"},
+			want: []SessionKey{{BotID: "bot-a", ChatID: "oc_group"}},
+		},
+		{
+			name: "topic group with thread id uses topic scoped keys",
+			msg: feishu.Message{
+				BotID:     "bot-a",
+				ChatID:    "oc_topic",
+				ChatType:  "topic_group",
+				ThreadID:  "omt_topic",
+				RootID:    "om_root",
+				ParentID:  "om_parent",
+				MessageID: "om_msg",
+			},
+			want: []SessionKey{
+				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "omt_topic"},
+				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_root"},
+				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_parent"},
+				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_msg"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionKeysFromMessage(tt.msg); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("sessionKeysFromMessage() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleFeishuGroupChatRequiresMentionByDefault(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -2058,6 +2218,243 @@ func TestHandleFeishuGroupChatRequiresMentionByDefault(t *testing.T) {
 	}
 	if len(rt.newCalls) != 1 || len(rt.promptCalls) != 1 {
 		t.Fatalf("runtime calls = new %+v prompt %+v, want one ACP prompt", rt.newCalls, rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuTopicGroupRequiresMentionByDefault(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_topic_ignored",
+		ChatID:    "oc_group",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_topic",
+		Text:      "话题群里没有 at",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic no mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent ignore", reply)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want no ACP calls", rt.newCalls, rt.promptCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_topic_status",
+		ChatID:    "oc_group",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_topic",
+		Text:      "@智能助手 /at status",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic /at status) error = %v", err)
+	}
+	if !strings.Contains(reply, "需要 at 才响应") {
+		t.Fatalf("reply = %q, want topic group to support at status", reply)
+	}
+}
+
+func TestHandleFeishuGroupChatCachesMessagesUntilNextMention(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_first_mention",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "@智能助手 第一轮",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(first mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_cached_1",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			SenderID:  "ou_b",
+			Text:      "b 的补充",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_cached_2",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			SenderID:  "ou_c",
+			Text:      "c 的补充",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_group_ignored_command",
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			SenderID:  "ou_b",
+			Text:      "/at off",
+		},
+	} {
+		reply, err = handleFeishuMessage(t, svc, ctx, msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(cached no mention %s) error = %v", msg.MessageID, err)
+		}
+		if reply != "" {
+			t.Fatalf("reply = %q, want silent cache for %s", reply, msg.MessageID)
+		}
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want only first mention before cache is consumed", rt.promptCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_second_mention",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "@智能助手 第二轮，你说得对 @用户b,你也看看 @用户c",
+		Mentions: []feishu.Mention{
+			testBotMention("智能助手"),
+			{ID: "ou_b", Name: "用户b", Type: "user"},
+			{ID: "ou_c", Name: "用户c", Type: "user"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want second mention to consume cache", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[1].Text
+	for _, want := range []string{
+		"## 以下是当前对话历史消息",
+		"用户(ou_b)：b 的补充",
+		"用户(ou_c)：c 的补充",
+		"## User Message",
+		"sender：用户(ou_a)",
+		"content：第二轮，你说得对 @用户b(ou_b),你也看看 @用户c(ou_c)",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+	if strings.Index(prompt, "用户(ou_b)：b 的补充") > strings.Index(prompt, "content：第二轮") ||
+		strings.Index(prompt, "用户(ou_c)：c 的补充") > strings.Index(prompt, "content：第二轮") {
+		t.Fatalf("prompt = %q, want cached messages before current mention", prompt)
+	}
+	if strings.Contains(prompt, "/at off") {
+		t.Fatalf("prompt = %q, should not cache ignored slash command", prompt)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_third_mention",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "@智能助手 第三轮",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(third mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 3 {
+		t.Fatalf("promptCalls = %+v, want third prompt after cache was cleared", rt.promptCalls)
+	}
+	if strings.Contains(rt.promptCalls[2].Text, "b 的补充") || strings.Contains(rt.promptCalls[2].Text, "c 的补充") {
+		t.Fatalf("prompt = %q, want pending cache cleared after second mention", rt.promptCalls[2].Text)
+	}
+}
+
+func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	for i := 0; i < maxPendingAtMessages+1; i++ {
+		reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+			BotID:     "bot-a",
+			MessageID: fmt.Sprintf("om_group_cached_%03d", i),
+			ChatID:    "oc_group",
+			ChatType:  "group",
+			SenderID:  fmt.Sprintf("ou_%03d", i),
+			Text:      fmt.Sprintf("cached-%03d", i),
+		})
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(cached %d) error = %v", i, err)
+		}
+		if reply != "" {
+			t.Fatalf("reply = %q, want silent cache for %d", reply, i)
+		}
+	}
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_mention",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "@智能助手 汇总一下",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt after consuming cache", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	if strings.Contains(prompt, "cached-000") || strings.Contains(prompt, "用户(ou_000)") {
+		t.Fatalf("prompt = %q, should drop oldest cached message", prompt)
+	}
+	for _, want := range []string{
+		"用户(ou_001)：cached-001",
+		"用户(ou_100)：cached-100",
+		"content：汇总一下",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
 	}
 }
 
@@ -2152,6 +2549,9 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if !strings.Contains(reply, "需要 at 才响应") {
 		t.Fatalf("reply = %q, want default mention-required status", reply)
 	}
+	if !strings.Contains(reply, "/at off auto") || !strings.Contains(reply, "/at off every") {
+		t.Fatalf("reply = %q, want status to advertise auto and every modes", reply)
+	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
@@ -2195,17 +2595,17 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 		MessageID: "om_off",
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
-		Text:      "@智能助手 /at OFF",
+		Text:      "@智能助手 /at OFF every",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(@bot /at OFF) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(@bot /at OFF every) error = %v", err)
 	}
 	if !strings.Contains(reply, "无需 at") {
-		t.Fatalf("reply = %q, want mention optional confirmation", reply)
+		t.Fatalf("reply = %q, want every-message confirmation", reply)
 	}
 	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
-	if !ok || !chat.MentionOptional || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+	if !ok || !chat.MentionOptional || chat.AtMode != atModeEvery || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
 		t.Fatalf("chat config = %+v, %v; want mention optional without clearing other chat options", chat, ok)
 	}
 
@@ -2222,22 +2622,134 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if !strings.Contains(reply, "无需 at") {
 		t.Fatalf("reply = %q, want case-insensitive status", reply)
 	}
+	if !strings.Contains(reply, "每条消息都会响应") {
+		t.Fatalf("reply = %q, want every mode status", reply)
+	}
+
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
-		MessageID: "om_prompt",
+		MessageID: "om_every_prompt",
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
 		Text:      "无需 at 也处理",
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(group no mention after off) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(group no mention after /at off every) error = %v", err)
 	}
 	if reply != "ACP 回复" {
-		t.Fatalf("reply = %q, want ACP reply", reply)
+		t.Fatalf("reply = %q, want ACP reply in every mode", reply)
 	}
 	if len(rt.promptCalls) != 1 {
-		t.Fatalf("promptCalls = %+v, want one prompt after /at off", rt.promptCalls)
+		t.Fatalf("promptCalls = %+v, want one prompt after /at off every", rt.promptCalls)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want no stream card without stream card context", cards)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at off auto",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at off auto) error = %v", err)
+	}
+	if !strings.Contains(reply, "自动判断") {
+		t.Fatalf("reply = %q, want auto mode confirmation", reply)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || !chat.MentionOptional || chat.AtMode != atModeAuto || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+		t.Fatalf("chat config = %+v, %v; want auto mode without clearing other chat options", chat, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto_status",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at status auto) error = %v", err)
+	}
+	if !strings.Contains(reply, "自动判断") || !strings.Contains(reply, "/at off every") {
+		t.Fatalf("reply = %q, want auto mode status with every switch hint", reply)
+	}
+
+	rt.mu.Lock()
+	rt.promptCalls = nil
+	rt.promptResults = []acp.PromptResult{{Text: "SILENT"}, {Text: "需要回复"}}
+	rt.promptUpdates = []acp.PromptUpdate{
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "处理中"},
+			},
+		},
+	}
+	rt.mu.Unlock()
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_prompt",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "路过闲聊",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention after auto) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want SILENT suppressed in auto mode", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt after /at off auto", rt.promptCalls)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want no stream card for SILENT auto mode prompt", cards)
+	}
+	rt.mu.Lock()
+	autoPrompt := rt.promptCalls[0].Text
+	rt.mu.Unlock()
+	for _, want := range []string{
+		"## 群聊自动响应判断",
+		"当前群聊已启用 /at off auto",
+		"最终只输出 SILENT",
+		"路过闲聊",
+	} {
+		if !strings.Contains(autoPrompt, want) {
+			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
+		}
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto_reply",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "这个可能需要回复",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention after auto reply) error = %v", err)
+	}
+	if reply != "需要回复" {
+		t.Fatalf("reply = %q, want final ACP reply in auto mode", reply)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want second auto prompt", rt.promptCalls)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want no delayed auto stream card even when reply is needed", cards)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2267,8 +2779,197 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want silent ignore after /at on", reply)
 	}
-	if len(rt.promptCalls) != 1 {
+	if len(rt.promptCalls) != 2 {
 		t.Fatalf("promptCalls = %+v, want no extra prompt after /at on", rt.promptCalls)
+	}
+}
+
+func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID:  "acp-session-1",
+		promptResults: []acp.PromptResult{{Text: "正常回复"}, {Text: "需要回复一次"}},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	var intermediate []string
+	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+		intermediate = append(intermediate, text)
+		return nil
+	})
+
+	mentionDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_mention",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_a",
+			Text:      "@智能助手 先处理这个",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		})
+		mentionDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_auto_pending_1",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_b",
+			Text:      "无 at 补充 1",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_auto_pending_2",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_c",
+			Text:      "无 at 补充 2",
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", msg.MessageID, err)
+		}
+		if reply != "" {
+			t.Fatalf("reply = %q, want queued auto message to stay silent", reply)
+		}
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want queued auto messages not to interrupt running mention prompt", got)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want queued auto messages not to cancel running mention prompt", got)
+	}
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-mentionDone:
+		if got.err != nil {
+			t.Fatalf("mention HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "正常回复" {
+			t.Fatalf("mention reply = %q, want normal reply", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mention prompt did not finish")
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	rt.mu.Lock()
+	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("promptCalls = %+v, want mention prompt and one batched auto prompt", calls)
+	}
+	if len(intermediate) != 1 || intermediate[0] != "需要回复一次" {
+		t.Fatalf("intermediate replies = %+v, want one batched auto reply", intermediate)
+	}
+	autoPrompt := calls[1].Text
+	for _, want := range []string{
+		"## 群聊自动响应判断",
+		"## 以下是待判断是否需要响应的群消息",
+		"用户(ou_b)：无 at 补充 1",
+		"用户(ou_c)：无 at 补充 2",
+		"请只回复一次",
+	} {
+		if !strings.Contains(autoPrompt, want) {
+			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
+		}
+	}
+}
+
+func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID:  "acp-session-1",
+		promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "第二条回复"}},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_auto_1",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_a",
+			Text:      "无 at 第一条",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_2",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		SenderID:  "ou_b",
+		Text:      "无 at 第二条",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second auto) error = %v", err)
+	}
+	if reply != "第二条回复" {
+		t.Fatalf("reply = %q, want second auto prompt to run immediately", reply)
+	}
+	if got := rt.promptCallCount(); got != 2 {
+		t.Fatalf("prompt calls = %d, want second auto prompt not queued", got)
+	}
+	if got := rt.cancelCallCount(); got != 1 {
+		t.Fatalf("cancel calls = %d, want second auto prompt to replace first auto prompt", got)
+	}
+	close(rt.blockPrompt)
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "" {
+			t.Fatalf("first reply = %q, want cancelled or SILENT-suppressed auto prompt", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first auto prompt did not finish")
 	}
 }
 
@@ -2336,7 +3037,7 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 			BotID:     "bot-a",
 			MessageID: "om_topic_1",
 			ChatID:    "oc_group",
-			ChatType:  "group",
+			ChatType:  "topic_group",
 			ThreadID:  "omt_topic_1",
 			Text:      "@智能助手 topic one",
 			Mentions:  []feishu.Mention{testBotMention("智能助手")},
@@ -2345,7 +3046,7 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 			BotID:     "bot-a",
 			MessageID: "om_topic_2",
 			ChatID:    "oc_group",
-			ChatType:  "group",
+			ChatType:  "topic_group",
 			ThreadID:  "omt_topic_2",
 			Text:      "@智能助手 topic two",
 			Mentions:  []feishu.Mention{testBotMention("智能助手")},
@@ -2384,7 +3085,7 @@ func TestHandleFeishuTopicThreadRejectsManualNewAndSessionCommands(t *testing.T)
 	base := feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_group",
-		ChatType: "group",
+		ChatType: "topic_group",
 		ThreadID: "omt_topic",
 		SenderID: testOwnerOpenID,
 		Mentions: []feishu.Mention{testBotMention("智能助手")},
@@ -3082,6 +3783,9 @@ func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
+		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	}
+	if !ok {
 		t.Fatalf("persisted session not found")
 	}
 	if session.Workspace != workspace {
@@ -3225,7 +3929,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 2 ||
 		got[0] != "💬 收到。现在开始。" ||
-		got[1] != "💬 收到。现在开始。\n\n⏳ exec_command" {
+		got[1] != "💬 收到。现在开始。\n⏳ exec_command" {
 		t.Fatalf("processUpdates = %+v, want immediate tool update without default thought display", got)
 	}
 	if !card.isClosed() {
@@ -3486,7 +4190,7 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
-		ChatType:  "group",
+		ChatType:  "topic_group",
 		Text:      "run",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
@@ -3550,7 +4254,7 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
-		ChatType:  "group",
+		ChatType:  "topic_group",
 		Text:      "run",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
@@ -3601,7 +4305,7 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
-		ChatType:  "group",
+		ChatType:  "topic_group",
 		Text:      "run",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
@@ -3905,9 +4609,7 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 		"📌 计划",
 		"- ✅ 确认依赖和实体定义",
 		"- 🔄 梳理仓库 Mongo 约定",
-		"",
 		"✅ go test ./...",
-		"",
 		"💬 继续读取实体定义",
 	}, "\n")
 	if got[len(got)-1] != want {
@@ -4169,7 +4871,7 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 				MessageID: "om_msg",
 				ChatID:    session.Key.ChatID,
 				ThreadID:  session.Key.ThreadID,
-				ChatType:  "group",
+				ChatType:  "topic_group",
 				Text:      "run",
 				Mentions:  []feishu.Mention{testBotMention("智能助手")},
 			})
@@ -4247,7 +4949,7 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
-		ChatType:  "group",
+		ChatType:  "topic_group",
 		Text:      "run",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
 	})
@@ -4290,6 +4992,8 @@ func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 		BotID:     session.Key.BotID,
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
+		ChatType:  "topic_group",
+		Mentions:  testBotMentions(),
 		Text:      "run tests",
 		Workspace: session.Workspace,
 	})
@@ -4432,6 +5136,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithBootstrapContext(t *testing.T)
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
+		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	}
+	if !ok {
 		t.Fatalf("auto-created session not persisted")
 	}
 	if session.Workspace != workspace {
@@ -4463,6 +5170,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSessionWithoutReadyState(t *test
 		Workspace: workspace,
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
 		Text:      "/status",
 	})
@@ -4511,7 +5219,9 @@ func TestHandleFeishuMessageKeepsPersistedACPSessionAfterBootstrapDeleted(t *tes
 		Workspace: workspace,
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "你是谁",
 	})
 	if err != nil {
@@ -4565,7 +5275,9 @@ func TestHandleFeishuMessageRecreatesMissingACPSessionTitleUsesUserText(t *testi
 		Workspace: workspace,
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "请继续处理",
 		Reply: &feishu.ReplyContext{
 			MessageID: "om_parent",
@@ -4632,7 +5344,7 @@ func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) 
 	if len(rt.promptCalls) != 0 {
 		t.Fatalf("promptCalls = %+v, want /new to defer workspace context prompt", rt.promptCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
 		t.Fatalf("session not found")
 	}
 
@@ -4662,7 +5374,7 @@ func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) 
 	if !strings.Contains(contextPrompt, "## User Message") || !strings.Contains(contextPrompt, "介绍一下") {
 		t.Fatalf("workspace context prompt = %q, want user message", contextPrompt)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
 		t.Fatalf("session not found after next prompt")
 	}
 }
@@ -4691,6 +5403,8 @@ func TestHandleFeishuMessagePreservesACPStateUpdates(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    session.Key.ChatID,
 		ThreadID:  session.Key.ThreadID,
+		ChatType:  "topic_group",
+		Mentions:  testBotMentions(),
 		Text:      "介绍一下",
 	})
 	if err != nil {
@@ -4755,6 +5469,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 	}
 	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
+		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	}
+	if !ok {
 		t.Fatalf("auto-created session not persisted")
 	}
 	if session.Workspace != workspace {
@@ -4798,6 +5515,9 @@ func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 	}
 	session, ok := reloaded.Get(SessionKey{ChatID: "oc_chat", ThreadID: "omt_thread"})
 	if !ok {
+		session, ok = reloaded.Get(SessionKey{ChatID: "oc_chat"})
+	}
+	if !ok {
 		t.Fatalf("persisted session not found")
 	}
 	if session.Cwd != repo {
@@ -4831,7 +5551,7 @@ func TestHandleFeishuMessagePersistsSessionByBotID(t *testing.T) {
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
 		t.Fatalf("session with bot id not found")
 	}
 	if _, ok := store.Get(SessionKey{ChatID: "oc_chat", ThreadID: "omt_thread"}); ok {
@@ -4874,7 +5594,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if _, ok := reloaded.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}); !ok {
+	if _, ok := reloaded.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
 		t.Fatalf("persisted session not found in bot workspace store")
 	}
 }
@@ -5208,7 +5928,9 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_msg",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "/wiki INTERVAL 1s",
 	}
 
@@ -5232,7 +5954,9 @@ func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_off",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "/wiki OFF",
 	})
 	if err != nil {
@@ -5598,7 +6322,9 @@ func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_status",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "/wiki STATUS",
 	})
 	if err != nil {
@@ -5648,7 +6374,9 @@ func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_interval",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "/wiki interval 1s",
 	})
 	if err != nil {
@@ -5721,7 +6449,9 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 			BotID:     "bot-a",
 			MessageID: "om_first",
 			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
 			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
 			Text:      "先做这个长任务",
 		})
 		firstDone <- struct {
@@ -5736,7 +6466,9 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_second",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "改成做这个",
 	})
 	if err != nil {
@@ -5829,7 +6561,9 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 			BotID:     "bot-a",
 			MessageID: "om_first",
 			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
 			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
 			Text:      "先做这个长任务",
 		})
 		firstDone <- struct {
@@ -5843,7 +6577,9 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 		BotID:     "bot-a",
 		MessageID: "om_status",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "/status",
 	})
 	if err != nil {
@@ -5956,7 +6692,18 @@ func TestLoopCommandRunsUntilDoneAndUpdatesStartCard(t *testing.T) {
 func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{
+			Usage: acp.TokenUsage{InputTokens: 1200},
+		},
 		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "usage_update",
+					Used:          53000,
+					Size:          200000,
+				},
+			},
 			{
 				SessionID: "acp-session-1",
 				Update: acp.SessionUpdate{
@@ -5980,6 +6727,7 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
 	var streamMsgs []feishu.Message
+	var cards []*fakeStreamCard
 	ctx := withFakeSentMessageClient(context.Background(), client)
 	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
@@ -5987,7 +6735,9 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	})
 	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		streamMsgs = append(streamMsgs, msg)
-		return &fakeStreamCard{}, nil
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
 	})
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
@@ -6012,6 +6762,16 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	}
 	if len(streamMsgs) != 1 || streamMsgs[0].MessageID != "om_loop_start" || !streamMsgs[0].ForceReplyInThread {
 		t.Fatalf("stream messages = %+v, want thread reply to loop start message", streamMsgs)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	statusUpdates := cards[0].statusUpdatesSnapshot()
+	if !containsStringWithAll(statusUpdates, "L1 执行中 | 53K/200K") {
+		t.Fatalf("status updates = %+v, want L1 running status", statusUpdates)
+	}
+	if !containsStringWithAll(statusUpdates, "L1 已完成 | 1.2K | 53K/200K") {
+		t.Fatalf("status updates = %+v, want L1 completed status", statusUpdates)
 	}
 	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
 		t.Fatalf("text updates = %#v, want loop status card updates only", textUpdates)
@@ -6275,7 +7035,7 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 		t.Fatalf("prompt calls = %d, want loop prompt and replacement user prompt", rt.promptCallCount())
 	}
 	updates := client.updatesSnapshot()
-	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已取消") {
+	if !containsStringWithAll(updates, "状态：已完成", "结束原因：已被新消息打断") {
 		t.Fatalf("updates = %#v, want cancelled loop start message update", updates)
 	}
 	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {
@@ -6284,7 +7044,7 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	svc.taskMu.Lock()
 	status := svc.loopStatuses[key]
 	svc.taskMu.Unlock()
-	if status.running || status.reason != "已取消" {
+	if status.running || status.reason != "已被新消息打断" {
 		t.Fatalf("loop status = %+v, want cancelled by new message", status)
 	}
 }
@@ -6557,7 +7317,9 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 		BotID:     "bot-a",
 		MessageID: "om_user",
 		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
 		Text:      "先处理我的新问题",
 	})
 	if err != nil {

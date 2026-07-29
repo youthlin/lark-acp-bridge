@@ -49,6 +49,10 @@ type promptToolRow struct {
 }
 
 func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session, show ChatConfig) *promptCardStream {
+	return newPromptCardStreamWithStatusPrefix(ctx, msg, session, show, "")
+}
+
+func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message, session Session, show ChatConfig, statusPrefix string) *promptCardStream {
 	return &promptCardStream{
 		ctx:              ctx,
 		msg:              msg,
@@ -60,7 +64,7 @@ func newPromptCardStream(ctx context.Context, msg feishu.Message, session Sessio
 		showTools:        !show.HideTools,
 		showStatusBar:    !show.HideStatusBar,
 		showUsageDetail:  !show.HideUsageDetail,
-		status:           promptStatusBar{state: promptStatusRunning},
+		status:           promptStatusBar{state: promptStatusRunning, prefix: strings.TrimSpace(statusPrefix)},
 	}
 }
 
@@ -437,7 +441,7 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 }
 
 func processPanelText(entries []string) string {
-	return truncateProcessText(strings.Join(entries, "\n\n"))
+	return truncateProcessText(strings.Join(entries, "\n"))
 }
 
 func (s *promptCardStream) finishProcessStream() {

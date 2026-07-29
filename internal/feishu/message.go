@@ -72,8 +72,12 @@ func (m Message) IsPrivateChat() bool {
 	return strings.EqualFold(m.ChatType, "p2p")
 }
 
+func (m Message) IsTopicGroup() bool {
+	return strings.EqualFold(m.ChatType, "topic_group")
+}
+
 func (m Message) IsTopicThread() bool {
-	return !m.IsPrivateChat() && strings.TrimSpace(m.ThreadID) != ""
+	return m.IsTopicGroup() && strings.TrimSpace(m.ThreadID) != ""
 }
 
 func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {

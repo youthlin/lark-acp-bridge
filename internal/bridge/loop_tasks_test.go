@@ -18,6 +18,7 @@ func TestUpdateLoopAnchorIgnoresCanceledParentContext(t *testing.T) {
 	client := newFakeSentMessageClient("om_loop_start")
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
+	started := time.Now().Add(-2 * time.Minute)
 	anchor := loopAnchor{
 		message: feishu.Message{MessageID: "om_loop_start"},
 		request: loopRequest{Prompt: "持续推进", Interval: time.Second},
@@ -26,14 +27,153 @@ func TestUpdateLoopAnchorIgnoresCanceledParentContext(t *testing.T) {
 			message:               feishu.SentMessage{MessageID: "om_loop_start"},
 			failOnCanceledContext: true,
 		},
+		started: started,
 	}
 
 	if !svc.updateLoopAnchor(parent, anchor, loopProgressFinished, 0, "agent 返回 DONE") {
 		t.Fatal("updateLoopAnchor() = false, want update with detached context")
 	}
 	finishes := client.finishesSnapshot()
-	if len(finishes) != 1 || !strings.Contains(finishes[0], "状态：已完成") || !strings.Contains(finishes[0], "结束原因：agent 返回 DONE") {
+	if len(finishes) != 1 || !strings.Contains(finishes[0], "状态：已完成") || !strings.Contains(finishes[0], "结束原因：agent 返回 DONE") || !strings.Contains(finishes[0], "已运行：") {
 		t.Fatalf("finishes = %#v, want completed finish update", finishes)
+	}
+}
+
+func TestLoopAnchorTextIncludesElapsedDuration(t *testing.T) {
+	started := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	now := started.Add(2*time.Minute + 3*time.Second)
+	text := loopAnchorText(loopRequest{Prompt: "持续推进", Interval: time.Second}, loopProgressRunning, 2, "", started, now)
+
+	for _, want := range []string{
+		"状态：第 2 轮运行中",
+		"已运行：2m3s",
+		"更新时间：2026-07-29T00:02:03Z",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("loopAnchorText() = %q, want %q", text, want)
+		}
+	}
+}
+
+func TestHandleLoopHowCommandReturnsRecommendedCommand(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "/loop -t 0 -n 0 -i 30s 持续修复 todo.md 中的优化项"}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		Workspace: t.TempDir(),
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Text:      "/loop how 持续修复 todo.md 中的优化项",
+	}
+
+	reply := svc.handleLoopCommand(context.Background(), msg.Text, msg)
+	for _, want := range []string{
+		"/loop -t 0 -n 0 -i 30s 持续修复 todo.md 中的优化项",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	if rt.promptCallCount() != 1 {
+		t.Fatalf("prompt calls = %d, want /loop how to ask model once", rt.promptCallCount())
+	}
+	rt.mu.Lock()
+	prompt := rt.promptCalls[0].Text
+	rt.mu.Unlock()
+	for _, want := range []string{
+		"持续修复 todo.md 中的优化项",
+		"最终只返回一条 /loop 命令",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+	if len(svc.loopStatuses) != 0 {
+		t.Fatalf("loopStatuses = %+v, want no started loop", svc.loopStatuses)
+	}
+}
+
+func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{{Text: "继续"}, {Text: "DONE"}},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), client)
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/loop -n 2 -i 1ms 持续推进",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after sending loop start message", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	addReply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/loop add 补充上下文：优先检查 todo.md",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop add) error = %v", err)
+	}
+	if addReply != "已追加到下一轮 loop prompt，下一轮执行完成后自动清空。" {
+		t.Fatalf("add reply = %q, want success confirmation", addReply)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want /loop add not to cancel running loop", got)
+	}
+
+	close(rt.blockPrompt)
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	rt.mu.Lock()
+	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if strings.Contains(calls[0].Text, "## 本轮补充消息") || strings.Contains(calls[0].Text, "补充上下文：优先检查 todo.md") {
+		t.Fatalf("first loop prompt = %q, want no supplement in current round", calls[0].Text)
+	}
+	for _, want := range []string{
+		"round: 2",
+		"## 本轮补充消息",
+		"补充上下文：优先检查 todo.md",
+	} {
+		if !strings.Contains(calls[1].Text, want) {
+			t.Fatalf("second loop prompt = %q, want %q", calls[1].Text, want)
+		}
+	}
+
+	svc.taskMu.Lock()
+	status := svc.loopStatuses[key]
+	svc.taskMu.Unlock()
+	if status.pendingAdd != "" {
+		t.Fatalf("loop status pendingAdd = %q, want consumed after next round prompt", status.pendingAdd)
 	}
 }
 
@@ -134,7 +274,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 		BotID:     "bot-a",
 		MessageID: "om_user",
 		ChatID:    "oc_chat",
-		ChatType:  "group",
+		ChatType:  "topic_group",
 		ThreadID:  "omt_thread",
 		Text:      "@智能助手 /loop -n 0 -i 1ms 长循环",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},

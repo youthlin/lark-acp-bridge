@@ -129,7 +129,7 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 		t.Fatalf("processUpdates = %+v, want second process update throttled", got)
 	}
 	stream.close()
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\n\ntwo" {
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\ntwo" {
 		t.Fatalf("processUpdates = %+v, want pending process flushed on close", got)
 	}
 }

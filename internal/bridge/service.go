@@ -30,6 +30,8 @@ type Service struct {
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
 	loopStatuses    map[SessionKey]loopRunStatus
+	pendingAtTexts  map[ChatKey][]pendingAtMessage
+	pendingAtAuto   map[SessionKey][]pendingAtMessage
 
 	acpUpdateMu    sync.Mutex
 	acpUpdateUnsub map[SessionKey]func()
@@ -51,6 +53,8 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		wikiGenerations: make(map[SessionKey]int64),
 		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
 		loopStatuses:    make(map[SessionKey]loopRunStatus),
+		pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
+		pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
 		acpUpdateUnsub:  make(map[SessionKey]func()),
 	}
 	for _, bot := range cfg.Bots {
@@ -103,12 +107,15 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		msg.BotOpenID = s.botOpenID(msg.BotID)
 	}
 	text := strings.TrimSpace(msg.Text)
-	text = stripMentionNames(text, msg.Mentions)
+	text = stripCurrentBotMentionNames(text, msg)
 	msg.Text = text
 	promptText := strings.TrimSpace(msg.PromptText())
 	slog.DebugContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
 
 	if s.shouldIgnoreMessage(msg, text) {
+		if !strings.HasPrefix(text, "/") {
+			s.cachePendingAtText(msg)
+		}
 		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
 		return "", nil
 	}
@@ -136,5 +143,12 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return s.handleCommand(ctx, text, msg), nil
 	}
 	// 普通消息
+	promptText = s.promptTextWithPendingAtTexts(msg, promptText)
+	if s.shouldQueueAtAutoMessage(msg) {
+		if s.queueAtAutoMessageIfBusy(msg) {
+			return "", nil
+		}
+		promptText = s.promptTextWithAtAuto(msg, promptText)
+	}
 	return s.prompt(ctx, msg, promptText)
 }

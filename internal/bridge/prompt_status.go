@@ -24,6 +24,7 @@ const (
 type promptStatusBar struct {
 	state       promptStatusState
 	stopReason  string
+	prefix      string
 	input       int64
 	cachedInput int64
 	output      int64
@@ -54,7 +55,11 @@ func (s *promptStatusBar) applyPromptResult(result acp.PromptResult) {
 }
 
 func (s promptStatusBar) text() string {
-	parts := []string{promptStatusStateLabel(s.state, s.stopReason)}
+	label := promptStatusStateLabel(s.state, s.stopReason)
+	if prefix := strings.TrimSpace(s.prefix); prefix != "" {
+		label = prefix + " " + label
+	}
+	parts := []string{label}
 	if tokenUsage := formatPromptTokenUsage(s.input, s.cachedInput, s.output); tokenUsage != "" {
 		parts = append(parts, tokenUsage)
 	}

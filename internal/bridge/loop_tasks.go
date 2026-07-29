@@ -22,6 +22,7 @@ type loopRunStatus struct {
 	maxDuration time.Duration
 	interval    time.Duration
 	prompt      string
+	pendingAdd  string
 	reason      string
 	lastError   string
 }
@@ -39,12 +40,27 @@ type loopAnchor struct {
 	message feishu.Message
 	request loopRequest
 	card    feishu.LoopStatusCard
+	started time.Time
 }
 
 func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) >= 2 {
 		switch strings.ToLower(strings.TrimSpace(fields[1])) {
+		case "add":
+			return s.handleLoopAddCommand(ctx, msg, strings.TrimSpace(commandRemainder(text, 2)))
+		case "how":
+			// /loop how is intentionally handled as a normal user prompt so the
+			// model can use the current ACP session context to refine the command.
+			prompt, err := loopHowPrompt(strings.TrimSpace(commandRemainder(text, 2)))
+			if err != nil {
+				return err.Error()
+			}
+			reply, err := s.prompt(ctx, msg, prompt)
+			if err != nil {
+				return "生成 loop 命令失败：" + err.Error()
+			}
+			return reply
 		case "status":
 			return s.loopStatus(msg)
 		case "stop":
@@ -71,7 +87,8 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	}
 	s.subscribeACPStateUpdates(ctx, msg, prepared.session.Key)
 	session := s.updateAutomaticSessionTitle(ctx, msg, prepared.session, req.Prompt)
-	startText := loopAnchorText(req, loopProgressStarted, 0, "", time.Now())
+	started := time.Now()
+	startText := loopAnchorText(req, loopProgressStarted, 0, "", started, started)
 	cardReq := feishu.LoopStatusCardRequest{
 		BotID:        session.Key.BotID,
 		ChatID:       session.Key.ChatID,
@@ -82,16 +99,21 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	if card, ok, err := feishu.SendLoopStatusCard(ctx, msg, cardReq); err != nil {
 		return "启动 loop 失败：" + err.Error()
 	} else if ok {
-		anchor := loopAnchor{message: loopAnchorMessage(msg, card.Message()), request: req, card: card}
-		s.startLoop(ctx, msg, anchor, session, prepared.agent, req)
+		anchor := loopAnchor{message: loopAnchorMessage(msg, card.Message()), request: req, card: card, started: started}
+		s.startLoop(ctx, msg, anchor, session, prepared.agent, req, started)
 		return ""
 	}
-	s.startLoop(ctx, msg, loopAnchor{}, session, prepared.agent, req)
+	s.startLoop(ctx, msg, loopAnchor{started: started}, session, prepared.agent, req, started)
 	return startText
 }
 
-func (s *Service) startLoop(ctx context.Context, msg feishu.Message, anchor loopAnchor, session Session, agent config.AgentConfig, req loopRequest) {
-	started := time.Now()
+func (s *Service) startLoop(ctx context.Context, msg feishu.Message, anchor loopAnchor, session Session, agent config.AgentConfig, req loopRequest, started time.Time) {
+	if started.IsZero() {
+		started = time.Now()
+	}
+	if anchor.started.IsZero() {
+		anchor.started = started
+	}
 	ctx, finish := s.startTask(context.WithoutCancel(ctx), session, agent, taskKindLoop)
 	s.markLoopStarted(session.Key, started, req)
 	s.setTaskCancelHandler(session.Key, func(cancelCtx context.Context, reason string) {
@@ -121,8 +143,8 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 		}
 		s.markLoopRound(session.Key, started, round)
 		s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
-		roundPrompt := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, loopPrompt(basePrompt, req, round, started, deadline))
-		result, _, rawResult, streamedReply, err := s.promptRuntimeWithProgressRaw(ctx, cardMsg, session, agent, roundPrompt)
+		roundPrompt := promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, loopPrompt(basePrompt, s.takeLoopPendingAdd(session.Key, started), req, round, started, deadline))
+		result, _, rawResult, streamedReply, err := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round))
 		s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -152,7 +174,7 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 	}
 }
 
-func loopPrompt(promptText string, req loopRequest, round int, started time.Time, deadline time.Time) string {
+func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int, started time.Time, deadline time.Time) string {
 	maxDuration := "不限"
 	if req.MaxDuration > 0 {
 		maxDuration = formatDuration(req.MaxDuration)
@@ -181,7 +203,23 @@ func loopPrompt(promptText string, req loopRequest, round int, started time.Time
 			"不要因为这是循环任务而空转。",
 		}, "\n"),
 	}
-	return promptWithUserMessage(prefixes, promptText)
+	userMessage := strings.TrimSpace(promptText)
+	if strings.TrimSpace(pendingAdd) != "" {
+		userMessage = strings.Join([]string{
+			userMessage,
+			"",
+			"## 本轮补充消息",
+			strings.TrimSpace(pendingAdd),
+		}, "\n")
+	}
+	return promptWithUserMessage(prefixes, userMessage)
+}
+
+func loopStatusPrefix(round int) string {
+	if round <= 0 {
+		return ""
+	}
+	return "L" + strconv.Itoa(round)
 }
 
 func loopDone(text string) bool {
@@ -228,7 +266,7 @@ func (s *Service) updateLoopAnchor(ctx context.Context, anchor loopAnchor, state
 	if anchor.card == nil {
 		return false
 	}
-	text := loopAnchorText(anchor.request, state, round, reason, time.Now())
+	text := loopAnchorText(anchor.request, state, round, reason, anchor.started, time.Now())
 	cardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	var err error
@@ -245,7 +283,7 @@ func (s *Service) updateLoopAnchor(ctx context.Context, anchor loopAnchor, state
 	return true
 }
 
-func loopAnchorText(req loopRequest, state loopProgressState, round int, reason string, now time.Time) string {
+func loopAnchorText(req loopRequest, state loopProgressState, round int, reason string, started time.Time, now time.Time) string {
 	lines := []string{
 		"已启动 loop。",
 		formatLoopRequest(req),
@@ -254,6 +292,9 @@ func loopAnchorText(req loopRequest, state loopProgressState, round int, reason 
 	}
 	if strings.TrimSpace(reason) != "" {
 		lines = append(lines, "结束原因："+strings.TrimSpace(reason))
+	}
+	if !started.IsZero() && !now.IsZero() {
+		lines = append(lines, "已运行："+nonNegativeDuration(now.Sub(started)).String())
 	}
 	if !now.IsZero() {
 		lines = append(lines, "更新时间："+now.Format(time.RFC3339))
@@ -294,6 +335,13 @@ func loopProgressText(state loopProgressState, round int) string {
 	}
 }
 
+func nonNegativeDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
 func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopRequest) {
 	s.taskMu.Lock()
 	s.loopStatuses[key] = loopRunStatus{
@@ -310,7 +358,7 @@ func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopReq
 func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
 	s.taskMu.Lock()
 	status := s.loopStatuses[key]
-	if status.started == started {
+	if status.started.Equal(started) {
 		status.running = true
 		status.round = round
 		s.loopStatuses[key] = status
@@ -318,10 +366,55 @@ func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
 	s.taskMu.Unlock()
 }
 
+func (s *Service) handleLoopAddCommand(ctx context.Context, msg feishu.Message, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "请提供要追加到下一轮 loop prompt 的补充消息，例如 /loop add 补充说明。"
+	}
+	session, ok := s.findSession(msg)
+	if !ok {
+		return "当前会话没有正在运行的 loop。"
+	}
+	if !s.addLoopPendingMessage(session.Key, text) {
+		return "当前会话没有正在运行的 loop。"
+	}
+	return "已追加到下一轮 loop prompt，下一轮执行完成后自动清空。"
+}
+
+func (s *Service) addLoopPendingMessage(key SessionKey, text string) bool {
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status, ok := s.loopStatuses[key]
+	if !ok || !status.running {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	if status.pendingAdd == "" {
+		status.pendingAdd = text
+	} else {
+		status.pendingAdd = strings.TrimSpace(status.pendingAdd + "\n\n" + text)
+	}
+	s.loopStatuses[key] = status
+	return true
+}
+
+func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status, ok := s.loopStatuses[key]
+	if !ok || status.started != started || status.pendingAdd == "" {
+		return ""
+	}
+	pending := status.pendingAdd
+	status.pendingAdd = ""
+	s.loopStatuses[key] = status
+	return pending
+}
+
 func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason string, err error) {
 	s.taskMu.Lock()
 	status := s.loopStatuses[key]
-	if status.started == started {
+	if status.started.Equal(started) {
 		if errors.Is(err, context.Canceled) && !status.running && status.reason != "" {
 			s.taskMu.Unlock()
 			return

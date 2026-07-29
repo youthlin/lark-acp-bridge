@@ -424,7 +424,7 @@ func sessionLabel(msg feishu.Message) string {
 }
 
 func isTopicGroupMessage(msg feishu.Message) bool {
-	return strings.EqualFold(msg.ChatType, "group") && msg.IsTopicThread()
+	return msg.IsTopicGroup()
 }
 
 func displayBotID(botID string) string {

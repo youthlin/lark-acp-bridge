@@ -9,6 +9,20 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
+const (
+	atModeAuto             = "auto"
+	atModeEvery            = "every"
+	maxPendingAtMessages   = 100
+	maxPendingAtAuto       = 100
+	pendingAtHistoryHeader = "## 以下是当前对话历史消息"
+	pendingAtAutoHeader    = "## 以下是待判断是否需要响应的群消息"
+)
+
+type pendingAtMessage struct {
+	SenderID string
+	Text     string
+}
+
 func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, text string) string {
 	store := s.storeForMessage(msg)
 	if store == nil {
@@ -224,6 +238,171 @@ func (s *Service) shouldIgnoreMessage(msg feishu.Message, text string) bool {
 	return !messageMentionsBot(msg)
 }
 
+func (s *Service) cachePendingAtText(msg feishu.Message) {
+	entry := pendingAtMessageFromMessage(msg)
+	if strings.TrimSpace(entry.Text) == "" {
+		return
+	}
+	key := chatKeyFromMessage(msg)
+	if !key.Valid() {
+		return
+	}
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	pending := append(s.pendingAtTexts[key], entry)
+	if len(pending) > maxPendingAtMessages {
+		pending = append([]pendingAtMessage(nil), pending[len(pending)-maxPendingAtMessages:]...)
+	}
+	s.pendingAtTexts[key] = pending
+}
+
+func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText string) string {
+	if !messageIsGroupChat(msg) || !s.chatRequiresMention(msg) || !messageMentionsBot(msg) {
+		return promptText
+	}
+	key := chatKeyFromMessage(msg)
+	if !key.Valid() {
+		return promptText
+	}
+	s.taskMu.Lock()
+	pending := append([]pendingAtMessage(nil), s.pendingAtTexts[key]...)
+	delete(s.pendingAtTexts, key)
+	s.taskMu.Unlock()
+	if len(pending) == 0 {
+		return promptText
+	}
+	return promptWithUserMessage([]string{
+		formatPendingAtHistory(pending),
+	}, formatCurrentAtUserMessage(msg, promptText))
+}
+
+func pendingAtMessageFromMessage(msg feishu.Message) pendingAtMessage {
+	return pendingAtMessage{
+		SenderID: strings.TrimSpace(msg.SenderID),
+		Text:     strings.TrimSpace(msg.PromptText()),
+	}
+}
+
+func formatPendingAtHistory(messages []pendingAtMessage) string {
+	return formatPendingAtMessageBlock(pendingAtHistoryHeader, messages)
+}
+
+func formatPendingAtMessageBlock(header string, messages []pendingAtMessage) string {
+	lines := []string{header}
+	for _, message := range messages {
+		text := strings.TrimSpace(message.Text)
+		if text == "" {
+			continue
+		}
+		lines = append(lines, formatPendingAtMessageLine(message.SenderID, text))
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatCurrentAtUserMessage(msg feishu.Message, promptText string) string {
+	promptText = strings.TrimSpace(promptText)
+	if promptText == "" {
+		return promptText
+	}
+	lines := []string{
+		"sender：" + formatPendingAtSender(msg.SenderID),
+		"content：" + promptText,
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatPendingAtMessageLine(senderID string, text string) string {
+	return fmt.Sprintf("%s：%s", formatPendingAtSender(senderID), text)
+}
+
+func formatPendingAtSender(senderID string) string {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return "用户"
+	}
+	return "用户(" + senderID + ")"
+}
+
+func (s *Service) promptTextWithAtAuto(msg feishu.Message, promptText string) string {
+	if s.chatAtMode(msg) != atModeAuto || messageMentionsBot(msg) {
+		return promptText
+	}
+	promptText = strings.TrimSpace(promptText)
+	if promptText == "" {
+		return promptText
+	}
+	return promptWithUserMessage([]string{
+		"## 群聊自动响应判断\n" + strings.Join([]string{
+			"当前群聊已启用 /at off auto。",
+			"请先判断这条未 at bot 的群消息是否需要你回复。",
+			"如果消息与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT。",
+			"如果需要回复，请正常处理用户消息，不要解释本判断规则。",
+		}, "\n"),
+	}, promptText)
+}
+
+func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {
+	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg)
+}
+
+func (s *Service) queueAtAutoMessageIfBusy(msg feishu.Message) bool {
+	entry := pendingAtMessageFromMessage(msg)
+	if strings.TrimSpace(entry.Text) == "" {
+		return false
+	}
+	session, ok := s.findSession(msg)
+	if !ok {
+		return false
+	}
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	task := s.tasks[session.Key]
+	if task == nil || !task.drainPendingAtAuto {
+		return false
+	}
+	pending := append(s.pendingAtAuto[session.Key], entry)
+	if len(pending) > maxPendingAtAuto {
+		pending = append([]pendingAtMessage(nil), pending[len(pending)-maxPendingAtAuto:]...)
+	}
+	s.pendingAtAuto[session.Key] = pending
+	return true
+}
+
+func (s *Service) takePendingAtAutoMessages(key SessionKey) []pendingAtMessage {
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	pending := append([]pendingAtMessage(nil), s.pendingAtAuto[key]...)
+	delete(s.pendingAtAuto, key)
+	return pending
+}
+
+func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
+	history := formatPendingAtMessageBlock(pendingAtAutoHeader, messages)
+	if history == "" {
+		return ""
+	}
+	return promptWithUserMessage([]string{
+		"## 群聊自动响应判断\n" + strings.Join([]string{
+			"当前群聊已启用 /at off auto。",
+			"请判断下面这些未 at bot 的群消息是否需要你回复。",
+			"这些消息是在上一轮正常用户消息执行期间累积的，请结合当前会话上下文整体判断。",
+			"如果它们与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT。",
+			"如果需要回复，请只回复一次，综合处理这些消息，不要解释本判断规则。",
+		}, "\n"),
+	}, history)
+}
+
+func (s *Service) shouldSuppressAtAutoReply(msg feishu.Message, reply string) bool {
+	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg) && strings.EqualFold(strings.TrimSpace(reply), "SILENT")
+}
+
+func (s *Service) shouldDelayAtAutoProgress(msg feishu.Message) bool {
+	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg)
+}
+
 func (s *Service) chatRequiresMention(msg feishu.Message) bool {
 	if !messageIsGroupChat(msg) {
 		return false
@@ -239,6 +418,28 @@ func (s *Service) chatRequiresMention(msg feishu.Message) bool {
 	return !chat.MentionOptional
 }
 
+func (s *Service) chatAtMode(msg feishu.Message) string {
+	if !messageIsGroupChat(msg) {
+		return ""
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return ""
+	}
+	chat, ok := store.GetChat(chatKeyFromMessage(msg))
+	if !ok {
+		return ""
+	}
+	mode := strings.ToLower(strings.TrimSpace(chat.AtMode))
+	if mode != "" {
+		return mode
+	}
+	if chat.MentionOptional {
+		return atModeEvery
+	}
+	return ""
+}
+
 func messageMentionsBot(msg feishu.Message) bool {
 	botOpenID := strings.TrimSpace(msg.BotOpenID)
 	if botOpenID == "" {
@@ -252,6 +453,32 @@ func messageMentionsBot(msg feishu.Message) bool {
 	return false
 }
 
+func stripCurrentBotMentionNames(text string, msg feishu.Message) string {
+	text = strings.TrimSpace(text)
+	botOpenID := strings.TrimSpace(msg.BotOpenID)
+	for _, mention := range msg.Mentions {
+		name := strings.TrimSpace(mention.Name)
+		if name == "" {
+			continue
+		}
+		mentionID := strings.TrimSpace(mention.ID)
+		if botOpenID != "" && mentionID == botOpenID {
+			text = strings.ReplaceAll(text, "@"+name, "")
+			continue
+		}
+		if mentionID == "" {
+			text = strings.ReplaceAll(text, "@"+name, "")
+			continue
+		}
+		replacement := "@" + name
+		if mentionID != "" {
+			replacement += "(" + mentionID + ")"
+		}
+		text = strings.ReplaceAll(text, "@"+name, replacement)
+	}
+	return strings.TrimSpace(text)
+}
+
 func (s *Service) botOpenID(botID string) string {
 	botID = strings.TrimSpace(botID)
 	for _, bot := range s.cfg.Bots {
@@ -263,7 +490,7 @@ func (s *Service) botOpenID(botID string) string {
 }
 
 func messageIsGroupChat(msg feishu.Message) bool {
-	return strings.EqualFold(msg.ChatType, "group")
+	return strings.EqualFold(msg.ChatType, "group") || msg.IsTopicGroup()
 }
 
 func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text string) string {
@@ -282,26 +509,50 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 	if len(fields) >= 2 {
 		action = strings.ToLower(strings.TrimSpace(fields[1]))
 	}
+	mode := ""
+	if len(fields) >= 3 {
+		mode = strings.ToLower(strings.TrimSpace(fields[2]))
+	}
 	if action == "" || action == "status" {
 		return s.formatAtStatus(msg)
 	}
 	chat := s.chatConfigForMessage(msg)
 	switch action {
 	case "on":
+		if mode != "" {
+			return atCommandUsage()
+		}
+		chat.AtMode = ""
 		chat.MentionOptional = false
 	case "off":
-		chat.MentionOptional = true
+		if mode == "" {
+			mode = atModeEvery
+		}
+		switch mode {
+		case atModeAuto, atModeEvery:
+			chat.AtMode = mode
+			chat.MentionOptional = true
+		default:
+			return atCommandUsage()
+		}
 	default:
-		return "请使用 /at status、/at on 或 /at off。"
+		return atCommandUsage()
 	}
 	if err := store.UpsertChat(chat); err != nil {
 		slog.ErrorContext(ctx, "保存群聊 at 配置失败", "chat", msg.ChatID, "错误", err)
 		return "保存群聊 at 配置失败：" + err.Error()
 	}
 	if chat.MentionOptional {
-		return "已设置当前群聊：无需 at 也会响应。"
+		if chat.AtMode == atModeAuto {
+			return "已设置当前群聊：无需 at 也会进入自动判断。"
+		}
+		return "已设置当前群聊：每条消息都会响应，无需 at。"
 	}
 	return "已设置当前群聊：需要 at 才响应。"
+}
+
+func atCommandUsage() string {
+	return "请使用 /at status、/at on、/at off auto 或 /at off every。"
 }
 
 func (s *Service) formatAtStatus(msg feishu.Message) string {
@@ -311,8 +562,11 @@ func (s *Service) formatAtStatus(msg feishu.Message) string {
 	if !messageIsGroupChat(msg) {
 		return "当前会话类型不支持 /at 配置。"
 	}
-	if s.chatRequiresMention(msg) {
-		return "当前群聊：需要 at 才响应。\n使用 /at off 可改为免 at。"
+	if s.chatAtMode(msg) == atModeAuto {
+		return "当前群聊：无需 at 也会进入自动判断。\n使用 /at off every 可改为每条消息都响应；使用 /at on 可恢复为需要 at。"
 	}
-	return "当前群聊：无需 at 也会响应。\n使用 /at on 可恢复为需要 at。"
+	if s.chatRequiresMention(msg) {
+		return "当前群聊：需要 at 才响应。\n使用 /at off auto 可改为自动判断；使用 /at off every 可改为每条消息都响应。"
+	}
+	return "当前群聊：每条消息都会响应，无需 at。\n使用 /at on 可恢复为需要 at。"
 }

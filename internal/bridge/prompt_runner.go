@@ -17,6 +17,11 @@ import (
 
 const promptCardFinalUpdateLimit = 15 * time.Second
 
+type promptSessionOptions struct {
+	SkipPostPromptWork     bool
+	SkipPendingAtAutoDrain bool
+}
+
 type preparedPrompt struct {
 	session Session
 	agent   config.AgentConfig
@@ -25,6 +30,10 @@ type preparedPrompt struct {
 }
 
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
+	return s.promptWithOptions(ctx, msg, text, promptSessionOptions{})
+}
+
+func (s *Service) promptWithOptions(ctx context.Context, msg feishu.Message, text string, opts promptSessionOptions) (string, error) {
 	prepared, err := s.preparePrompt(ctx, msg, text)
 	if err != nil {
 		return "", err
@@ -32,7 +41,7 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 	if prepared.errText != "" {
 		return prepared.errText, nil
 	}
-	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, text)
+	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, text, opts)
 }
 
 func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (preparedPrompt, error) {
@@ -69,7 +78,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 	return preparedPrompt{session: session, agent: agent, text: text}, nil
 }
 
-func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string) (string, error) {
+func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string, opts promptSessionOptions) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	result, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
 	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
@@ -81,7 +90,13 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		result, sentProgress, err = s.runUserPrompt(ctx, msg, session, agent, text)
 	}
 	reply := result.Text
-	if !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
+	if !opts.SkipPostPromptWork && err == nil {
+		s.scheduleWikiAfterUserPrompt(session, agent)
+	}
+	if s.shouldSuppressAtAutoReply(msg, reply) {
+		return "", nil
+	}
+	if !opts.SkipPostPromptWork && !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
 		session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
 	}
 	if err != nil {
@@ -102,7 +117,46 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		}
 		return "ACP session 已完成，但没有返回文本。", nil
 	}
+	if !opts.SkipPendingAtAutoDrain {
+		s.runPendingAtAutoAsync(ctx, msg, session, agent)
+	}
 	return reply, nil
+}
+
+func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) {
+	if s.chatAtMode(msg) != atModeAuto || !messageMentionsBot(msg) {
+		return
+	}
+	pending := s.takePendingAtAutoMessages(session.Key)
+	if len(pending) == 0 {
+		return
+	}
+	promptText := formatAtAutoPendingPrompt(pending)
+	if strings.TrimSpace(promptText) == "" {
+		return
+	}
+	autoMsg := msg
+	autoMsg.Text = promptText
+	autoMsg.Mentions = nil
+	autoMsg.ForceReplyInThread = true
+	go func() {
+		reply, err := s.promptSession(context.WithoutCancel(ctx), autoMsg, session, agent, promptText, promptText, promptSessionOptions{
+			SkipPostPromptWork:     true,
+			SkipPendingAtAutoDrain: true,
+		})
+		if err != nil {
+			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
+			return
+		}
+		if strings.TrimSpace(reply) == "" {
+			return
+		}
+		if ok, err := feishu.SendIntermediateReply(context.WithoutCancel(ctx), autoMsg, reply); err != nil {
+			slog.WarnContext(context.WithoutCancel(ctx), "发送待处理群聊 auto 回复失败", "错误", err)
+		} else if !ok {
+			slog.WarnContext(context.WithoutCancel(ctx), "缺少待处理群聊 auto 回复发送器")
+		}
+	}()
 }
 
 func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) (Session, error) {
@@ -136,14 +190,13 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
-	ctx, finish := s.startTask(ctx, session, agent, taskKindUser)
+	ctx, finish := s.startTaskWithOptions(ctx, session, agent, taskKindUser, runningTaskOptions{
+		drainPendingAtAuto: s.chatAtMode(msg) == atModeAuto && messageMentionsBot(msg),
+	})
 	defer finish()
 	result, sentProgress, err := s.promptRuntimeWithProgress(ctx, msg, session, agent, text)
 	if errors.Is(err, context.Canceled) {
 		return result, sentProgress, err
-	}
-	if err == nil {
-		s.scheduleWikiAfterUserPrompt(session, agent)
 	}
 	return result, sentProgress, err
 }
@@ -154,8 +207,27 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 }
 
 func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
-	slog.InfoContext(ctx, "准备发送消息给ACP后端")
-	stream := newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg))
+	return s.promptRuntimeWithProgressRawStatusPrefix(ctx, msg, session, agent, text, "")
+}
+
+func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
+	if s.shouldDelayAtAutoProgress(msg) {
+		opts := acp.PromptOptions{
+			OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+				outcome, ok, err := feishu.RequestPermission(reqCtx, msg, req)
+				if err != nil {
+					return acp.PermissionOutcome{}, err
+				}
+				if ok {
+					return outcome, nil
+				}
+				return defaultPermissionOutcome(req), nil
+			},
+		}
+		result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
+		return result, false, result, "", err
+	}
+	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix)
 	chunks := newPromptChunkAccumulator(stream)
 	flushStreams := func() {
 		chunks.finishStream()

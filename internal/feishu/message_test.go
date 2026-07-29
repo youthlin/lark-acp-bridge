@@ -137,8 +137,13 @@ func TestReplyInThreadForMessage(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "topic group replies in topic",
+			name: "ordinary group thread id does not force topic mode",
 			msg:  Message{ChatType: "group", MessageID: "om_topic", ThreadID: "omt_topic"},
+			want: false,
+		},
+		{
+			name: "topic group replies in topic",
+			msg:  Message{ChatType: "topic_group", MessageID: "om_topic", ThreadID: "omt_topic"},
 			want: true,
 		},
 		{
@@ -152,9 +157,9 @@ func TestReplyInThreadForMessage(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "unknown chat type thread id keeps legacy topic behavior",
+			name: "unknown chat type thread id does not imply topic mode",
 			msg:  Message{MessageID: "om_unknown_thread", ThreadID: "omt_thread"},
-			want: true,
+			want: false,
 		},
 		{
 			name: "unknown chat type root id does not force topic reply",
