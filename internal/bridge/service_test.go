@@ -2742,14 +2742,20 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(group no mention after auto reply) error = %v", err)
 	}
-	if reply != "需要回复" {
-		t.Fatalf("reply = %q, want final ACP reply in auto mode", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because delayed auto card was sent", reply)
 	}
 	if len(rt.promptCalls) != 2 {
 		t.Fatalf("promptCalls = %+v, want second auto prompt", rt.promptCalls)
 	}
-	if len(cards) != 0 {
-		t.Fatalf("cards = %+v, want no delayed auto stream card even when reply is needed", cards)
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one delayed auto stream card when reply is needed", cards)
+	}
+	if got := cards[0].textUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "需要回复" {
+		t.Fatalf("textUpdates = %+v, want final auto reply card text", got)
+	}
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("processUpdates = %+v, want no process rows when auto reply has no tool boundary", got)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2970,6 +2976,105 @@ func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first auto prompt did not finish")
+	}
+}
+
+func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptResult: acp.PromptResult{
+			Text: "我会查成员。\n接口是只读的。\n能查。当前群有 5 个成员。",
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "我会查成员。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "List chat members",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "接口是只读的。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Fetch all pages",
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "能查。当前群有 5 个成员。"},
+				},
+			},
+		},
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_final",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "你能查群成员有几人/几个bot吗",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention auto) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because delayed auto card was sent", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one delayed auto stream card", cards)
+	}
+	card := cards[0]
+	if got := card.textUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "能查。当前群有 5 个成员。" {
+		t.Fatalf("textUpdates = %+v, want only final text after last tool on card", got)
+	}
+	processUpdates := card.processUpdatesSnapshot()
+	if len(processUpdates) == 0 {
+		t.Fatalf("processUpdates = %+v, want delayed process updates on card", processUpdates)
+	}
+	lastProcess := processUpdates[len(processUpdates)-1]
+	for _, want := range []string{"💬 我会查成员。", "⏳ List chat members", "💬 接口是只读的。", "⏳ Fetch all pages"} {
+		if !strings.Contains(lastProcess, want) {
+			t.Fatalf("last process update = %q, want %q", lastProcess, want)
+		}
+	}
+	if strings.Contains(lastProcess, "能查。当前群有 5 个成员") {
+		t.Fatalf("last process update = %q, should not contain final reply", lastProcess)
 	}
 }
 

@@ -19,6 +19,7 @@ type promptCardStream struct {
 	mu                sync.Mutex
 	card              feishu.StreamCard
 	available         bool
+	delayed           bool
 	creating          bool
 	ready             chan struct{}
 	started           bool
@@ -68,6 +69,50 @@ func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message
 	}
 }
 
+func (s *promptCardStream) delayCardCreation() {
+	s.mu.Lock()
+	s.delayed = true
+	s.mu.Unlock()
+}
+
+func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result acp.PromptResult, stopReason string) {
+	s.mu.Lock()
+	s.delayed = false
+	text := s.text
+	processText := processPanelText(s.process)
+	showStatus := s.showStatusBar
+	status := s.status
+	showUsage := s.showUsageDetail
+	s.mu.Unlock()
+	if strings.TrimSpace(text) != "" {
+		s.updateTextWithContext(ctx, text)
+	}
+	if strings.TrimSpace(processText) != "" {
+		card := s.ensureCardWithContext(ctx)
+		if card != nil {
+			s.queueProcessUpdateWithContext(ctx, card, processText, true)
+		}
+	}
+	if showStatus {
+		s.mu.Lock()
+		s.status = status
+		s.status.applyPromptResult(result)
+		s.status.state = promptStatusFromStopReason(stopReason)
+		s.status.stopReason = strings.TrimSpace(stopReason)
+		statusText := s.status.text()
+		s.mu.Unlock()
+		if card := s.ensureCardWithContext(ctx); card != nil {
+			if err := card.UpdateStatus(ctx, statusText); err != nil {
+				slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
+			}
+		}
+	}
+	if showUsage {
+		s.updatePromptResult(result)
+	}
+	s.closeWithContext(ctx)
+}
+
 func (s *promptCardStream) hasStarted() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,14 +125,18 @@ func (s *promptCardStream) updateText(text string) {
 
 func (s *promptCardStream) updateTextWithContext(ctx context.Context, text string) {
 	text = strings.TrimSpace(text)
+	s.mu.Lock()
+	s.text = normalizeStreamMarkdown(text)
+	fullText := s.text
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return
 	}
-	s.mu.Lock()
-	s.text = normalizeStreamMarkdown(text)
-	fullText := s.text
-	s.mu.Unlock()
 	if err := card.UpdateText(ctx, fullText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片文本失败", "session", s.session.ACPSessionID, "错误", err)
 	}
@@ -104,14 +153,18 @@ func (s *promptCardStream) updatePromptStatusFromUpdate(update acp.PromptUpdate)
 	if u.Used <= 0 && u.Size <= 0 {
 		return
 	}
+	s.mu.Lock()
+	s.status.Context = acp.ContextWindowUsage{Used: u.Used, Size: u.Size}
+	statusText := s.status.text()
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(s.ctx)
 	if card == nil {
 		return
 	}
-	s.mu.Lock()
-	s.status.Context = acp.ContextWindowUsage{Used: u.Used, Size: u.Size}
-	statusText := s.status.text()
-	s.mu.Unlock()
 	if err := card.UpdateStatus(s.ctx, statusText); err != nil {
 		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
 	}
@@ -128,14 +181,18 @@ func (s *promptCardStream) updatePromptStatusFromResultWithContext(ctx context.C
 	if result.Usage.InputTokens == 0 && result.Usage.OutputTokens == 0 && result.Meta.TraeTokenUsage == nil {
 		return
 	}
+	s.mu.Lock()
+	s.status.applyPromptResult(result)
+	statusText := s.status.text()
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return
 	}
-	s.mu.Lock()
-	s.status.applyPromptResult(result)
-	statusText := s.status.text()
-	s.mu.Unlock()
 	if err := card.UpdateStatus(ctx, statusText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
 	}
@@ -147,6 +204,12 @@ func (s *promptCardStream) updatePromptResult(result acp.PromptResult) {
 	}
 	detail := formatPromptResultDetail(result)
 	if detail == "" {
+		return
+	}
+	s.mu.Lock()
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
 		return
 	}
 	card := s.ensureCardWithContext(s.ctx)
@@ -166,15 +229,19 @@ func (s *promptCardStream) finishPromptStatusWithContext(ctx context.Context, st
 	if !s.showStatusBar {
 		return
 	}
-	card := s.ensureCardWithContext(ctx)
-	if card == nil {
-		return
-	}
 	s.mu.Lock()
 	s.status.state = promptStatusFromStopReason(stopReason)
 	s.status.stopReason = strings.TrimSpace(stopReason)
 	statusText := s.status.text()
+	delayed := s.delayed
 	s.mu.Unlock()
+	if delayed {
+		return
+	}
+	card := s.ensureCardWithContext(ctx)
+	if card == nil {
+		return
+	}
 	if err := card.UpdateStatus(ctx, statusText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
 	}
@@ -254,14 +321,18 @@ func (s *promptCardStream) updateProcessWithContext(ctx context.Context, text st
 	if text == "" {
 		return
 	}
+	s.mu.Lock()
+	s.process = append(s.process, normalizeStreamMarkdown(text))
+	processText := processPanelText(s.process)
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return
 	}
-	s.mu.Lock()
-	s.process = append(s.process, normalizeStreamMarkdown(text))
-	processText := processPanelText(s.process)
-	s.mu.Unlock()
 	s.queueProcessUpdateWithContext(ctx, card, processText, false)
 }
 
@@ -303,13 +374,17 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 	if !ok {
 		return true
 	}
+	s.mu.Lock()
+	processText := s.applyToolProgressLineLocked(status, title, line)
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return true
+	}
 	card := s.ensureCardWithContext(s.ctx)
 	if card == nil {
 		return true
 	}
-	s.mu.Lock()
-	processText := s.applyToolProgressLineLocked(status, title, line)
-	s.mu.Unlock()
 	s.queueProcessUpdate(card, processText, true)
 	return true
 }
@@ -422,10 +497,6 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 	if prefixProcessMessage {
 		text = formatProcessMessageText(text)
 	}
-	card := s.ensureCardWithContext(s.ctx)
-	if card == nil {
-		return
-	}
 	s.mu.Lock()
 	normalized := normalizeStreamMarkdown(text)
 	if s.streaming && s.activeStreamClass == class && len(s.process) > 0 {
@@ -436,7 +507,15 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 		s.activeStreamClass = class
 	}
 	processText := processPanelText(s.process)
+	delayed := s.delayed
 	s.mu.Unlock()
+	if delayed {
+		return
+	}
+	card := s.ensureCardWithContext(s.ctx)
+	if card == nil {
+		return
+	}
 	s.queueProcessUpdate(card, processText, false)
 }
 

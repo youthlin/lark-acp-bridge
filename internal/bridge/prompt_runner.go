@@ -99,6 +99,10 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	if !opts.SkipPostPromptWork && !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
 		session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
 	}
+	if sentProgress {
+		reply = ""
+		result.Text = ""
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", nil
@@ -212,7 +216,29 @@ func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.M
 
 func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
 	if s.shouldDelayAtAutoProgress(msg) {
+		stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix)
+		stream.delayCardCreation()
+		chunks := newPromptChunkAccumulator(stream)
+		flushStreams := func() {
+			chunks.finishStream()
+		}
 		opts := acp.PromptOptions{
+			OnUpdate: func(update acp.PromptUpdate) {
+				stream.updatePromptStatusFromUpdate(update)
+				if chunk, ok := promptUpdateChunk(update); ok {
+					if chunk.ToolBoundary {
+						chunks.markToolBoundary()
+					}
+					chunks.add(chunk)
+					return
+				}
+				if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
+					chunks.markToolBoundary()
+				} else {
+					flushStreams()
+				}
+				stream.updatePromptUpdate(update)
+			},
 			OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
 				outcome, ok, err := feishu.RequestPermission(reqCtx, msg, req)
 				if err != nil {
@@ -225,7 +251,20 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 			},
 		}
 		result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
-		return result, false, result, "", err
+		chunks.close()
+		streamedReply := chunks.finalText()
+		if strings.TrimSpace(streamedReply) != "" && (chunks.hasToolBoundary() || strings.TrimSpace(result.Text) == "") {
+			result.Text = streamedReply
+		}
+		if err == nil && strings.TrimSpace(result.Text) != "" && !s.shouldSuppressAtAutoReply(msg, result.Text) {
+			finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
+			defer finalCancel()
+			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() && finalReply != streamedReply {
+				stream.updateTextWithContext(finalCtx, finalReply)
+			}
+			stream.flushDelayedWithContext(finalCtx, result, result.StopReason)
+		}
+		return result, stream.hasStarted(), result, streamedReply, err
 	}
 	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix)
 	chunks := newPromptChunkAccumulator(stream)
