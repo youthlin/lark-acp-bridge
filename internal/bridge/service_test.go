@@ -3195,7 +3195,70 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuTopicMessageDoesNotReuseRepliedTopicSession(t *testing.T) {
+func TestHandleFeishuTopicRepliesReuseSameSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-topic", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	first := feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_topic_root",
+		ChatID:    "oc_group",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_topic",
+		Text:      "@智能助手 话题根消息",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	}
+	reply, err := handleFeishuMessage(t, svc, context.Background(), first)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic root) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_topic_reply",
+		ChatID:    "oc_group",
+		ChatType:  "topic_group",
+		ThreadID:  first.ThreadID,
+		RootID:    first.MessageID,
+		ParentID:  first.MessageID,
+		Text:      "@智能助手 话题内回复",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		Reply: &feishu.ReplyContext{
+			MessageID: first.MessageID,
+			MsgType:   "text",
+			Text:      "话题根消息",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic reply) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.ThreadID != first.ThreadID {
+		t.Fatalf("newCalls = %+v, want one session for same topic", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want root and reply prompts", rt.promptCalls)
+	}
+	for _, call := range rt.promptCalls {
+		if call.Session.ACPSessionID != "acp-session-topic" || call.Session.Key.ThreadID != first.ThreadID {
+			t.Fatalf("prompt call = %+v, want same topic ACP session", call)
+		}
+	}
+}
+
+func TestHandleFeishuNewTopicWithoutThreadDoesNotReusePreviousTopicSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -3221,33 +3284,24 @@ func TestHandleFeishuTopicMessageDoesNotReuseRepliedTopicSession(t *testing.T) {
 		MessageID: "om_new_topic",
 		ChatID:    "oc_group",
 		ChatType:  "topic_group",
-		ThreadID:  "omt_new_topic",
 		RootID:    oldKey.ThreadID,
 		ParentID:  oldKey.ThreadID,
 		Text:      "@智能助手 新话题",
 		Mentions:  []feishu.Mention{testBotMention("智能助手")},
-		Reply: &feishu.ReplyContext{
-			MessageID: oldKey.ThreadID,
-			MsgType:   "text",
-			Text:      "旧话题上下文",
-		},
 	})
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(new topic) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(new topic without thread) error = %v", err)
 	}
 	if reply != "ACP 回复" {
 		t.Fatalf("reply = %q, want ACP reply", reply)
 	}
-	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.ThreadID != "omt_new_topic" {
-		t.Fatalf("newCalls = %+v, want new topic session", rt.newCalls)
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.ThreadID != "om_new_topic" {
+		t.Fatalf("newCalls = %+v, want new topic session keyed by current message", rt.newCalls)
 	}
 	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.ACPSessionID != "acp-session-new" {
 		t.Fatalf("promptCalls = %+v, want new ACP session", rt.promptCalls)
 	}
-	if _, ok := store.Get(oldKey); !ok {
-		t.Fatalf("old topic session should remain persisted")
-	}
-	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_new_topic"}); !ok || session.ACPSessionID != "acp-session-new" {
+	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "om_new_topic"}); !ok || session.ACPSessionID != "acp-session-new" {
 		t.Fatalf("new topic session = %+v, %v; want persisted new session", session, ok)
 	}
 }
