@@ -23,6 +23,7 @@ func promptTextWithReplyContext(msg feishu.Message, text string) string {
 		"",
 		"请结合上面的被回复消息理解下面的用户消息。",
 		"",
+		"## User Message",
 		strings.TrimSpace(text),
 	}
 	return strings.Join(nonEmptySections(sections), "\n")

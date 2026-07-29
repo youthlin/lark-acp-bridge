@@ -542,6 +542,35 @@ func TestReplyContextFromLarkPostMessage(t *testing.T) {
 	}
 }
 
+func TestReplyContextFromLarkTextMessageReplacesMentionKeys(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("text").
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"text":"@_user_1 进入bridge项目"}`).
+			Build()).
+		Mentions([]*larkim.Mention{
+			larkim.NewMentionBuilder().
+				Key("@_user_1").
+				Id("ou_real_user").
+				IdType("open_id").
+				Name("真实mention的名称").
+				Build(),
+		}).
+		Build()
+
+	msg := messageFromLarkMessage(item)
+	if msg == nil {
+		t.Fatal("message = nil, want text message")
+	}
+	if msg.Text != "@真实mention的名称 进入bridge项目" {
+		t.Fatalf("message text = %q, want mention display name", msg.Text)
+	}
+	if len(msg.Mentions) != 1 || msg.Mentions[0].ID != "ou_real_user" || msg.Mentions[0].Name != "真实mention的名称" {
+		t.Fatalf("mentions = %+v, want parsed mention metadata", msg.Mentions)
+	}
+}
+
 func TestReplyContextFromLarkPostMessageWithImage(t *testing.T) {
 	item := larkim.NewMessageBuilder().
 		MessageId("om_parent").

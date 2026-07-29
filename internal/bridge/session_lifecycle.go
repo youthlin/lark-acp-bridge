@@ -390,30 +390,20 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 		}
 		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
 	}
-	if !msg.IsTopicThread() {
+	if !msg.IsTopicGroup() {
 		if msg.ChatID == "" {
 			return nil
 		}
 		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
 	}
-	seen := make(map[string]bool)
-	keys := make([]SessionKey, 0, 3)
-	add := func(id string) {
-		if msg.ChatID == "" || id == "" {
-			return
-		}
-		key := msg.BotID + "\x00" + id
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		keys = append(keys, SessionKey{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: id})
+	id := strings.TrimSpace(msg.ThreadID)
+	if id == "" {
+		id = strings.TrimSpace(msg.MessageID)
 	}
-	add(msg.ThreadID)
-	add(msg.RootID)
-	add(msg.ParentID)
-	add(msg.MessageID)
-	return keys
+	if msg.ChatID == "" || id == "" {
+		return nil
+	}
+	return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: id}}
 }
 
 func sessionLabel(msg feishu.Message) string {

@@ -596,6 +596,18 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 			msg.Text = parseMessageTextContent(content)
 		}
 	}
+	for _, mention := range item.Mentions {
+		if mention == nil {
+			continue
+		}
+		msg.Mentions = append(msg.Mentions, Mention{
+			Key:  value(mention.Key),
+			ID:   value(mention.Id),
+			Name: value(mention.Name),
+			Type: value(mention.IdType),
+		})
+	}
+	msg.Text = replaceMentionKeys(msg.Text, msg.Mentions)
 	if msg.MessageID == "" && msg.MsgType == "" && msg.Text == "" && msg.ImageKey == "" && len(msg.Images) == 0 {
 		return nil
 	}

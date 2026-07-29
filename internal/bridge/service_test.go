@@ -1821,10 +1821,13 @@ func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 		t.Fatalf("prompt calls = %+v, want one prompt", rt.promptCalls)
 	}
 	prompt := rt.promptCalls[0].Text
-	for _, want := range []string{"## Replied Message Context", "我先发一条消息", "请结合上面的被回复消息理解下面的用户消息。", "这种情况怎么实现"} {
+	for _, want := range []string{"## Replied Message Context", "我先发一条消息", "请结合上面的被回复消息理解下面的用户消息。", "## User Message", "这种情况怎么实现"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
+	}
+	if strings.LastIndex(prompt, "## User Message") <= strings.Index(prompt, "请结合上面的被回复消息理解下面的用户消息。") {
+		t.Fatalf("prompt = %q, want nested user message after reply guidance", prompt)
 	}
 	assertPromptContainsSectionMetadata(t, prompt, "## Replied Message Metadata", map[string]string{
 		"message_id":  "om_parent",
@@ -2159,8 +2162,19 @@ func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
 			},
 			want: []SessionKey{
 				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "omt_topic"},
-				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_root"},
-				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_parent"},
+			},
+		},
+		{
+			name: "topic group without thread id falls back to current message id",
+			msg: feishu.Message{
+				BotID:     "bot-a",
+				ChatID:    "oc_topic",
+				ChatType:  "topic_group",
+				RootID:    "om_root",
+				ParentID:  "om_parent",
+				MessageID: "om_msg",
+			},
+			want: []SessionKey{
 				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_msg"},
 			},
 		},
@@ -3178,6 +3192,63 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 		if _, ok := store.Get(key); !ok {
 			t.Fatalf("topic session %v not persisted", key)
 		}
+	}
+}
+
+func TestHandleFeishuTopicMessageDoesNotReuseRepliedTopicSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	oldKey := SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "om_previous_topic"}
+	if err := store.Upsert(Session{
+		Key:          oldKey,
+		Title:        "旧话题",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          workDir,
+	}); err != nil {
+		t.Fatalf("Upsert(old session) error = %v", err)
+	}
+	rt := &fakeRuntime{newSessionID: "acp-session-new", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_new_topic",
+		ChatID:    "oc_group",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_new_topic",
+		RootID:    oldKey.ThreadID,
+		ParentID:  oldKey.ThreadID,
+		Text:      "@智能助手 新话题",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		Reply: &feishu.ReplyContext{
+			MessageID: oldKey.ThreadID,
+			MsgType:   "text",
+			Text:      "旧话题上下文",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(new topic) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.ThreadID != "omt_new_topic" {
+		t.Fatalf("newCalls = %+v, want new topic session", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.ACPSessionID != "acp-session-new" {
+		t.Fatalf("promptCalls = %+v, want new ACP session", rt.promptCalls)
+	}
+	if _, ok := store.Get(oldKey); !ok {
+		t.Fatalf("old topic session should remain persisted")
+	}
+	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_new_topic"}); !ok || session.ACPSessionID != "acp-session-new" {
+		t.Fatalf("new topic session = %+v, %v; want persisted new session", session, ok)
 	}
 }
 
