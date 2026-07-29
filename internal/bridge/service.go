@@ -100,6 +100,8 @@ var _ feishu.SessionSelectionHandler = (*Service)(nil)
 
 const maxSessionHistoryPerChat = 10
 
+const mentionOnlyPromptText = "（用户提及你，但本次无消息内容，请按历史消息，引用上下文回复）"
+
 // HandleFeishuMessage 消息处理
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
@@ -110,6 +112,9 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	text = stripCurrentBotMentionNames(text, msg)
 	msg.Text = text
 	promptText := strings.TrimSpace(msg.PromptText())
+	if promptText == "" && messageMentionsBot(msg) {
+		promptText = mentionOnlyPromptText
+	}
 	slog.DebugContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
 
 	if s.shouldIgnoreMessage(msg, text) {

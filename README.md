@@ -107,7 +107,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
 
-普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at，私聊始终响应且不支持 `/at` 配置。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
+普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at，私聊始终响应且不支持 `/at` 配置。用户只 at 当前 bot 且不带正文时，会按“用户提及你，但本次无消息内容，请按历史消息，引用上下文回复”作为普通 prompt 发送给 ACP agent。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 

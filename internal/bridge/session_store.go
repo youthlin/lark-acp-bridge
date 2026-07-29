@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
 type SessionStore struct {
@@ -274,12 +276,14 @@ func (s *SessionStore) writeLocked() error {
 		Chats:    make([]ChatConfig, 0, len(s.chats)),
 	}
 	for _, session := range s.sessions {
-		file.Sessions = append(file.Sessions, session)
+		file.Sessions = append(file.Sessions, persistedSession(session))
 	}
 	sort.Slice(file.Sessions, func(i, j int) bool {
 		return sessionKeyLess(file.Sessions[i].Key, file.Sessions[j].Key)
 	})
-	file.History = append(file.History, s.history...)
+	for _, session := range s.history {
+		file.History = append(file.History, persistedSession(session))
+	}
 	for _, chat := range s.chats {
 		file.Chats = append(file.Chats, chat)
 	}
@@ -303,6 +307,59 @@ func (s *SessionStore) writeLocked() error {
 		return fmt.Errorf("替换会话映射文件: %w", err)
 	}
 	return nil
+}
+
+func persistedSession(session Session) Session {
+	session.AvailableCommands = nil
+	session.ConfigOptions = persistedConfigOptions(session.ConfigOptions)
+	session.Models = persistedModelState(session.Models)
+	session.Mode = persistedModeState(session.Mode)
+	return session
+}
+
+func persistedConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOption {
+	if len(options) == 0 {
+		return nil
+	}
+	persisted := make([]acp.SessionConfigOption, 0, len(options))
+	for _, option := range options {
+		if strings.TrimSpace(option.ID) == "" {
+			continue
+		}
+		persisted = append(persisted, acp.SessionConfigOption{
+			ID:           option.ID,
+			Name:         option.Name,
+			Category:     option.Category,
+			Type:         option.Type,
+			CurrentValue: option.CurrentValue,
+		})
+	}
+	if len(persisted) == 0 {
+		return nil
+	}
+	return persisted
+}
+
+func persistedModelState(state *acp.SessionModelState) *acp.SessionModelState {
+	if state == nil {
+		return nil
+	}
+	current := strings.TrimSpace(state.CurrentModelID)
+	if current == "" {
+		return nil
+	}
+	return &acp.SessionModelState{CurrentModelID: current}
+}
+
+func persistedModeState(state *acp.SessionModeState) *acp.SessionModeState {
+	if state == nil {
+		return nil
+	}
+	current := strings.TrimSpace(state.CurrentModeID)
+	if current == "" {
+		return nil
+	}
+	return &acp.SessionModeState{CurrentModeID: current}
 }
 
 func sessionKeyLess(a, b SessionKey) bool {

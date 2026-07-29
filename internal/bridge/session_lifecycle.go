@@ -291,6 +291,9 @@ func normalizeSessionTitle(title string) string {
 }
 
 func titleFromPrompt(text string) string {
+	if strings.TrimSpace(text) == mentionOnlyPromptText {
+		return ""
+	}
 	return normalizeSessionTitle(text)
 }
 

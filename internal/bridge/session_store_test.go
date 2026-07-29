@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
 func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
@@ -110,6 +112,93 @@ func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
 	}
 	if third.Title != "session#3" {
 		t.Fatalf("third session title = %q, want session#3", third.Title)
+	}
+}
+
+func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	store := NewSessionStore(storePath)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	session := Session{
+		Key:          key,
+		Title:        "ready session",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo",
+		AvailableCommands: []acp.AvailableCommand{
+			{Name: "review", Description: "Review my current changes and find issues", Input: &acp.AvailableCommandInput{Hint: "optional custom review instructions"}},
+		},
+		ConfigOptions: []acp.SessionConfigOption{
+			{
+				ID:           "model",
+				Name:         "Model",
+				Description:  "Large model selection description",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.5",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5", Description: "default model"},
+					{Value: "gpt-5.6", Name: "GPT-5.6", Description: "next model"},
+				},
+			},
+		},
+		Models: &acp.SessionModelState{
+			CurrentModelID: "gpt-5.5",
+			AvailableModels: []acp.SessionModel{
+				{ModelID: "gpt-5.5", Name: "GPT-5.5", Description: "default model"},
+				{ModelID: "gpt-5.6", Name: "GPT-5.6", Description: "next model"},
+			},
+		},
+		Mode: &acp.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acp.SessionMode{
+				{ModeID: "default", Name: "Workspace Edit", Description: "can edit files"},
+				{ModeID: "plan", Name: "Plan", Description: "inspect only"},
+			},
+		},
+	}
+
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	if got, ok := store.Get(key); !ok {
+		t.Fatalf("Get() ok = false, want true")
+	} else if len(got.AvailableCommands) != 1 || len(got.ConfigOptions[0].Options) != 2 || len(got.Models.AvailableModels) != 2 || len(got.Mode.AvailableModes) != 2 {
+		t.Fatalf("in-memory session was compacted: %+v", got)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(sessions.json) error = %v", err)
+	}
+	var file sessionFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("Unmarshal(sessions.json) error = %v", err)
+	}
+	if len(file.Sessions) != 1 {
+		t.Fatalf("len(file.Sessions) = %d, want 1", len(file.Sessions))
+	}
+	persisted := file.Sessions[0]
+	if len(persisted.AvailableCommands) != 0 {
+		t.Fatalf("AvailableCommands persisted = %+v, want omitted", persisted.AvailableCommands)
+	}
+	if len(persisted.ConfigOptions) != 1 {
+		t.Fatalf("ConfigOptions persisted = %+v, want compact current option", persisted.ConfigOptions)
+	}
+	if len(persisted.ConfigOptions[0].Options) != 0 || persisted.ConfigOptions[0].Description != "" {
+		t.Fatalf("ConfigOptions[0] = %+v, want no large descriptions/options", persisted.ConfigOptions[0])
+	}
+	if persisted.ConfigOptions[0].CurrentValue != "gpt-5.5" {
+		t.Fatalf("ConfigOptions[0].CurrentValue = %v, want gpt-5.5", persisted.ConfigOptions[0].CurrentValue)
+	}
+	if persisted.Models == nil || persisted.Models.CurrentModelID != "gpt-5.5" || len(persisted.Models.AvailableModels) != 0 {
+		t.Fatalf("Models persisted = %+v, want current model only", persisted.Models)
+	}
+	if persisted.Mode == nil || persisted.Mode.CurrentModeID != "default" || len(persisted.Mode.AvailableModes) != 0 {
+		t.Fatalf("Mode persisted = %+v, want current mode only", persisted.Mode)
+	}
+	if len(file.History) != 1 || len(file.History[0].AvailableCommands) != 0 {
+		t.Fatalf("History persisted = %+v, want compact history entry", file.History)
 	}
 }
 

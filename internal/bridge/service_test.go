@@ -3743,6 +3743,52 @@ func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageMentionOnlyPromptsWithContextInstruction(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "ACP 回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		AgentName:    "traex",
+		Title:        "已有标题",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_mention_only",
+		ChatID:    "oc_chat",
+		ChatType:  "group",
+		Text:      "@智能助手",
+		Mentions:  testBotMentions(),
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(mention only) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
+	}
+	assertReadyPromptContainsUserTextAndMemoryPolicy(t, rt.promptCalls[0].Text, mentionOnlyPromptText)
+	if strings.Contains(rt.promptCalls[0].Text, "@智能助手") {
+		t.Fatalf("prompt text = %q, should strip bot mention name", rt.promptCalls[0].Text)
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.Title != "已有标题" {
+		t.Fatalf("session title = %q, want existing title preserved for mention-only prompt", session.Title)
+	}
+}
+
 func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
