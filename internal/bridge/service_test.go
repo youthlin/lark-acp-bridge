@@ -4856,7 +4856,7 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("processUpdates = %+v, want plan process update", got)
 	}
-	want := "📌 计划\n- ✅ 读取现有实现\n- 🔄 补过程消息展示"
+	want := "📌 计划\n• ✅ 读取现有实现\n• 🔄 补过程消息展示"
 	if got[len(got)-1] != want {
 		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
 	}
@@ -4937,8 +4937,8 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		"📌 计划",
-		"- ✅ 确认依赖和实体定义",
-		"- 🔄 梳理仓库 Mongo 约定",
+		"• ✅ 确认依赖和实体定义",
+		"• 🔄 梳理仓库 Mongo 约定",
 		"✅ go test ./...",
 		"💬 继续读取实体定义",
 	}, "\n")

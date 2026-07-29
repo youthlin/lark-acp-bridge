@@ -45,7 +45,7 @@ func TestFormatPromptUpdatePrefixesProcessMessageOnly(t *testing.T) {
 					{Meta: map[string]any{"activeForm": "补过程消息展示"}, Status: "in_progress"},
 				},
 			}},
-			want: "📌 计划\n- ✅ 读取现有实现\n- 🔄 补过程消息展示",
+			want: "📌 计划\n• ✅ 读取现有实现\n• 🔄 补过程消息展示",
 		},
 		{
 			name: "agent chunk stays final text candidate",

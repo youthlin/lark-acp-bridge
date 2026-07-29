@@ -134,6 +134,18 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	}
 }
 
+func TestProcessPanelTextKeepsProcessRowsCompact(t *testing.T) {
+	got := processPanelText([]string{
+		"📌 计划\n• ✅ 读取现有实现\n• 🔄 修复展示",
+		"✅ go test ./...",
+		"💬 继续处理",
+	})
+	want := "📌 计划\n• ✅ 读取现有实现\n• 🔄 修复展示\n✅ go test ./...\n💬 继续处理"
+	if got != want {
+		t.Fatalf("processPanelText() = %q, want %q", got, want)
+	}
+}
+
 func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
 	var cardsMu sync.Mutex
 	var cards []*fakeStreamCard
@@ -208,15 +220,15 @@ func TestNormalizeStreamMarkdownFoldsSoftLineBreaks(t *testing.T) {
 func TestNormalizeStreamMarkdownKeepsProcessMarkersOnSeparateLines(t *testing.T) {
 	input := strings.Join([]string{
 		"📌 计划",
-		"- ✅ 读取现有实现",
-		"- 🔄 补过程消息展示",
+		"• ✅ 读取现有实现",
+		"• 🔄 补过程消息展示",
 		"✅ go test ./...",
 		"💬 继续处理",
 	}, "\n")
 	want := strings.Join([]string{
 		"📌 计划",
-		"- ✅ 读取现有实现",
-		"- 🔄 补过程消息展示",
+		"• ✅ 读取现有实现",
+		"• 🔄 补过程消息展示",
 		"✅ go test ./...",
 		"💬 继续处理",
 	}, "\n")

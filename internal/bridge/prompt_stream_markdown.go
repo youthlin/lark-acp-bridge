@@ -86,7 +86,7 @@ func isMarkdownBlockStart(line string) bool {
 }
 
 func isProcessMarkerLine(line string) bool {
-	for _, marker := range []string{"💬 ", "📌 ", "🧠 ", "⏳ ", "✅ ", "❌ "} {
+	for _, marker := range []string{"💬 ", "📌 ", "🧠 ", "⏳ ", "✅ ", "❌ ", "• "} {
 		if strings.HasPrefix(line, marker) {
 			return true
 		}

@@ -63,9 +63,19 @@ func formatPlanProcessText(text string) string {
 		return ""
 	}
 	if strings.HasPrefix(text, "- ") || strings.Contains(text, "\n- ") {
-		return "📌 计划\n" + text
+		return "📌 计划\n" + nonMarkdownPlanListText(text)
 	}
 	return "📌 " + text
+}
+
+func nonMarkdownPlanListText(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if rest, ok := strings.CutPrefix(strings.TrimLeft(line, " \t"), "- "); ok {
+			lines[i] = "• " + rest
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func planUpdateText(u acp.SessionUpdate) string {
