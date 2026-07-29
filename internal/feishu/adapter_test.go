@@ -101,6 +101,20 @@ func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string,
 	return filepath.Join(workspace, "cache", imageKey+".png"), nil
 }
 
+type fakeChatInfoClient struct {
+	infos map[string]chatInfo
+	calls []string
+	err   error
+}
+
+func (f *fakeChatInfoClient) GetChatInfo(ctx context.Context, chatID string) (chatInfo, error) {
+	f.calls = append(f.calls, chatID)
+	if f.err != nil {
+		return chatInfo{}, f.err
+	}
+	return f.infos[chatID], nil
+}
+
 type fakeApplicationClient struct {
 	app                  applicationOwnerCandidates
 	appErr               error
@@ -356,7 +370,13 @@ func TestAdapterSkipsProcessingReactionForDuplicateMessage(t *testing.T) {
 
 func TestAdapterAddsMessageAttrsToContext(t *testing.T) {
 	handler := &countingHandler{}
+	chatInfo := &fakeChatInfoClient{
+		infos: map[string]chatInfo{
+			"oc_1": {ChatMode: "group", GroupMessageType: "thread"},
+		},
+	}
 	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.chatInfo = chatInfo
 	event := textEvent("om_1", "oc_1", "hello")
 	event.Event.Message.ChatType = ptr("group")
 	event.Event.Message.ThreadId = ptr("omt_1")
@@ -369,18 +389,75 @@ func TestAdapterAddsMessageAttrsToContext(t *testing.T) {
 
 	attrs := attrsMap(logging.CtxAttrs(handler.ctx))
 	for key, want := range map[string]string{
-		"bot":        "bot-a",
-		"chat_id":    "oc_1",
-		"chat_type":  "group",
-		"message_id": "om_1",
-		"thread_id":  "omt_1",
-		"root_id":    "om_root",
-		"parent_id":  "om_parent",
-		"sender_id":  "ou_sender",
+		"bot":                "bot-a",
+		"chat_id":            "oc_1",
+		"chat_type":          "group",
+		"chat_mode":          "group",
+		"group_message_type": "thread",
+		"message_id":         "om_1",
+		"thread_id":          "omt_1",
+		"root_id":            "om_root",
+		"parent_id":          "om_parent",
+		"sender_id":          "ou_sender",
 	} {
 		if got := attrs[key]; got != want {
 			t.Fatalf("ctx attr %s = %q, want %q; attrs=%v", key, got, want, attrs)
 		}
+	}
+}
+
+func TestAdapterHydratesChatInfoAndCachesByChatID(t *testing.T) {
+	handler := &countingHandler{}
+	chatInfo := &fakeChatInfoClient{
+		infos: map[string]chatInfo{
+			"oc_topic": {Name: "话题群", ChatMode: "group", ChatType: "private", GroupMessageType: "thread"},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.chatInfo = chatInfo
+
+	first := textEvent("om_topic_1", "oc_topic", "hello")
+	first.Event.Message.ChatType = ptr("group")
+	first.Event.Message.ThreadId = ptr("omt_topic")
+	if err := adapter.handleMessage(context.Background(), first); err != nil {
+		t.Fatalf("handleMessage(first) error = %v", err)
+	}
+	if handler.msg.GroupMessageType != "thread" || !handler.msg.IsTopicThread() {
+		t.Fatalf("message = %+v, want topic thread from chat info", handler.msg)
+	}
+
+	second := textEvent("om_topic_2", "oc_topic", "hello again")
+	second.Event.Message.ChatType = ptr("group")
+	second.Event.Message.ThreadId = ptr("omt_topic_2")
+	if err := adapter.handleMessage(context.Background(), second); err != nil {
+		t.Fatalf("handleMessage(second) error = %v", err)
+	}
+	if len(chatInfo.calls) != 1 || chatInfo.calls[0] != "oc_topic" {
+		t.Fatalf("chat info calls = %+v, want one cached lookup", chatInfo.calls)
+	}
+	if handler.msg.GroupMessageType != "thread" || !handler.msg.IsTopicThread() {
+		t.Fatalf("second message = %+v, want cached topic thread info", handler.msg)
+	}
+}
+
+func TestAdapterOrdinaryGroupThreadIDStaysNonTopic(t *testing.T) {
+	handler := &countingHandler{}
+	chatInfo := &fakeChatInfoClient{
+		infos: map[string]chatInfo{
+			"oc_group": {Name: "普通群", ChatMode: "group", ChatType: "private", GroupMessageType: "chat"},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
+	adapter.chatInfo = chatInfo
+	event := textEvent("om_group_reply", "oc_group", "hello")
+	event.Event.Message.ChatType = ptr("group")
+	event.Event.Message.ThreadId = ptr("omt_plain_group")
+
+	if err := adapter.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if handler.msg.GroupMessageType != "chat" || handler.msg.IsTopicThread() {
+		t.Fatalf("message = %+v, want ordinary group despite thread_id", handler.msg)
 	}
 }
 

@@ -31,11 +31,12 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	msg.BotID = a.cfg.ID
 	msg.BotOpenID = a.cfg.BotOpenID
 	msg.Workspace = a.cfg.Workspace
-	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
 	if strings.TrimSpace(msg.MessageID) == "" {
 		slog.WarnContext(ctx, "跳过缺少 message_id 的飞书消息")
 		return nil
 	}
+	msg = a.withChatInfo(ctx, msg)
+	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
 	if isStaleIncomingMessage(msg.CreatedAt, time.Now(), maxIncomingMessageAge) {
 		slog.InfoContext(ctx, "跳过过旧飞书消息",
 			"message_create_time", msg.CreatedAt.Format(time.RFC3339Nano),
@@ -91,6 +92,31 @@ func isStaleIncomingMessage(createdAt, now time.Time, maxAge time.Duration) bool
 		return false
 	}
 	return createdAt.Before(now.Add(-maxAge))
+}
+
+func (a *Adapter) withChatInfo(ctx context.Context, msg Message) Message {
+	if strings.TrimSpace(msg.ChatID) == "" || msg.IsPrivateChat() || a.chatInfo == nil {
+		return msg
+	}
+	var info chatInfo
+	var ok bool
+	if a.chatInfoCache != nil {
+		info, ok = a.chatInfoCache.Get(msg.ChatID)
+	}
+	if !ok {
+		var err error
+		info, err = a.chatInfo.GetChatInfo(ctx, msg.ChatID)
+		if err != nil {
+			slog.WarnContext(ctx, "读取飞书群信息失败", "chat_id", msg.ChatID, "错误", err)
+			return msg
+		}
+		if a.chatInfoCache != nil {
+			a.chatInfoCache.Set(msg.ChatID, info)
+		}
+	}
+	msg.ChatMode = info.ChatMode
+	msg.GroupMessageType = info.GroupMessageType
+	return msg
 }
 
 func (a *Adapter) withReplyContext(ctx context.Context, msg Message) Message {
@@ -151,6 +177,8 @@ func messageLogAttrs(msg Message) []slog.Attr {
 		slog.String("bot", msg.BotID),
 		slog.String("chat_id", msg.ChatID),
 		slog.String("chat_type", msg.ChatType),
+		slog.String("chat_mode", msg.ChatMode),
+		slog.String("group_message_type", msg.GroupMessageType),
 		slog.String("message_id", msg.MessageID),
 		slog.String("thread_id", msg.ThreadID),
 		slog.String("root_id", msg.RootID),

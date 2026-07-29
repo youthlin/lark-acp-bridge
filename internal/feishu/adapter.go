@@ -50,8 +50,10 @@ type Adapter struct {
 	deduper         *messageDeduper         // 消息去重
 	reaction        reactionClient          // 消息处理期间添加/移除 reaction
 	messages        messageClient           // 消息读取
+	chatInfo        chatInfoClient          // 群信息读取
 	applications    applicationClient       // 应用信息读取
 	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
+	chatInfoCache   *chatInfoCache          // 群信息缓存
 }
 
 type reactionClient interface {
@@ -62,6 +64,10 @@ type reactionClient interface {
 type messageClient interface {
 	GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error)
 	DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error)
+}
+
+type chatInfoClient interface {
+	GetChatInfo(ctx context.Context, chatID string) (chatInfo, error)
 }
 
 type applicationClient interface {
@@ -80,6 +86,13 @@ type applicationCollaborator struct {
 	UserID string
 }
 
+type chatInfo struct {
+	Name             string
+	ChatMode         string
+	ChatType         string
+	GroupMessageType string
+}
+
 // NewAdapter 创建飞书bot处理器
 func NewAdapter(cfg config.BotConfig, handler Handler) *Adapter {
 	deduper := newMessageDeduper(defaultMessageDeduperTTL, defaultMessageDeduperMax)
@@ -90,6 +103,7 @@ func NewAdapter(cfg config.BotConfig, handler Handler) *Adapter {
 		cfg:             cfg,
 		handler:         handler,
 		deduper:         deduper,
+		chatInfoCache:   newChatInfoCache(defaultChatInfoCacheTTL),
 		permissionCards: newPermissionCardRegistry(),
 	}
 }
@@ -149,6 +163,9 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 	if a.messages == nil {
 		a.messages = larkMessageClient{client: a.client}
+	}
+	if a.chatInfo == nil {
+		a.chatInfo = larkChatInfoClient{client: a.client}
 	}
 	if a.applications == nil {
 		a.applications = larkApplicationClient{client: a.client}
@@ -354,6 +371,40 @@ func (c larkApplicationClient) GetBotOpenID(ctx context.Context) (string, error)
 		return "", fmt.Errorf("飞书获取机器人信息接口返回错误: code=%d msg=%s", result.Code, result.Msg)
 	}
 	return strings.TrimSpace(result.Bot.OpenID), nil
+}
+
+type larkChatInfoClient struct {
+	client *lark.Client
+}
+
+func (c larkChatInfoClient) GetChatInfo(ctx context.Context, chatID string) (chatInfo, error) {
+	if c.client == nil {
+		return chatInfo{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return chatInfo{}, fmt.Errorf("飞书 chat_id 为空")
+	}
+	req := larkim.NewGetChatReqBuilder().
+		ChatId(chatID).
+		UserIdType(larkim.GetChatUserIDTypeOpenId).
+		Build()
+	resp, err := c.client.Im.Chat.Get(ctx, req)
+	if err != nil {
+		return chatInfo{}, fmt.Errorf("调用飞书获取群信息接口: %w", err)
+	}
+	if !resp.Success() {
+		return chatInfo{}, fmt.Errorf("飞书获取群信息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil {
+		return chatInfo{}, fmt.Errorf("飞书获取群信息接口未返回数据")
+	}
+	return chatInfo{
+		Name:             value(resp.Data.Name),
+		ChatMode:         value(resp.Data.ChatMode),
+		ChatType:         value(resp.Data.ChatType),
+		GroupMessageType: value(resp.Data.GroupMessageType),
+	}, nil
 }
 
 func (a *Adapter) Shutdown(ctx context.Context) error {

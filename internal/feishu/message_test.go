@@ -137,13 +137,13 @@ func TestReplyInThreadForMessage(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "ordinary group thread id does not force topic mode",
-			msg:  Message{ChatType: "group", MessageID: "om_topic", ThreadID: "omt_topic"},
+			name: "ordinary group thread id does not reply in topic",
+			msg:  Message{ChatType: "group", GroupMessageType: "chat", MessageID: "om_group", ThreadID: "omt_thread"},
 			want: false,
 		},
 		{
 			name: "topic group replies in topic",
-			msg:  Message{ChatType: "topic_group", MessageID: "om_topic", ThreadID: "omt_topic"},
+			msg:  Message{ChatType: "group", GroupMessageType: "thread", MessageID: "om_topic", ThreadID: "omt_topic"},
 			want: true,
 		},
 		{

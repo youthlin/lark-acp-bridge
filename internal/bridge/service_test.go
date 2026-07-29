@@ -49,6 +49,9 @@ func mustConfigAgent(t testing.TB, cfg config.Config, name string) config.AgentC
 
 func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg feishu.Message) (string, error) {
 	t.Helper()
+	if strings.EqualFold(msg.ChatType, "topic_group") && strings.TrimSpace(msg.GroupMessageType) == "" {
+		msg.GroupMessageType = "thread"
+	}
 	if strings.TrimSpace(msg.BotOpenID) == "" {
 		msg.BotOpenID = testBotOpenID
 	}
@@ -2079,7 +2082,7 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuGroupThreadReplyReusesChatSession(t *testing.T) {
+func TestHandleFeishuOrdinaryGroupThreadIDReusesChatSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -2100,15 +2103,16 @@ func TestHandleFeishuGroupThreadReplyReusesChatSession(t *testing.T) {
 			Mentions:  []feishu.Mention{testBotMention("智能助手")},
 		},
 		{
-			BotID:     "bot-a",
-			MessageID: "om_group_thread_reply",
-			ChatID:    "oc_group",
-			ChatType:  "group",
-			ThreadID:  "omt_group_thread",
-			RootID:    "om_group_1",
-			ParentID:  "om_group_1",
-			Text:      "@智能助手 继续",
-			Mentions:  []feishu.Mention{testBotMention("智能助手")},
+			BotID:            "bot-a",
+			MessageID:        "om_group_thread_reply",
+			ChatID:           "oc_group",
+			ChatType:         "group",
+			GroupMessageType: "chat",
+			ThreadID:         "omt_group_thread",
+			RootID:           "om_group_1",
+			ParentID:         "om_group_1",
+			Text:             "@智能助手 继续",
+			Mentions:         []feishu.Mention{testBotMention("智能助手")},
 		},
 	} {
 		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
@@ -2119,21 +2123,21 @@ func TestHandleFeishuGroupThreadReplyReusesChatSession(t *testing.T) {
 			t.Fatalf("reply = %q, want ACP reply", reply)
 		}
 	}
-	if len(rt.newCalls) != 1 {
-		t.Fatalf("newCalls = %+v, want ordinary group thread reply to reuse chat session", rt.newCalls)
-	}
 	if len(rt.promptCalls) != 2 {
 		t.Fatalf("promptCalls = %+v, want two prompts", rt.promptCalls)
 	}
-	if rt.newCalls[0].Key.ThreadID != "" || rt.promptCalls[1].Session.Key.ThreadID != "" {
-		t.Fatalf("session keys = new %+v prompt %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls[1].Session.Key)
+	if len(rt.newCalls) != 1 {
+		t.Fatalf("newCalls = %+v, want ordinary group thread id to reuse chat session", rt.newCalls)
+	}
+	if rt.newCalls[0].Key.ThreadID != "" || rt.promptCalls[0].Session.Key.ThreadID != "" || rt.promptCalls[1].Session.Key.ThreadID != "" {
+		t.Fatalf("session keys = new %+v prompts %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls)
 	}
 	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_group_thread"}); ok {
-		t.Fatalf("ordinary group thread reply should not create thread session")
+		t.Fatalf("ordinary group thread id should not create thread session")
 	}
 }
 
-func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
+func TestSessionKeysFromMessageUsesThreadKeyForGroupTopics(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  feishu.Message
@@ -2141,8 +2145,18 @@ func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
 	}{
 		{
 			name: "ordinary group with thread id stays chat scoped",
-			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ChatType: "group", ThreadID: "omt_group_thread"},
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ChatType: "group", GroupMessageType: "chat", ThreadID: "omt_group_thread"},
 			want: []SessionKey{{BotID: "bot-a", ChatID: "oc_group"}},
+		},
+		{
+			name: "topic group with thread id uses topic scoped keys",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ChatType: "group", GroupMessageType: "thread", ThreadID: "omt_group_thread"},
+			want: []SessionKey{{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_group_thread"}},
+		},
+		{
+			name: "private chat with thread id stays chat scoped",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_private", ChatType: "p2p", ThreadID: "omt_private_thread"},
+			want: []SessionKey{{BotID: "bot-a", ChatID: "oc_private"}},
 		},
 		{
 			name: "unknown chat type with thread id stays chat scoped",
@@ -2152,13 +2166,14 @@ func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
 		{
 			name: "topic group with thread id uses topic scoped keys",
 			msg: feishu.Message{
-				BotID:     "bot-a",
-				ChatID:    "oc_topic",
-				ChatType:  "topic_group",
-				ThreadID:  "omt_topic",
-				RootID:    "om_root",
-				ParentID:  "om_parent",
-				MessageID: "om_msg",
+				BotID:            "bot-a",
+				ChatID:           "oc_topic",
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				ThreadID:         "omt_topic",
+				RootID:           "om_root",
+				ParentID:         "om_parent",
+				MessageID:        "om_msg",
 			},
 			want: []SessionKey{
 				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "omt_topic"},
@@ -2167,12 +2182,13 @@ func TestSessionKeysFromMessageOnlyTopicGroupUsesThreadKey(t *testing.T) {
 		{
 			name: "topic group without thread id falls back to current message id",
 			msg: feishu.Message{
-				BotID:     "bot-a",
-				ChatID:    "oc_topic",
-				ChatType:  "topic_group",
-				RootID:    "om_root",
-				ParentID:  "om_parent",
-				MessageID: "om_msg",
+				BotID:            "bot-a",
+				ChatID:           "oc_topic",
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				RootID:           "om_root",
+				ParentID:         "om_parent",
+				MessageID:        "om_msg",
 			},
 			want: []SessionKey{
 				{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "om_msg"},
@@ -3192,6 +3208,44 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 		if _, ok := store.Get(key); !ok {
 			t.Fatalf("topic session %v not persisted", key)
 		}
+	}
+}
+
+func TestHandleFeishuGroupNewTopicUsesThreadSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-topic", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_group_topic",
+		ChatID:           "oc_group",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_group_topic",
+		Text:             "@智能助手 新发一条话题消息",
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group topic root) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.ThreadID != "omt_group_topic" {
+		t.Fatalf("newCalls = %+v, want group topic session keyed by thread id", rt.newCalls)
+	}
+	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.Key.ThreadID != "omt_group_topic" {
+		t.Fatalf("promptCalls = %+v, want prompt on group topic session", rt.promptCalls)
+	}
+	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", ThreadID: "omt_group_topic"}); !ok {
+		t.Fatalf("group topic session not persisted")
 	}
 }
 
@@ -5880,23 +5934,24 @@ func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	workDir := t.TempDir()
-	msg := feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_msg",
-		ChatID:    "oc_chat",
-		ThreadID:  "omt_thread",
-		Text:      "/new " + workDir,
-	}
-	if _, err := handleFeishuMessage(t, svc, context.Background(), msg); err != nil {
-		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	if err := store.Upsert(Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          workDir,
+	}); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_status",
-		ChatID:    "oc_chat",
-		ThreadID:  "omt_thread",
-		Text:      "/status",
+		BotID:            "bot-a",
+		MessageID:        "om_status",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		Text:             "@智能助手 /status",
+		Mentions:         testBotMentions(),
 	})
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
@@ -6131,29 +6186,28 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
-	msg := feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_msg",
-		ChatID:    "oc_chat",
-		ThreadID:  "omt_thread",
-		Text:      "/new " + workDir,
-	}
-	if _, err := handleFeishuMessage(t, svc, context.Background(), msg); err != nil {
-		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	if err := store.Upsert(Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          workDir,
+	}); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
 	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:      "bot-a",
-		MessageID:  "om_prompt",
-		ChatID:     "oc_chat",
-		ChatType:   "group",
-		ThreadID:   "omt_thread",
-		RootID:     "om_root",
-		ParentID:   "om_parent",
-		SenderID:   "ou_sender",
-		SenderType: "user",
-		MsgType:    "text",
-		Text:       "@我的智能助手 介绍一下这个仓库",
+		BotID:            "bot-a",
+		MessageID:        "om_prompt",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		RootID:           "om_root",
+		ParentID:         "om_parent",
+		SenderID:         "ou_sender",
+		SenderType:       "user",
+		MsgType:          "text",
+		Text:             "@我的智能助手 介绍一下这个仓库",
 		Mentions: []feishu.Mention{
 			testBotMention("我的智能助手"),
 		},

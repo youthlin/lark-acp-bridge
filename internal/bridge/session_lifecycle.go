@@ -390,7 +390,7 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 		}
 		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
 	}
-	if !msg.IsTopicGroup() {
+	if !msg.IsTopicThread() && !msg.IsTopicGroup() {
 		if msg.ChatID == "" {
 			return nil
 		}
@@ -417,7 +417,7 @@ func sessionLabel(msg feishu.Message) string {
 }
 
 func isTopicGroupMessage(msg feishu.Message) bool {
-	return msg.IsTopicGroup()
+	return msg.IsTopicThread() || msg.IsTopicGroup()
 }
 
 func displayBotID(botID string) string {

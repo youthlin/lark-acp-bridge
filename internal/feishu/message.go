@@ -12,25 +12,29 @@ import (
 )
 
 type Message struct {
-	BotID      string
-	BotOpenID  string
-	Workspace  string
-	MessageID  string
-	ChatID     string
-	ChatType   string
-	ThreadID   string
-	RootID     string
-	ParentID   string
-	CreatedAt  time.Time
-	SenderID   string
-	SenderType string
-	MsgType    string
-	Text       string
-	ImageKey   string
-	LocalPath  string
-	Images     []MessageImage
-	Mentions   []Mention
-	Reply      *ReplyContext
+	BotID     string
+	BotOpenID string
+	Workspace string
+	MessageID string
+	ChatID    string
+	ChatType  string
+	ChatMode  string
+	// GroupMessageType comes from the chat info API. "chat" means ordinary
+	// group messages, while "thread" means topic-group messages.
+	GroupMessageType string
+	ThreadID         string
+	RootID           string
+	ParentID         string
+	CreatedAt        time.Time
+	SenderID         string
+	SenderType       string
+	MsgType          string
+	Text             string
+	ImageKey         string
+	LocalPath        string
+	Images           []MessageImage
+	Mentions         []Mention
+	Reply            *ReplyContext
 	// ForceReplyInThread forces replies to use Feishu topic/thread mode even
 	// when the source message is not itself a topic-thread event.
 	ForceReplyInThread bool
@@ -73,11 +77,18 @@ func (m Message) IsPrivateChat() bool {
 }
 
 func (m Message) IsTopicGroup() bool {
-	return strings.EqualFold(m.ChatType, "topic_group")
+	groupMessageType := strings.TrimSpace(m.GroupMessageType)
+	if strings.EqualFold(groupMessageType, "thread") {
+		return true
+	}
+	return false
 }
 
 func (m Message) IsTopicThread() bool {
-	return m.IsTopicGroup() && strings.TrimSpace(m.ThreadID) != ""
+	if strings.TrimSpace(m.ThreadID) == "" || m.IsPrivateChat() {
+		return false
+	}
+	return m.IsTopicGroup()
 }
 
 func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
