@@ -1,0 +1,453 @@
+package bridge
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
+)
+
+// TriggerSink 接收非 IM 触发源的执行结果和状态。
+type TriggerSink interface {
+	OnUpdate(context.Context, TriggerResult) error
+	OnComplete(context.Context, TriggerResult) error
+	OnError(context.Context, TriggerResult) error
+}
+
+// TriggerRequest 描述一次显式 source 触发的 ACP prompt。
+type TriggerRequest struct {
+	BotID                string
+	Key                  SessionKey
+	Workspace            string
+	AgentName            string
+	Cwd                  string
+	Title                string
+	Prompt               string
+	Metadata             map[string]string
+	Sink                 TriggerSink
+	EnableWikiReflection bool
+}
+
+// TriggerResult 描述 trigger prompt 的阶段性或最终结果。
+type TriggerResult struct {
+	Request        TriggerRequest
+	Session        Session
+	ACPResult      acp.PromptResult
+	Update         acp.PromptUpdate
+	Text           string
+	SentProgress   bool
+	Err            error
+	Skipped        bool
+	SkipReason     string
+	ACPSessionID   string
+	ACPSessionMeta map[string]any
+}
+
+type preparedTrigger struct {
+	request    TriggerRequest
+	store      *SessionStore
+	session    Session
+	hasSession bool
+}
+
+func (r TriggerRequest) normalized() TriggerRequest {
+	r.BotID = strings.TrimSpace(r.BotID)
+	r.Key = normalizeSessionKey(r.Key)
+	if r.Key.BotID == "" {
+		r.Key.BotID = r.BotID
+	}
+	if r.BotID == "" {
+		r.BotID = r.Key.BotID
+	}
+	r.Workspace = strings.TrimSpace(r.Workspace)
+	r.AgentName = strings.TrimSpace(r.AgentName)
+	r.Cwd = strings.TrimSpace(r.Cwd)
+	r.Title = strings.TrimSpace(r.Title)
+	r.Prompt = strings.TrimSpace(r.Prompt)
+	r.Metadata = maps.Clone(r.Metadata)
+	return r
+}
+
+func (r TriggerRequest) valid() bool {
+	r = r.normalized()
+	return r.BotID != "" && r.Key.Valid() && r.Prompt != ""
+}
+
+func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptResult, text string, sentProgress bool, err error) TriggerResult {
+	session = normalizeSessionForStore(session)
+	if text == "" {
+		text = acpResult.Text
+	}
+	return TriggerResult{
+		Request:        req.normalized(),
+		Session:        session,
+		ACPResult:      acpResult,
+		Text:           text,
+		SentProgress:   sentProgress,
+		Err:            err,
+		ACPSessionID:   session.ACPSessionID,
+		ACPSessionMeta: maps.Clone(session.ACPMeta),
+	}
+}
+
+func newTriggerUpdateResult(req TriggerRequest, session Session, update acp.PromptUpdate) TriggerResult {
+	result := newTriggerResult(req, session, acp.PromptResult{}, triggerUpdateText(update), false, nil)
+	result.Update = update
+	return result
+}
+
+func triggerUpdateText(update acp.PromptUpdate) string {
+	if text := strings.TrimSpace(formatPromptUpdate(update)); text != "" {
+		return text
+	}
+	if chunk, ok := promptUpdateChunk(update); ok {
+		return chunk.Text
+	}
+	return ""
+}
+
+func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (TriggerResult, error) {
+	req = req.normalized()
+	slog.InfoContext(ctx, "开始执行 trigger prompt", triggerLogArgs(req, Session{})...)
+	prepared, err := s.prepareTrigger(req)
+	if err != nil {
+		result := TriggerResult{Request: req.normalized(), Err: err}
+		slog.ErrorContext(ctx, "trigger prompt 准备失败", append(triggerLogArgs(result.Request, Session{}), slog.Any("错误", err))...)
+		if req.Sink != nil {
+			_ = req.Sink.OnError(ctx, result)
+		}
+		return result, err
+	}
+	req = prepared.request
+	if !prepared.hasSession {
+		session, err := s.createTriggerSession(ctx, prepared)
+		if err != nil {
+			result := TriggerResult{Request: req, Err: err}
+			slog.ErrorContext(ctx, "创建 trigger session 失败", append(triggerLogArgs(req, Session{}), slog.Any("错误", err))...)
+			if req.Sink != nil {
+				_ = req.Sink.OnError(ctx, result)
+			}
+			return result, err
+		}
+		prepared.session = session
+		prepared.hasSession = true
+	}
+	s.subscribeTriggerStateUpdates(ctx, prepared)
+
+	result, err := s.runPreparedTriggerPrompt(ctx, prepared)
+	if errors.Is(err, errACPSessionUnavailable) {
+		slog.WarnContext(ctx, "trigger ACP session 不可恢复，准备重建", triggerLogArgs(req, prepared.session)...)
+		session, refreshErr := s.refreshTriggerSession(ctx, prepared)
+		if refreshErr != nil {
+			result = newTriggerResult(req, prepared.session, acp.PromptResult{}, "", false, refreshErr)
+			err = refreshErr
+		} else {
+			prepared.session = session
+			result, err = s.runPreparedTriggerPrompt(ctx, prepared)
+		}
+	}
+	if err == nil {
+		result.Session = s.updateTriggerAutomaticTitle(ctx, prepared, result.Session)
+		result.ACPSessionID = result.Session.ACPSessionID
+		result.ACPSessionMeta = maps.Clone(result.Session.ACPMeta)
+		if req.EnableWikiReflection {
+			if agent, ok := s.registry.Get(result.Session.AgentName); ok {
+				s.scheduleWikiAfterUserPrompt(result.Session, agent)
+			}
+		}
+	}
+	if req.Sink != nil {
+		if err != nil {
+			_ = req.Sink.OnError(ctx, result)
+		} else {
+			_ = req.Sink.OnComplete(ctx, result)
+		}
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "trigger prompt 执行失败", append(triggerLogArgs(req, result.Session), slog.Any("错误", err))...)
+	} else {
+		slog.InfoContext(ctx, "trigger prompt 执行完成", triggerLogArgs(req, result.Session)...)
+	}
+	return result, err
+}
+
+func (s *Service) subscribeTriggerStateUpdates(ctx context.Context, prepared preparedTrigger) {
+	key := normalizeSessionKey(prepared.request.Key)
+	s.acpUpdateMu.Lock()
+	if old := s.acpUpdateUnsub[key]; old != nil {
+		old()
+	}
+	unsub := s.runtime.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
+		s.handleTriggerStateUpdate(ctx, prepared.store, key, sessionID, update)
+	})
+	s.acpUpdateUnsub[key] = unsub
+	s.acpUpdateMu.Unlock()
+}
+
+func (s *Service) handleTriggerStateUpdate(ctx context.Context, store *SessionStore, key SessionKey, sessionID string, update acp.SessionUpdate) {
+	if !isACPStateUpdate(update) || store == nil {
+		return
+	}
+	if err := store.UpdateCurrentSession(key, sessionID, func(session *Session) bool {
+		return applyACPStateUpdate(session, update)
+	}); err != nil {
+		slog.WarnContext(ctx, "保存 trigger ACP session 状态失败", "session", sessionID, "update", update.SessionUpdate, "错误", err)
+	}
+}
+
+func triggerLogArgs(req TriggerRequest, session Session) []any {
+	req = req.normalized()
+	key := normalizeSessionKey(req.Key)
+	source := sessionKeySource(key)
+	mainID := sessionKeyMainID(key)
+	acpSessionID := strings.TrimSpace(session.ACPSessionID)
+	if acpSessionID == "" {
+		acpSessionID = strings.TrimSpace(req.Metadata["acp_session_id"])
+	}
+	args := []any{
+		slog.String("bot", req.BotID),
+		slog.String("source", source),
+		slog.String("main_id", mainID),
+		slog.String("sub_id", strings.TrimSpace(key.SubID)),
+	}
+	if acpSessionID != "" {
+		args = append(args, slog.String("acp_session_id", acpSessionID))
+	}
+	for _, key := range []string{"task_id", "run_id", "comment_id"} {
+		if value := strings.TrimSpace(req.Metadata[key]); value != "" {
+			args = append(args, slog.String(key, value))
+		}
+	}
+	return args
+}
+
+func (s *Service) prepareTrigger(req TriggerRequest) (preparedTrigger, error) {
+	req, store, err := s.prepareTriggerRequest(req)
+	if err != nil {
+		return preparedTrigger{request: req}, err
+	}
+	session, ok := store.Get(req.Key)
+	return preparedTrigger{
+		request:    req,
+		store:      store,
+		session:    session,
+		hasSession: ok,
+	}, nil
+}
+
+func (s *Service) createTriggerSession(ctx context.Context, prepared preparedTrigger) (Session, error) {
+	req := prepared.request
+	agent, ok := s.registry.Get(req.AgentName)
+	if !ok {
+		return Session{}, fmt.Errorf("未找到 trigger agent 配置: %s", req.AgentName)
+	}
+	cwd, err := cleanExistingDirectory(req.Cwd)
+	if err != nil {
+		return Session{}, err
+	}
+	if _, err := ensureWorkspace(req.Workspace, req.BotID); err != nil {
+		return Session{}, fmt.Errorf("初始化 workspace 失败: %w", err)
+	}
+	candidate, err := s.runtime.NewSession(ctx, req.Key, req.AgentName, agent, cwd, req.Workspace)
+	if err != nil {
+		return Session{}, fmt.Errorf("创建 trigger ACP session 失败: %w", err)
+	}
+	defer candidate.Abort()
+	sessionInfo := candidate.Info()
+	session := Session{
+		Key:               req.Key,
+		Title:             normalizeSessionTitle(req.Title),
+		ManualTitle:       normalizeSessionTitle(req.Title) != "",
+		AgentName:         req.AgentName,
+		ACPSessionID:      sessionInfo.SessionID,
+		ACPMeta:           maps.Clone(sessionInfo.Meta),
+		Cwd:               cwd,
+		Workspace:         req.Workspace,
+		AvailableCommands: sessionInfo.AvailableCommands,
+		ConfigOptions:     sessionInfo.ConfigOptions,
+		Models:            sessionInfo.Models,
+		Mode:              sessionInfo.Mode,
+	}
+	if err := candidate.Commit(func() error {
+		return prepared.store.Upsert(session)
+	}); err != nil {
+		return Session{}, fmt.Errorf("保存 trigger 会话映射失败: %w", err)
+	}
+	return session, nil
+}
+
+func (s *Service) refreshTriggerSession(ctx context.Context, prepared preparedTrigger) (Session, error) {
+	session := prepared.session
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return Session{}, fmt.Errorf("未找到 trigger session 的 agent 配置: %s", session.AgentName)
+	}
+	cwd, err := cleanExistingDirectory(session.Cwd)
+	if err != nil {
+		return Session{}, err
+	}
+	workspace := strings.TrimSpace(session.Workspace)
+	if workspace == "" {
+		workspace = prepared.request.Workspace
+	}
+	if _, err := ensureWorkspace(workspace, prepared.request.BotID); err != nil {
+		return Session{}, fmt.Errorf("初始化 workspace 失败: %w", err)
+	}
+	previousACPSessionID := session.ACPSessionID
+	candidate, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, cwd, workspace)
+	if err != nil {
+		return Session{}, fmt.Errorf("重建 trigger ACP session 失败: %w", err)
+	}
+	defer candidate.Abort()
+	sessionInfo := candidate.Info()
+	session = sessionWithACPInfo(session, sessionInfo, cwd, workspace)
+	session, err = commitCurrentACPSessionReplacement(candidate, prepared.store, previousACPSessionID, session)
+	if err != nil {
+		if errors.Is(err, errCurrentSessionChanged) {
+			return Session{}, fmt.Errorf("当前 trigger 会话已变化，忽略旧会话的重建结果")
+		}
+		return Session{}, fmt.Errorf("保存重建后的 trigger ACP session 失败: %w", err)
+	}
+	return session, nil
+}
+
+func (s *Service) updateTriggerAutomaticTitle(ctx context.Context, prepared preparedTrigger, session Session) Session {
+	return updateAutomaticSessionTitleInStore(ctx, prepared.store, session, prepared.request.Prompt)
+}
+
+func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared preparedTrigger) (TriggerResult, error) {
+	req := prepared.request
+	session := prepared.session
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		err := fmt.Errorf("未找到 trigger session 的 agent 配置: %s", session.AgentName)
+		return newTriggerResult(req, session, acp.PromptResult{}, "", false, err), err
+	}
+	textFallback := &triggerTextFallback{}
+	out, err := runPromptTask(s, ctx, session, agent, runningTaskOptions{}, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, acp.PromptOptions{
+			OnUpdate: func(update acp.PromptUpdate) {
+				textFallback.add(update)
+				if req.Sink != nil {
+					_ = req.Sink.OnUpdate(taskCtx, newTriggerUpdateResult(req, session, update))
+				}
+			},
+			OnPermissionRequest: func(_ context.Context, permission acp.PermissionRequest) (acp.PermissionOutcome, error) {
+				return defaultTriggerPermissionOutcome(taskCtx, session, permission), nil
+			},
+		})
+		return result, false, err
+	})
+	text := ""
+	if strings.TrimSpace(out.result.Text) == "" {
+		text = textFallback.text()
+	}
+	return newTriggerResult(req, session, out.result, text, out.sentProgress, err), err
+}
+
+func defaultTriggerPermissionOutcome(ctx context.Context, session Session, req acp.PermissionRequest) acp.PermissionOutcome {
+	outcome := defaultPermissionOutcome(req)
+	slog.WarnContext(ctx, "trigger 权限请求已按默认策略拒绝",
+		"session", session.ACPSessionID,
+		"tool_call_id", strings.TrimSpace(req.ToolCall.ToolCallID),
+		"tool_title", strings.TrimSpace(req.ToolCall.Title),
+		"outcome", outcome.Outcome,
+		"option_id", outcome.OptionID,
+	)
+	return outcome
+}
+
+type triggerTextFallback struct {
+	builder strings.Builder
+}
+
+func (f *triggerTextFallback) add(update acp.PromptUpdate) {
+	chunk, ok := promptUpdateChunk(update)
+	if !ok || chunk.Target != promptChunkTargetText {
+		return
+	}
+	f.builder.WriteString(chunk.Text)
+}
+
+func (f *triggerTextFallback) text() string {
+	return strings.TrimSpace(f.builder.String())
+}
+
+func (s *Service) prepareTriggerRequest(req TriggerRequest) (TriggerRequest, *SessionStore, error) {
+	req = req.normalized()
+	if req.BotID == "" {
+		return req, nil, fmt.Errorf("trigger bot_id 不能为空")
+	}
+	if sessionKeySource(req.Key) == sessionSourceIM {
+		return req, nil, fmt.Errorf("trigger source 不能使用 IM")
+	}
+	if !req.Key.Valid() {
+		return req, nil, fmt.Errorf("trigger session key 不完整")
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return req, nil, fmt.Errorf("trigger prompt 不能为空")
+	}
+	if strings.TrimSpace(req.AgentName) == "" {
+		return req, nil, fmt.Errorf("trigger agent_name 不能为空")
+	}
+	if strings.TrimSpace(req.Cwd) == "" {
+		return req, nil, fmt.Errorf("trigger cwd 不能为空")
+	}
+	if strings.TrimSpace(req.Workspace) == "" {
+		return req, nil, fmt.Errorf("trigger workspace 不能为空")
+	}
+	store := s.storeForBotID(req.BotID)
+	if store == nil {
+		return req, nil, fmt.Errorf("未找到 bot %s 的会话存储", displayBotID(req.BotID))
+	}
+	return req, store, nil
+}
+
+func (s *Service) storeForBotID(botID string) *SessionStore {
+	if s.stores == nil {
+		return nil
+	}
+	if store := s.stores[strings.TrimSpace(botID)]; store != nil {
+		return store
+	}
+	return s.stores[""]
+}
+
+func cleanExistingDirectory(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("工作目录不能为空")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("工作目录必须是绝对路径: %s", path)
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("工作目录不可访问: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("工作目录不是目录: %s", path)
+	}
+	return path, nil
+}
+
+type noopTriggerSink struct{}
+
+func (noopTriggerSink) OnUpdate(context.Context, TriggerResult) error {
+	return nil
+}
+
+func (noopTriggerSink) OnComplete(context.Context, TriggerResult) error {
+	return nil
+}
+
+func (noopTriggerSink) OnError(context.Context, TriggerResult) error {
+	return nil
+}

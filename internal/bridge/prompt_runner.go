@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"path/filepath"
 	"strings"
 	"time"
@@ -178,33 +177,16 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 	}
 	defer candidate.Abort()
 	sessionInfo := candidate.Info()
-	session.ACPSessionID = sessionInfo.SessionID
-	session.Cwd = filepath.Clean(cwd)
-	if strings.TrimSpace(session.Workspace) == "" {
-		session.Workspace = msg.Workspace
-	}
-	session.ACPMeta = maps.Clone(sessionInfo.Meta)
-	session.AvailableCommands = sessionInfo.AvailableCommands
-	session.ConfigOptions = sessionInfo.ConfigOptions
-	session.Models = sessionInfo.Models
+	workspace := sessionWorkspace(session, msg)
+	session = sessionWithACPInfo(session, sessionInfo, cwd, workspace)
 	store := s.storeForMessage(msg)
-	if store == nil {
-		if err := candidate.Commit(nil); err != nil {
-			return Session{}, fmt.Errorf("激活重建后的 ACP session 失败: %w", err)
-		}
-		return session, nil
-	}
-	replaced := false
-	if err := candidate.Commit(func() error {
-		var persistErr error
-		session, replaced, persistErr = store.ReplaceCurrentACPSession(previousACPSessionID, session)
-		if persistErr == nil && !replaced {
-			return errCurrentSessionChanged
-		}
-		return persistErr
-	}); err != nil {
+	session, err = commitCurrentACPSessionReplacement(candidate, store, previousACPSessionID, session)
+	if err != nil {
 		if errors.Is(err, errCurrentSessionChanged) {
 			return Session{}, fmt.Errorf("当前会话已变化，忽略旧会话的重建结果")
+		}
+		if store == nil {
+			return Session{}, fmt.Errorf("激活重建后的 ACP session 失败: %w", err)
 		}
 		return Session{}, fmt.Errorf("保存重建后的 ACP session 失败: %w", err)
 	}
@@ -213,15 +195,15 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
-	ctx, finish := s.startTaskWithOptions(ctx, session, agent, taskKindUser, runningTaskOptions{
+	out, err := runPromptTask(s, ctx, session, agent, runningTaskOptions{
 		drainPendingAtAuto: s.chatAtMode(msg) == atModeAuto && messageMentionsBot(msg),
+	}, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+		return s.promptRuntimeWithProgress(taskCtx, msg, session, agent, text)
 	})
-	defer finish()
-	result, sentProgress, err := s.promptRuntimeWithProgress(ctx, msg, session, agent, text)
 	if errors.Is(err, context.Canceled) {
-		return result, sentProgress, err
+		return out.result, out.sentProgress, err
 	}
-	return result, sentProgress, err
+	return out.result, out.sentProgress, err
 }
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {

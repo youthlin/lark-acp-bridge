@@ -31,6 +31,39 @@ func TestHandleFeishuSessionListSelectionOptionsAreLimited(t *testing.T) {
 	}
 }
 
+func TestFormatSessionListOnlyShowsCurrentIMHistory(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	imKey := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	otherIMKey := SessionKey{BotID: "bot-a", ChatID: "oc_other"}
+	scheduleKey := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "oc_chat", SubID: "run:1"}
+	commentKey := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "oc_chat", SubID: "comment-1"}
+	for _, session := range []Session{
+		{Key: imKey, Title: "IM 会话", AgentName: "traex", ACPSessionID: "im-session", Cwd: "/im"},
+		{Key: otherIMKey, Title: "其他 IM 会话", AgentName: "traex", ACPSessionID: "other-im-session", Cwd: "/other-im"},
+		{Key: scheduleKey, Title: "Schedule 会话", AgentName: "traex", ACPSessionID: "schedule-session", Cwd: "/schedule"},
+		{Key: commentKey, Title: "Drive 评论会话", AgentName: "traex", ACPSessionID: "comment-session", Cwd: "/comment"},
+	} {
+		if err := store.Upsert(session); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", session.ACPSessionID, err)
+		}
+	}
+	svc := newTestService(config.Default(), store)
+
+	reply := svc.formatSessionList(feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+	}, 0)
+	if !strings.Contains(reply, "im-session") || !strings.Contains(reply, "IM 会话") {
+		t.Fatalf("formatSessionList() = %q, want current IM history", reply)
+	}
+	for _, unexpected := range []string{"other-im-session", "schedule-session", "comment-session"} {
+		if strings.Contains(reply, unexpected) {
+			t.Fatalf("formatSessionList() = %q, should not include %s", reply, unexpected)
+		}
+	}
+}
+
 func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	firstDir := t.TempDir()

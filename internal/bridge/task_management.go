@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
@@ -29,6 +30,11 @@ type runningTask struct {
 
 type runningTaskOptions struct {
 	drainPendingAtAuto bool
+}
+
+type promptTaskRunResult struct {
+	result       acp.PromptResult
+	sentProgress bool
 }
 
 func (s *Service) startTask(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind) (context.Context, func()) {
@@ -73,6 +79,19 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 	}
 }
 
+func runUserTask[T any](s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (T, error)) (T, error) {
+	ctx, finish := s.startTaskWithOptions(ctx, session, agent, taskKindUser, opts)
+	defer finish()
+	return run(ctx)
+}
+
+func runPromptTask(s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (acp.PromptResult, bool, error)) (promptTaskRunResult, error) {
+	return runUserTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptTaskRunResult, error) {
+		result, sentProgress, err := run(taskCtx)
+		return promptTaskRunResult{result: result, sentProgress: sentProgress}, err
+	})
+}
+
 func (s *Service) setTaskCancelHandler(key SessionKey, handler func(context.Context, string)) {
 	if handler == nil {
 		return
@@ -108,6 +127,23 @@ func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) 
 			task.onCancel(ctx, reason)
 		}
 		go s.cancelRuntimeTask(ctx, task)
+	}
+}
+
+func (s *Service) cancelRunningSessionWorkSync(ctx context.Context, key SessionKey) {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	task := s.tasks[key]
+	delete(s.tasks, key)
+	s.taskMu.Unlock()
+	if task != nil {
+		reason := replacementCancelReason(task)
+		task.cancel()
+		s.markCanceledTask(task, reason)
+		if task.onCancel != nil {
+			task.onCancel(ctx, reason)
+		}
+		s.cancelRuntimeTask(ctx, task)
 	}
 }
 

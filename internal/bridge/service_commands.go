@@ -32,6 +32,9 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀",
 			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
 			"/loop add <补充消息>|status|stop - 补充下一轮 loop prompt、查看或停止当前会话的循环任务",
+			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
+			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
+			"/schedule list|status <id>|pause <id>|resume <id>|delete <id> - 管理定时任务",
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",
@@ -60,6 +63,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleWikiCommand(ctx, text, msg)
 	case "/loop":
 		return s.handleLoopCommand(ctx, text, msg)
+	case "/schedule":
+		return s.handleScheduleCommand(ctx, text, msg)
 	case "/cmds":
 		return s.handleCommandsCommand(ctx, text, msg)
 	case "/config":

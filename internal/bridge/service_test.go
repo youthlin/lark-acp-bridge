@@ -4368,6 +4368,76 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "处理完成。",
+		promptUpdates: []acp.PromptUpdate{
+			{SessionID: "acp-session-1", Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "处理中。"},
+			}},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "结合引用回答",
+		Reply: &feishu.ReplyContext{
+			MessageID:  "om_parent",
+			SenderID:   "ou_parent",
+			SenderType: "user",
+			MsgType:    "text",
+			Text:       "被回复的原文",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one IM prompt", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{"## Replied Message Context", "被回复的原文", "## User Message", "结合引用回答"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+	if len(cards) != 1 || !cards[0].isClosed() {
+		t.Fatalf("cards = %+v closed=%v, want one closed stream card", cards, len(cards) == 1 && cards[0].isClosed())
+	}
+	if got := cards[0].textUpdatesSnapshot(); len(got) == 0 || got[0] != "处理中。" {
+		t.Fatalf("textUpdates = %+v, want streamed text", got)
+	}
+	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	if !ok {
+		t.Fatal("IM session not stored")
+	}
+	t.Cleanup(func() { svc.cancelWikiTimer(session.Key) })
+	if !svc.hasWikiTimer(session.Key) {
+		t.Fatal("wiki timer not scheduled after successful IM prompt")
+	}
+}
+
 func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{

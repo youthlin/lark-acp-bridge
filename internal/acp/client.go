@@ -971,7 +971,7 @@ func (c *Client) readLoop(stdout io.Reader) {
 		// slog.Debug("read acp line", "line", arg.RawJSON(line), "comp", "acp-loop")
 		var msg Message
 		if err := json.Unmarshal(line, &msg); err != nil {
-			err := fmt.Errorf("ACP server stdout 输出非 JSON-RPC 消息: %w", err)
+			err = fmt.Errorf("ACP server stdout 输出非 JSON-RPC 消息: %w", err)
 			c.failPending(err)
 			c.Close()
 			return

@@ -152,6 +152,10 @@ type configDetailCardSender func(context.Context, Message, ConfigDetailCard) err
 
 type configDetailCardSenderKey struct{}
 
+type driveCommentReplySender func(context.Context, DriveComment, string) error
+
+type driveCommentReplySenderKey struct{}
+
 func WithIntermediateReplySender(ctx context.Context, sender func(context.Context, Message, string) error) context.Context {
 	if sender == nil {
 		return ctx
@@ -347,4 +351,19 @@ func SendConfigDetailCard(ctx context.Context, msg Message, card ConfigDetailCar
 		return false, nil
 	}
 	return true, sender(ctx, msg, card)
+}
+
+func WithDriveCommentReplySender(ctx context.Context, sender func(context.Context, DriveComment, string) error) context.Context {
+	if sender == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, driveCommentReplySenderKey{}, driveCommentReplySender(sender))
+}
+
+func ReplyDriveComment(ctx context.Context, comment DriveComment, text string) (bool, error) {
+	sender, ok := ctx.Value(driveCommentReplySenderKey{}).(driveCommentReplySender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender(ctx, comment, text)
 }

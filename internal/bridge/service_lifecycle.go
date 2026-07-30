@@ -47,6 +47,9 @@ func (s *Service) Start(ctx context.Context) error {
 	if configChanged {
 		s.persistResolvedConfig(ctx)
 	}
+	if err := s.loadAndStartScheduledTasks(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -86,6 +89,7 @@ func (s *Service) persistResolvedConfig(ctx context.Context) {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	slog.Info("关闭 ACP 桥接服务")
+	s.stopScheduledTasks()
 	s.cancelAllSessionWork(ctx)
 	for _, adapter := range s.feishu {
 		if err := adapter.Shutdown(ctx); err != nil {

@@ -17,9 +17,10 @@ type Service struct {
 	cfg            config.Config            // 配置文件
 	configPath     string                   // 配置文件路径，用于内置后台重启
 	registry       *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
+	runtime        acpRuntime               // acp client 运行时
 	feishu         []*feishu.Adapter        // Bots 实例
 	stores         map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
-	runtime        acpRuntime               // acp client 运行时
+	scheduleStores map[string]*ScheduledTaskStore
 	restartCommand func(context.Context) error
 	builtinRestart bool // 是否允许使用内置后台 restart
 
@@ -30,6 +31,8 @@ type Service struct {
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
 	loopStatuses    map[SessionKey]loopRunStatus
+	scheduleRuns    map[string]scheduleRunStatus
+	scheduleJobs    map[string]*scheduledTaskJob
 	pendingAtTexts  map[ChatKey][]pendingAtMessage
 	pendingAtAuto   map[SessionKey][]pendingAtMessage
 
@@ -46,6 +49,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		cfg:             cfg,
 		registry:        acp.NewRegistry(cfg),
 		stores:          make(map[string]*SessionStore),
+		scheduleStores:  make(map[string]*ScheduledTaskStore),
 		runtime:         newRuntimeManager(),
 		tasks:           make(map[SessionKey]*runningTask),
 		wikiTasks:       make(map[runtimeKey]*runningTask),
@@ -53,6 +57,8 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		wikiGenerations: make(map[SessionKey]int64),
 		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
 		loopStatuses:    make(map[SessionKey]loopRunStatus),
+		scheduleRuns:    make(map[string]scheduleRunStatus),
+		scheduleJobs:    make(map[string]*scheduledTaskJob),
 		pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
 		pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
 		acpUpdateUnsub:  make(map[SessionKey]func()),
@@ -64,6 +70,9 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			s.stores[bot.ID] = store
 		} else if strings.TrimSpace(bot.Workspace) != "" {
 			s.stores[bot.ID] = NewSessionStore(filepath.Join(bot.Workspace, "sessions.json"))
+		}
+		if strings.TrimSpace(bot.Workspace) != "" {
+			s.scheduleStores[bot.ID] = NewScheduledTaskStore(filepath.Join(bot.Workspace, "scheduled_tasks.json"))
 		}
 	}
 	if store != nil {

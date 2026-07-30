@@ -15,6 +15,7 @@ import (
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
+	larkdrive "github.com/larksuite/oapi-sdk-go/v3/service/drive/v1"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
@@ -42,6 +43,10 @@ type LoopCancelHandler interface {
 	HandleLoopCancel(context.Context, LoopCancel) (string, error)
 }
 
+type DriveCommentHandler interface {
+	HandleDriveComment(context.Context, DriveComment) error
+}
+
 type Adapter struct {
 	cfg             config.BotConfig        // Bot配置
 	handler         Handler                 // 消息处理
@@ -52,6 +57,7 @@ type Adapter struct {
 	messages        messageClient           // 消息读取
 	chatInfo        chatInfoClient          // 群信息读取
 	applications    applicationClient       // 应用信息读取
+	driveComments   driveCommentClient      // Drive 评论读取和回复
 	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
 	chatInfoCache   *chatInfoCache          // 群信息缓存
 }
@@ -74,6 +80,11 @@ type applicationClient interface {
 	GetApplication(ctx context.Context) (applicationOwnerCandidates, error)
 	GetCollaborators(ctx context.Context) ([]applicationCollaborator, error)
 	GetBotOpenID(ctx context.Context) (string, error)
+}
+
+type driveCommentClient interface {
+	GetComment(ctx context.Context, fileToken, fileType, commentID string) (DriveCommentDetail, error)
+	ReplyComment(ctx context.Context, comment DriveComment, text string) error
 }
 
 type applicationOwnerCandidates struct {
@@ -170,15 +181,13 @@ func (a *Adapter) Start(ctx context.Context) error {
 	if a.applications == nil {
 		a.applications = larkApplicationClient{client: a.client}
 	}
+	if a.driveComments == nil {
+		a.driveComments = larkDriveCommentClient{client: a.client}
+	}
 	a.resolveBotOpenID(ctx)
 	a.resolveOwnerOpenIDs(ctx)
 
-	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
-		OnP2MessageReceiveV1(a.handleMessage).
-		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
-		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
-		OnP2CardActionTrigger(a.handleCardAction)
-	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler")))
+	handler := a.newEventDispatcher()
 
 	a.ws = larkws.NewClient(
 		a.cfg.AppID,
@@ -193,6 +202,17 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}()
 	slog.Info("启动飞书 WebSocket 监听")
 	return nil
+}
+
+func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
+	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
+		OnP2MessageReceiveV1(a.handleMessage).
+		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
+		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
+		OnP2NoticeCommentAddV1(a.handleDriveCommentAdd).
+		OnP2CardActionTrigger(a.handleCardAction)
+	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler")))
+	return handler
 }
 
 func (a *Adapter) resolveBotOpenID(ctx context.Context) {
@@ -296,6 +316,10 @@ type larkApplicationClient struct {
 	client *lark.Client
 }
 
+type larkDriveCommentClient struct {
+	client *lark.Client
+}
+
 func (c larkApplicationClient) GetApplication(ctx context.Context) (applicationOwnerCandidates, error) {
 	resp, err := c.client.Application.Application.Get(ctx, larkapplication.NewGetApplicationReqBuilder().
 		AppId("me").
@@ -371,6 +395,75 @@ func (c larkApplicationClient) GetBotOpenID(ctx context.Context) (string, error)
 		return "", fmt.Errorf("飞书获取机器人信息接口返回错误: code=%d msg=%s", result.Code, result.Msg)
 	}
 	return strings.TrimSpace(result.Bot.OpenID), nil
+}
+
+func (c larkDriveCommentClient) GetComment(ctx context.Context, fileToken, fileType, commentID string) (DriveCommentDetail, error) {
+	if c.client == nil {
+		return DriveCommentDetail{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	fileToken = strings.TrimSpace(fileToken)
+	fileType = strings.TrimSpace(fileType)
+	commentID = strings.TrimSpace(commentID)
+	if fileToken == "" || fileType == "" || commentID == "" {
+		return DriveCommentDetail{}, fmt.Errorf("Drive 评论参数不完整")
+	}
+	req := larkdrive.NewGetFileCommentReqBuilder().
+		FileToken(fileToken).
+		CommentId(commentID).
+		FileType(fileType).
+		UserIdType(larkdrive.UserIdTypeGetFileCommentOpenId).
+		Build()
+	resp, err := c.client.Drive.V1.FileComment.Get(ctx, req)
+	if err != nil {
+		return DriveCommentDetail{}, fmt.Errorf("调用飞书获取 Drive 评论接口: %w", err)
+	}
+	if resp == nil || !resp.Success() {
+		code, msg := 0, ""
+		if resp != nil {
+			code, msg = resp.Code, resp.Msg
+		}
+		return DriveCommentDetail{}, fmt.Errorf("飞书获取 Drive 评论接口返回错误: code=%d msg=%s", code, msg)
+	}
+	if resp.Data == nil {
+		return DriveCommentDetail{}, fmt.Errorf("飞书获取 Drive 评论接口未返回数据")
+	}
+	return driveCommentDetailFromGetResp(resp.Data), nil
+}
+
+func (c larkDriveCommentClient) ReplyComment(ctx context.Context, comment DriveComment, text string) error {
+	if c.client == nil {
+		return fmt.Errorf("飞书客户端未初始化")
+	}
+	comment = comment.Normalized()
+	text = strings.TrimSpace(text)
+	if comment.FileToken == "" || comment.FileType == "" || comment.CommentID == "" {
+		return fmt.Errorf("Drive 评论参数不完整")
+	}
+	if text == "" {
+		return nil
+	}
+	body := larkdrive.NewCreateFileCommentReplyReqBodyBuilder().
+		Content(driveReplyContentFromText(text)).
+		Build()
+	req := larkdrive.NewCreateFileCommentReplyReqBuilder().
+		FileToken(comment.FileToken).
+		CommentId(comment.CommentID).
+		FileType(comment.FileType).
+		UserIdType(larkdrive.UserIdTypeCreateFileCommentReplyOpenId).
+		Body(body).
+		Build()
+	resp, err := c.client.Drive.V1.FileCommentReply.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("调用飞书回复 Drive 评论接口: %w", err)
+	}
+	if resp == nil || !resp.Success() {
+		code, msg := 0, ""
+		if resp != nil {
+			code, msg = resp.Code, resp.Msg
+		}
+		return fmt.Errorf("飞书回复 Drive 评论接口返回错误: code=%d msg=%s", code, msg)
+	}
+	return nil
 }
 
 type larkChatInfoClient struct {

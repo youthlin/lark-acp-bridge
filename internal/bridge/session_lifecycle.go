@@ -185,6 +185,40 @@ func latestSessionForKey(store *SessionStore, key SessionKey, fallback Session) 
 	return fallback
 }
 
+func sessionWithACPInfo(session Session, info acp.SessionInfo, cwd string, workspace string) Session {
+	session.ACPSessionID = info.SessionID
+	session.Cwd = filepath.Clean(cwd)
+	session.Workspace = strings.TrimSpace(workspace)
+	session.ACPMeta = maps.Clone(info.Meta)
+	session.AvailableCommands = append([]acp.AvailableCommand(nil), info.AvailableCommands...)
+	session.ConfigOptions = append([]acp.SessionConfigOption(nil), info.ConfigOptions...)
+	session.Models = info.Models
+	session.Mode = info.Mode
+	return session
+}
+
+func commitCurrentACPSessionReplacement(candidate acpSessionCandidate, store *SessionStore, previousACPSessionID string, replacement Session) (Session, error) {
+	if store == nil {
+		if err := candidate.Commit(nil); err != nil {
+			return Session{}, err
+		}
+		return replacement, nil
+	}
+	session := replacement
+	replaced := false
+	if err := candidate.Commit(func() error {
+		var persistErr error
+		session, replaced, persistErr = store.ReplaceCurrentACPSession(previousACPSessionID, replacement)
+		if persistErr == nil && !replaced {
+			return errCurrentSessionChanged
+		}
+		return persistErr
+	}); err != nil {
+		return Session{}, err
+	}
+	return session, nil
+}
+
 type newSessionRequest struct {
 	Cwd         string
 	Title       string
@@ -306,6 +340,10 @@ func titleFromPrompt(text string) string {
 }
 
 func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Message, session Session, userText string) Session {
+	return updateAutomaticSessionTitleInStore(ctx, s.storeForMessage(msg), session, userText)
+}
+
+func updateAutomaticSessionTitleInStore(ctx context.Context, store *SessionStore, session Session, userText string) Session {
 	if session.ManualTitle {
 		return session
 	}
@@ -313,7 +351,6 @@ func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Me
 	if title == "" {
 		return session
 	}
-	store := s.storeForMessage(msg)
 	if store == nil {
 		session.Title = title
 		return session
