@@ -90,15 +90,18 @@ func (s *Service) setSessionConfigOption(ctx context.Context, msg feishu.Message
 		slog.ErrorContext(ctx, "设置 ACP config option 失败", "config_id", opt.ID, "value", value, "错误", err)
 		return nil, "", fmt.Errorf("设置配置项失败：%w", err)
 	}
-	session.ConfigOptions = options
-	if updated, ok := findConfigOption(session, opt.ID); ok {
+	updatedSession := session
+	updatedSession.ConfigOptions = options
+	if updated, ok := findConfigOption(updatedSession, opt.ID); ok {
 		if strings.TrimSpace(updated.Type) == "boolean" {
 			display = configOptionValueString(updated.CurrentValue)
 		} else {
 			display = configOptionDisplayName(updated, configOptionValueString(updated.CurrentValue))
 		}
 	}
-	s.saveSessionState(ctx, msg, session)
+	s.updateSessionState(ctx, msg, session, func(current *Session) {
+		current.ConfigOptions = append([]acp.SessionConfigOption(nil), options...)
+	})
 	return value, display, nil
 }
 
@@ -265,14 +268,13 @@ func (s *Service) HandleModeSelection(ctx context.Context, selection feishu.Mode
 		ChatID:   selection.ChatID,
 		ThreadID: selection.ThreadID,
 	}
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return "", fmt.Errorf("会话持久化未初始化")
-	}
-	key := SessionKey{BotID: selection.BotID, ChatID: selection.ChatID, ThreadID: selection.ThreadID}
-	session, ok := store.Get(key)
-	if !ok || session.ACPSessionID != selection.ACPSessionID {
-		return "", fmt.Errorf("该模式选择卡片已过期，请重新发送 /mode")
+	session, err := s.selectionSession(
+		msg,
+		selection.ACPSessionID,
+		"该模式选择卡片已过期，请重新发送 /mode",
+	)
+	if err != nil {
+		return "", err
 	}
 	_, display, err := s.setSessionMode(ctx, msg, session, selection.Mode)
 	if err != nil {
@@ -300,7 +302,12 @@ func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, sessio
 			session.Mode = &acp.SessionModeState{}
 		}
 		session.Mode.CurrentModeID = value
-		s.saveSessionState(ctx, msg, session)
+		s.updateSessionState(ctx, msg, session, func(current *Session) {
+			if current.Mode == nil {
+				current.Mode = &acp.SessionModeState{}
+			}
+			current.Mode.CurrentModeID = value
+		})
 		return value, legacyModeDisplayName(session.Mode, value), nil
 	}
 	value, ok := resolveModeValue(modeOpt, target)
@@ -312,13 +319,23 @@ func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, sessio
 		slog.ErrorContext(ctx, "设置 ACP mode 失败", "mode", value, "错误", err)
 		return "", "", fmt.Errorf("设置模式失败：%w", err)
 	}
-	session.ConfigOptions = options
-	if modeOpt, ok := findModeConfigOption(session); ok {
-		if configOptionValueString(modeOpt.CurrentValue) == value && session.Mode != nil {
-			session.Mode.CurrentModeID = value
+	updatedSession := session
+	updatedSession.ConfigOptions = options
+	currentModeID := ""
+	if modeOpt, ok := findModeConfigOption(updatedSession); ok {
+		if configOptionValueString(modeOpt.CurrentValue) == value && updatedSession.Mode != nil {
+			currentModeID = value
 		}
 	}
-	s.saveSessionState(ctx, msg, session)
+	s.updateSessionState(ctx, msg, session, func(current *Session) {
+		current.ConfigOptions = append([]acp.SessionConfigOption(nil), options...)
+		if currentModeID != "" {
+			if current.Mode == nil {
+				current.Mode = &acp.SessionModeState{}
+			}
+			current.Mode.CurrentModeID = currentModeID
+		}
+	})
 	return value, configOptionDisplayName(modeOpt, value), nil
 }
 
@@ -331,14 +348,13 @@ func (s *Service) HandleModelSelection(ctx context.Context, selection feishu.Mod
 		ChatID:   selection.ChatID,
 		ThreadID: selection.ThreadID,
 	}
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return "", fmt.Errorf("会话持久化未初始化")
-	}
-	key := SessionKey{BotID: selection.BotID, ChatID: selection.ChatID, ThreadID: selection.ThreadID}
-	session, ok := store.Get(key)
-	if !ok || session.ACPSessionID != selection.ACPSessionID {
-		return "", fmt.Errorf("该模型选择卡片已过期，请重新发送 /model")
+	session, err := s.selectionSession(
+		msg,
+		selection.ACPSessionID,
+		"该模型选择卡片已过期，请重新发送 /model",
+	)
+	if err != nil {
+		return "", err
 	}
 	_, display, err := s.setSessionModel(ctx, msg, session, selection.Model)
 	if err != nil {
@@ -365,14 +381,37 @@ func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, sessi
 		slog.ErrorContext(ctx, "设置 ACP model 失败", "model", value, "错误", err)
 		return "", "", fmt.Errorf("设置模型失败：%w", err)
 	}
-	session.ConfigOptions = options
-	if modelOpt, ok := findModelConfigOption(session); ok {
-		if modelValueString(modelOpt.CurrentValue) == value && session.Models != nil {
-			session.Models.CurrentModelID = value
+	updatedSession := session
+	updatedSession.ConfigOptions = options
+	currentModelID := ""
+	if modelOpt, ok := findModelConfigOption(updatedSession); ok {
+		if modelValueString(modelOpt.CurrentValue) == value && updatedSession.Models != nil {
+			currentModelID = value
 		}
 	}
-	s.saveSessionState(ctx, msg, session)
+	s.updateSessionState(ctx, msg, session, func(current *Session) {
+		current.ConfigOptions = append([]acp.SessionConfigOption(nil), options...)
+		if currentModelID != "" {
+			if current.Models == nil {
+				current.Models = &acp.SessionModelState{}
+			}
+			current.Models.CurrentModelID = currentModelID
+		}
+	})
 	return value, modelOptionName(modelOpt, value), nil
+}
+
+func (s *Service) selectionSession(msg feishu.Message, acpSessionID string, expiredMessage string) (Session, error) {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return Session{}, fmt.Errorf("会话持久化未初始化")
+	}
+	key := SessionKey{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: msg.ThreadID}
+	session, ok := store.Get(key)
+	if !ok || session.ACPSessionID != acpSessionID {
+		return Session{}, errors.New(expiredMessage)
+	}
+	return session, nil
 }
 
 func validateSelectionRequester(requesterID string, operatorID string, label string, command string, action string) error {

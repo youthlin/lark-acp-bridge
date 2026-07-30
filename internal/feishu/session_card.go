@@ -12,12 +12,14 @@ import (
 const sessionSelectionCardAction = "acp_session_selection"
 
 type SessionSelection struct {
-	BotID        string
-	ChatID       string
-	ThreadID     string
-	RequesterID  string
-	OperatorID   string
-	ACPSessionID string
+	BotID               string
+	ChatID              string
+	ThreadID            string
+	GroupMessageType    string
+	RequesterID         string
+	OperatorID          string
+	CurrentACPSessionID string
+	ACPSessionID        string
 }
 
 func (a *Adapter) SendSessionSelectionCard(ctx context.Context, msg Message, card SessionSelectionCard) error {
@@ -41,11 +43,13 @@ func (a *Adapter) handleSessionSelectionAction(ctx context.Context, event *callb
 		sessionID = stringValue(value, "acp_session_id")
 	}
 	selection := SessionSelection{
-		BotID:        stringValue(value, "bot_id"),
-		ChatID:       stringValue(value, "chat_id"),
-		ThreadID:     stringValue(value, "thread_id"),
-		RequesterID:  stringValue(value, "requester_id"),
-		ACPSessionID: sessionID,
+		BotID:               stringValue(value, "bot_id"),
+		ChatID:              stringValue(value, "chat_id"),
+		ThreadID:            stringValue(value, "thread_id"),
+		GroupMessageType:    stringValue(value, "group_message_type"),
+		RequesterID:         stringValue(value, "requester_id"),
+		CurrentACPSessionID: stringValue(value, "current_acp_session_id"),
+		ACPSessionID:        sessionID,
 	}
 	if event.Event.Operator != nil {
 		selection.OperatorID = strings.TrimSpace(event.Event.Operator.OpenID)
@@ -96,11 +100,13 @@ func newSessionSelectionCardJSON(card SessionSelectionCard) string {
 			cardJSON{
 				"type": "callback",
 				"value": cardJSON{
-					"action":       sessionSelectionCardAction,
-					"bot_id":       card.BotID,
-					"chat_id":      card.ChatID,
-					"thread_id":    card.ThreadID,
-					"requester_id": card.RequesterID,
+					"action":                 sessionSelectionCardAction,
+					"bot_id":                 card.BotID,
+					"chat_id":                card.ChatID,
+					"thread_id":              card.ThreadID,
+					"group_message_type":     card.GroupMessageType,
+					"requester_id":           card.RequesterID,
+					"current_acp_session_id": strings.TrimSpace(card.CurrentACPSessionID),
 				},
 			},
 		},

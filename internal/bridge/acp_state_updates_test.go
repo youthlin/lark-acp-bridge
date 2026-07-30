@@ -1,9 +1,13 @@
 package bridge
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
+	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
 func TestApplyACPStateUpdateAllowsEmptyLists(t *testing.T) {
@@ -204,5 +208,85 @@ func TestApplyACPStateUpdatePersistsACPMeta(t *testing.T) {
 	}
 	if len(session.ACPMeta) != 0 {
 		t.Fatalf("ACPMeta = %+v, want empty", session.ACPMeta)
+	}
+}
+
+func TestSessionStoreUpdateCurrentSessionAppliesUpdateToLatestState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	latest := Session{
+		Key:          key,
+		Title:        "手动标题",
+		ManualTitle:  true,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo",
+	}
+	if err := store.Upsert(latest); err != nil {
+		t.Fatalf("Upsert(latest) error = %v", err)
+	}
+
+	err := store.UpdateCurrentSession(key, latest.ACPSessionID, func(session *Session) bool {
+		return applyACPStateUpdate(session, acp.SessionUpdate{
+			SessionUpdate: "available_commands_update",
+			AvailableCommands: []acp.AvailableCommand{
+				{Name: "review"},
+			},
+		})
+	})
+	if err != nil {
+		t.Fatalf("UpdateCurrentSession() error = %v", err)
+	}
+	updated, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("updated session not found")
+	}
+	if updated.Title != latest.Title || !updated.ManualTitle {
+		t.Fatalf("updated title = %q manual=%v, want latest manual title", updated.Title, updated.ManualTitle)
+	}
+	if len(updated.AvailableCommands) != 1 || updated.AvailableCommands[0].Name != "review" {
+		t.Fatalf("AvailableCommands = %+v, want review update", updated.AvailableCommands)
+	}
+
+	if err := store.UpdateCurrentSession(key, "stale-session", func(session *Session) bool {
+		session.Title = "过期更新"
+		return true
+	}); err != nil {
+		t.Fatalf("UpdateCurrentSession(stale) error = %v", err)
+	}
+	updated, ok = store.Get(key)
+	if !ok || updated.Title != latest.Title {
+		t.Fatalf("session after stale update = %+v ok=%v, want unchanged", updated, ok)
+	}
+}
+
+func TestUpdateSessionStateOnlyAppliesDeclaredFields(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	stale := testReadySession(t, store)
+	latest := stale
+	latest.Title = "手动标题"
+	latest.ManualTitle = true
+	latest.AvailableCommands = []acp.AvailableCommand{{Name: "review"}}
+	if err := store.Upsert(latest); err != nil {
+		t.Fatalf("Upsert(latest) error = %v", err)
+	}
+	svc := newTestService(config.Default(), store)
+
+	options := []acp.SessionConfigOption{
+		{ID: "reasoning", Type: "select", CurrentValue: "high"},
+	}
+	svc.updateSessionState(context.Background(), feishu.Message{BotID: stale.Key.BotID}, stale, func(current *Session) {
+		current.ConfigOptions = append([]acp.SessionConfigOption(nil), options...)
+	})
+
+	updated, ok := store.Get(stale.Key)
+	if !ok {
+		t.Fatalf("updated session not found")
+	}
+	if updated.Title != latest.Title || !updated.ManualTitle || !sessionHasCommand(updated, "review") {
+		t.Fatalf("updated session = %+v, want latest title and commands preserved", updated)
+	}
+	if option, ok := findConfigOption(updated, "reasoning"); !ok || configOptionValueString(option.CurrentValue) != "high" {
+		t.Fatalf("ConfigOptions = %+v, want reasoning high", updated.ConfigOptions)
 	}
 }

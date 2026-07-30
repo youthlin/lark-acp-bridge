@@ -249,3 +249,27 @@ func TestHandleModeSelectionFallsBackToLegacySetMode(t *testing.T) {
 		t.Fatalf("updated session = %+v, want legacy mode plan persisted", updated)
 	}
 }
+
+func TestSelectionSessionUsesCallbackSessionKey(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	svc := newTestService(config.Default(), store)
+
+	got, err := svc.selectionSession(feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.ThreadID,
+	}, session.ACPSessionID, "card expired")
+	if err != nil {
+		t.Fatalf("selectionSession() error = %v", err)
+	}
+	if got.Key != session.Key {
+		t.Fatalf("selectionSession() key = %+v, want %+v", got.Key, session.Key)
+	}
+
+	missingStore := newTestService(config.Default(), nil)
+	_, err = missingStore.selectionSession(feishu.Message{BotID: "unknown-bot", ChatID: "oc_chat"}, "acp-session", "card expired")
+	if err == nil || !strings.Contains(err.Error(), "会话持久化未初始化") {
+		t.Fatalf("selectionSession() error = %v, want missing store error", err)
+	}
+}

@@ -51,16 +51,10 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
 		}, "\n")
 	case "/new":
-		if isTopicGroupMessage(msg) {
-			return "话题群内不支持使用 /new 手动切换会话；新发一条话题消息会自动创建独立会话。"
-		}
 		return s.newSession(ctx, fields, msg)
 	case "/agent":
 		return s.handleAgentCommand(ctx, text, msg)
 	case "/session":
-		if isTopicGroupMessage(msg) {
-			return "话题群内不支持使用 /session 命令；每条话题会自动维护独立会话。"
-		}
 		return s.handleSessionCommand(ctx, text, msg)
 	case "/wiki":
 		return s.handleWikiCommand(ctx, text, msg)

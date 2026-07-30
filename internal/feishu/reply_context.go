@@ -128,6 +128,7 @@ type SessionSelectionCard struct {
 	BotID               string
 	ChatID              string
 	ThreadID            string
+	GroupMessageType    string
 	RequesterID         string
 	CurrentACPSessionID string
 	Options             []SessionOption

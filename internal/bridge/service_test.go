@@ -1785,6 +1785,47 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 	}
 }
 
+func TestRefreshACPSessionDoesNotReplaceNewCurrentSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	oldSession := Session{
+		Key:          key,
+		Title:        "旧会话",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(oldSession); err != nil {
+		t.Fatalf("Upsert(oldSession) error = %v", err)
+	}
+	newCurrent := oldSession
+	newCurrent.Title = "新会话"
+	newCurrent.ACPSessionID = "acp-session-current"
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-refreshed",
+		afterNewSession: func(SessionKey, string) {
+			if err := store.Upsert(newCurrent); err != nil {
+				t.Errorf("Upsert(newCurrent) error = %v", err)
+			}
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := svc.refreshACPSession(context.Background(), feishu.Message{
+		BotID:    key.BotID,
+		ChatID:   key.ChatID,
+		ChatType: "p2p",
+	}, oldSession, mustConfigAgent(t, config.Default(), "traex"))
+	if err == nil || !strings.Contains(err.Error(), "当前会话已变化") {
+		t.Fatalf("refreshACPSession() error = %v, want changed session error", err)
+	}
+	persisted, ok := store.Get(key)
+	if !ok || persisted.ACPSessionID != newCurrent.ACPSessionID || persisted.Title != newCurrent.Title {
+		t.Fatalf("persisted session = %+v, %v; want new current session unchanged", persisted, ok)
+	}
+}
+
 func TestHandleFeishuMessageIncludesReplyContextInPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -3360,56 +3401,120 @@ func TestHandleFeishuNewTopicWithoutThreadDoesNotReusePreviousTopicSession(t *te
 	}
 }
 
-func TestHandleFeishuTopicThreadRejectsManualNewAndSessionCommands(t *testing.T) {
+func TestHandleFeishuTopicThreadAllowsNewAndSessionCommands(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	workDir := t.TempDir()
-	rt := &fakeRuntime{newSessionID: "acp-session-1"}
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-1", "acp-session-2"}}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	base := feishu.Message{
-		BotID:    "bot-a",
-		ChatID:   "oc_group",
-		ChatType: "topic_group",
-		ThreadID: "omt_topic",
-		SenderID: testOwnerOpenID,
-		Mentions: []feishu.Mention{testBotMention("智能助手")},
+		BotID:            "bot-a",
+		ChatID:           "oc_group",
+		ChatType:         "topic_group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic",
+		SenderID:         testOwnerOpenID,
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
 	}
 
-	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     base.BotID,
-		ChatID:    base.ChatID,
-		ChatType:  base.ChatType,
-		ThreadID:  base.ThreadID,
-		SenderID:  base.SenderID,
-		Mentions:  base.Mentions,
-		MessageID: "om_new",
-		Text:      "@智能助手 /new " + workDir,
-	})
-	if err != nil {
-		t.Fatalf("HandleFeishuMessage(topic /new) error = %v", err)
+	for i, command := range []string{
+		"@智能助手 /new " + firstDir + " 第一个",
+		"@智能助手 /new " + secondDir + " 第二个",
+	} {
+		msg := base
+		msg.MessageID = fmt.Sprintf("om_new_%d", i+1)
+		msg.Text = command
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(topic /new %d) error = %v", i+1, err)
+		}
+		if !strings.Contains(reply, fmt.Sprintf("acp-session-%d", i+1)) {
+			t.Fatalf("reply = %q, want created topic session %d", reply, i+1)
+		}
 	}
-	if !strings.Contains(reply, "话题群内不支持使用 /new") {
-		t.Fatalf("reply = %q, want topic /new rejection", reply)
+	topicKey := SessionKey{BotID: base.BotID, ChatID: base.ChatID, ThreadID: base.ThreadID}
+	if len(rt.newCalls) != 2 || rt.newCalls[0].Key != topicKey || rt.newCalls[1].Key != topicKey {
+		t.Fatalf("newCalls = %+v, want both sessions scoped to current topic", rt.newCalls)
 	}
-	if len(rt.newCalls) != 0 {
-		t.Fatalf("newCalls = %+v, want no manual topic session creation", rt.newCalls)
+	if _, ok := store.Get(SessionKey{BotID: base.BotID, ChatID: base.ChatID}); ok {
+		t.Fatal("topic /new unexpectedly created a chat-level session")
 	}
 
-	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     base.BotID,
-		ChatID:    base.ChatID,
-		ChatType:  base.ChatType,
-		ThreadID:  base.ThreadID,
-		SenderID:  base.SenderID,
-		Mentions:  base.Mentions,
-		MessageID: "om_session",
-		Text:      "@智能助手 /session list",
-	})
+	titleMsg := base
+	titleMsg.MessageID = "om_title"
+	titleMsg.Text = "@智能助手 /session title 当前话题"
+	reply, err := handleFeishuMessage(t, svc, context.Background(), titleMsg)
 	if err != nil {
-		t.Fatalf("HandleFeishuMessage(topic /session) error = %v", err)
+		t.Fatalf("HandleFeishuMessage(topic /session title) error = %v", err)
 	}
-	if !strings.Contains(reply, "话题群内不支持使用 /session") {
-		t.Fatalf("reply = %q, want topic /session rejection", reply)
+	if !strings.Contains(reply, "已设置当前会话标题：当前话题") {
+		t.Fatalf("reply = %q, want topic title update", reply)
+	}
+
+	var card feishu.SessionSelectionCard
+	ctx := feishu.WithSessionSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, sent feishu.SessionSelectionCard) error {
+		card = sent
+		return nil
+	})
+	listMsg := base
+	listMsg.MessageID = "om_list"
+	listMsg.Text = "@智能助手 /session list"
+	reply, err = handleFeishuMessage(t, svc, ctx, listMsg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic /session list) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want topic session card only", reply)
+	}
+	if card.ThreadID != base.ThreadID || card.GroupMessageType != "thread" ||
+		card.CurrentACPSessionID != "acp-session-2" || len(card.Options) != 2 {
+		t.Fatalf("card = %+v, want complete topic callback context and two sessions", card)
+	}
+
+	resumeMsg := base
+	resumeMsg.MessageID = "om_resume"
+	resumeMsg.Text = "@智能助手 /session resume 2"
+	reply, err = handleFeishuMessage(t, svc, context.Background(), resumeMsg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic /session resume) error = %v", err)
+	}
+	if !strings.Contains(reply, "已恢复会话 2") || !strings.Contains(reply, "session：acp-session-1") {
+		t.Fatalf("reply = %q, want first topic session restored", reply)
+	}
+	current, ok := store.Get(topicKey)
+	if !ok || current.ACPSessionID != "acp-session-1" {
+		t.Fatalf("current topic session = %+v, %v; want first session", current, ok)
+	}
+}
+
+func TestHandleFeishuTopicThreadCommandsRemainOwnerOnly(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
+	msg := feishu.Message{
+		BotID:            "bot-a",
+		ChatID:           "oc_group",
+		ChatType:         "topic_group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic",
+		SenderID:         "ou_other",
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
+	}
+
+	for _, command := range []string{
+		"@智能助手 /new " + t.TempDir(),
+		"@智能助手 /session list",
+	} {
+		msg.MessageID = "om_" + strings.Fields(command)[1]
+		msg.Text = command
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%q) error = %v", command, err)
+		}
+		if reply != "只有 bot owner 可以执行斜杠命令。" {
+			t.Fatalf("HandleFeishuMessage(%q) = %q, want owner-only rejection", command, reply)
+		}
 	}
 }
 
@@ -7787,6 +7892,11 @@ type fakeRuntime struct {
 	shutdownCancelCount int
 	updateHandlers      map[SessionKey][]acp.UpdateHandler
 	blockWikiRuntime    chan struct{}
+	activeSessionIDs    map[SessionKey]string
+	abortedSessionIDs   []string
+	transitionBefore    func()
+	transitionMu        sync.Mutex
+	transitionCloseErr  error
 }
 
 type fakeNewCall struct {
@@ -7819,13 +7929,13 @@ type fakeModeCall struct {
 	ModeID  string
 }
 
-func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
+func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	f.mu.Lock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
 	if f.newSessionError != nil {
 		err := f.newSessionError
 		f.mu.Unlock()
-		return acp.SessionInfo{}, err
+		return nil, err
 	}
 	info := f.newSessionInfo
 	afterNewSession := f.afterNewSession
@@ -7847,7 +7957,54 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 	if afterNewSession != nil {
 		afterNewSession(key, info.SessionID)
 	}
-	return info, nil
+	return &fakeSessionCandidate{runtime: f, key: key, info: info}, nil
+}
+
+type fakeSessionCandidate struct {
+	runtime   *fakeRuntime
+	key       SessionKey
+	info      acp.SessionInfo
+	committed bool
+	aborted   bool
+}
+
+func (c *fakeSessionCandidate) Info() acp.SessionInfo {
+	return c.info
+}
+
+func (c *fakeSessionCandidate) Commit(persist func() error) error {
+	c.runtime.transitionMu.Lock()
+	defer c.runtime.transitionMu.Unlock()
+	if c.committed {
+		return nil
+	}
+	if c.aborted {
+		return fmt.Errorf("ACP session 候选已关闭")
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			c.Abort()
+			return err
+		}
+	}
+	c.runtime.mu.Lock()
+	if c.runtime.activeSessionIDs == nil {
+		c.runtime.activeSessionIDs = make(map[SessionKey]string)
+	}
+	c.runtime.activeSessionIDs[c.key] = c.info.SessionID
+	c.runtime.mu.Unlock()
+	c.committed = true
+	return nil
+}
+
+func (c *fakeSessionCandidate) Abort() {
+	if c.committed || c.aborted {
+		return
+	}
+	c.aborted = true
+	c.runtime.mu.Lock()
+	c.runtime.abortedSessionIDs = append(c.runtime.abortedSessionIDs, c.info.SessionID)
+	c.runtime.mu.Unlock()
 }
 
 func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
@@ -7979,6 +8136,36 @@ func (f *fakeRuntime) CloseRuntimeKey(key runtimeKey) error {
 	defer f.mu.Unlock()
 	f.closedRuntimeKeys = append(f.closedRuntimeKeys, key)
 	return nil
+}
+
+func (f *fakeRuntime) TransitionCurrentSession(key SessionKey, expectedSessionID string, transition func() (Session, bool, error)) (Session, bool, error) {
+	f.transitionMu.Lock()
+	defer f.transitionMu.Unlock()
+	f.mu.Lock()
+	before := f.transitionBefore
+	f.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	f.mu.Lock()
+	activeSessionID := f.activeSessionIDs[key]
+	f.mu.Unlock()
+	if activeSessionID != "" && activeSessionID != expectedSessionID {
+		return Session{}, false, nil
+	}
+	session, changed, err := transition()
+	if err != nil || !changed {
+		return session, changed, err
+	}
+	f.mu.Lock()
+	f.closedKeys = append(f.closedKeys, key)
+	if f.activeSessionIDs == nil {
+		f.activeSessionIDs = make(map[SessionKey]string)
+	}
+	f.activeSessionIDs[key] = session.ACPSessionID
+	closeErr := f.transitionCloseErr
+	f.mu.Unlock()
+	return session, true, closeErr
 }
 
 func (f *fakeRuntime) CloseSession(key SessionKey) error {

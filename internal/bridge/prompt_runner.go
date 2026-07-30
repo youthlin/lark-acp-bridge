@@ -17,6 +17,8 @@ import (
 
 const promptCardFinalUpdateLimit = 15 * time.Second
 
+var errCurrentSessionChanged = errors.New("current session changed")
+
 type promptSessionOptions struct {
 	SkipPostPromptWork     bool
 	SkipPendingAtAutoDrain bool
@@ -168,11 +170,14 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 	if cwd == "" {
 		return Session{}, fmt.Errorf("当前会话缺少工作目录，无法重建 ACP session")
 	}
+	previousACPSessionID := session.ACPSessionID
 	slog.WarnContext(ctx, "持久化 ACP session 不可恢复，准备重建", "session", session.ACPSessionID, "cwd", cwd)
-	sessionInfo, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, filepath.Clean(cwd), sessionWorkspace(session, msg))
+	candidate, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, filepath.Clean(cwd), sessionWorkspace(session, msg))
 	if err != nil {
 		return Session{}, fmt.Errorf("重建 ACP session 失败: %w", err)
 	}
+	defer candidate.Abort()
+	sessionInfo := candidate.Info()
 	session.ACPSessionID = sessionInfo.SessionID
 	session.Cwd = filepath.Clean(cwd)
 	if strings.TrimSpace(session.Workspace) == "" {
@@ -184,9 +189,23 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 	session.Models = sessionInfo.Models
 	store := s.storeForMessage(msg)
 	if store == nil {
+		if err := candidate.Commit(nil); err != nil {
+			return Session{}, fmt.Errorf("激活重建后的 ACP session 失败: %w", err)
+		}
 		return session, nil
 	}
-	if err := store.Upsert(session); err != nil {
+	replaced := false
+	if err := candidate.Commit(func() error {
+		var persistErr error
+		session, replaced, persistErr = store.ReplaceCurrentACPSession(previousACPSessionID, session)
+		if persistErr == nil && !replaced {
+			return errCurrentSessionChanged
+		}
+		return persistErr
+	}); err != nil {
+		if errors.Is(err, errCurrentSessionChanged) {
+			return Session{}, fmt.Errorf("当前会话已变化，忽略旧会话的重建结果")
+		}
 		return Session{}, fmt.Errorf("保存重建后的 ACP session 失败: %w", err)
 	}
 	slog.InfoContext(ctx, "已重建 ACP session", "session", session.ACPSessionID, "cwd", session.Cwd)

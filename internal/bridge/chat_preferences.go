@@ -44,7 +44,10 @@ func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, tex
 	if !ok {
 		return showCommandUsage()
 	}
-	if err := store.UpsertChat(chat); err != nil {
+	chat, err := store.UpdateChat(chat, func(current *ChatConfig) {
+		setChatShowOption(current, fields[1], value)
+	})
+	if err != nil {
 		slog.ErrorContext(ctx, "保存展示配置失败", "错误", err)
 		return "保存展示配置失败：" + err.Error()
 	}
@@ -128,9 +131,6 @@ func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu
 		return
 	}
 	chatKey := chatKeyFromMessage(msg)
-	if _, ok := store.GetChat(chatKey); ok {
-		return
-	}
 	session, ok := s.findSession(msg)
 	if !ok || !sessionHasShowConfig(session) {
 		return
@@ -147,7 +147,7 @@ func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu
 		HideStatusBar:    session.HideStatusBar,
 		HideUsageDetail:  session.HideUsageDetail,
 	}
-	if err := store.UpsertChat(chat); err != nil {
+	if _, err := store.InsertChatIfAbsent(chat); err != nil {
 		slog.ErrorContext(ctx, "迁移会话展示配置到 chat 配置失败", "chat", msg.ChatID, "错误", err)
 	}
 }
@@ -193,8 +193,10 @@ func (s *Service) handleAgentCommand(ctx context.Context, text string, msg feish
 		return "未知 agent：" + agentName + "\n\n" + s.formatAgentStatus(msg)
 	}
 	chat := s.chatConfigForMessage(msg)
-	chat.AgentName = agentName
-	if err := store.UpsertChat(chat); err != nil {
+	_, err := store.UpdateChat(chat, func(current *ChatConfig) {
+		current.AgentName = agentName
+	})
+	if err != nil {
 		slog.ErrorContext(ctx, "保存聊天 agent 配置失败", "chat", msg.ChatID, "agent", agentName, "错误", err)
 		return "保存聊天 agent 配置失败：" + err.Error()
 	}
@@ -517,28 +519,32 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 		return s.formatAtStatus(msg)
 	}
 	chat := s.chatConfigForMessage(msg)
+	mentionOptional := false
+	atMode := ""
 	switch action {
 	case "on":
 		if mode != "" {
 			return atCommandUsage()
 		}
-		chat.AtMode = ""
-		chat.MentionOptional = false
 	case "off":
 		if mode == "" {
 			mode = atModeEvery
 		}
 		switch mode {
 		case atModeAuto, atModeEvery:
-			chat.AtMode = mode
-			chat.MentionOptional = true
+			atMode = mode
+			mentionOptional = true
 		default:
 			return atCommandUsage()
 		}
 	default:
 		return atCommandUsage()
 	}
-	if err := store.UpsertChat(chat); err != nil {
+	chat, err := store.UpdateChat(chat, func(current *ChatConfig) {
+		current.AtMode = atMode
+		current.MentionOptional = mentionOptional
+	})
+	if err != nil {
 		slog.ErrorContext(ctx, "保存群聊 at 配置失败", "chat", msg.ChatID, "错误", err)
 		return "保存群聊 at 配置失败：" + err.Error()
 	}

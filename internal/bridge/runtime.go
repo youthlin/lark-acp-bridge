@@ -20,16 +20,23 @@ const (
 var errACPSessionUnavailable = errors.New("acp session unavailable")
 
 type acpRuntime interface {
-	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error)
+	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error)
 	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error
 	SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error)
 	SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error
 	SubscribeUpdates(key SessionKey, handler acp.UpdateHandler) func()
+	TransitionCurrentSession(key SessionKey, expectedSessionID string, transition func() (Session, bool, error)) (Session, bool, error)
 	CloseRuntimeKey(key runtimeKey) error
 	CloseSession(key SessionKey) error
 	Shutdown(ctx context.Context) error
+}
+
+type acpSessionCandidate interface {
+	Info() acp.SessionInfo
+	Commit(persist func() error) error
+	Abort()
 }
 
 var _ acpRuntime = (*runtimeManager)(nil)
@@ -64,6 +71,7 @@ type runtimeManager struct {
 	subscriptions map[SessionKey]map[int64]acp.UpdateHandler
 	clientUnsub   map[runtimeKey]func()
 	nextSubID     int64
+	transitions   [64]sync.Mutex
 }
 
 func newRuntimeManager() *runtimeManager {
@@ -75,26 +83,97 @@ func newRuntimeManager() *runtimeManager {
 	}
 }
 
-func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acp.SessionInfo, error) {
+func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
 	defer cancel()
 
 	client, err := acp.Start(ctx, agent, workspace)
 	if err != nil {
-		return acp.SessionInfo{}, err
+		return nil, err
 	}
 	if err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
-		return acp.SessionInfo{}, fmt.Errorf("initialize: %w", err)
+		return nil, fmt.Errorf("initialize: %w", err)
 	}
 	sessionInfo, err := client.NewSession(ctx, cwd)
 	if err != nil {
 		_ = client.Close()
-		return acp.SessionInfo{}, fmt.Errorf("session/new: %w", err)
+		return nil, fmt.Errorf("session/new: %w", err)
 	}
 
-	r.replaceClient(currentRuntimeKey(key), client, sessionInfo.SessionID)
-	return sessionInfo, nil
+	return &runtimeSessionCandidate{
+		manager: r,
+		key:     currentRuntimeKey(key),
+		client:  client,
+		info:    sessionInfo,
+	}, nil
+}
+
+type runtimeSessionCandidate struct {
+	mu        sync.Mutex
+	manager   *runtimeManager
+	key       runtimeKey
+	client    *acp.Client
+	info      acp.SessionInfo
+	committed bool
+	closed    bool
+}
+
+func (c *runtimeSessionCandidate) Info() acp.SessionInfo {
+	if c == nil {
+		return acp.SessionInfo{}
+	}
+	return c.info
+}
+
+func (c *runtimeSessionCandidate) Commit(persist func() error) error {
+	if c == nil || c.manager == nil || c.client == nil {
+		return fmt.Errorf("ACP session 候选未初始化")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.committed {
+		return nil
+	}
+	if c.closed {
+		return fmt.Errorf("ACP session 候选已关闭")
+	}
+
+	transition := c.manager.transitionLock(c.key)
+	transition.Lock()
+	if persist != nil {
+		if err := persist(); err != nil {
+			transition.Unlock()
+			c.closed = true
+			_ = c.manager.closeClient(c.client, c.info.SessionID)
+			return err
+		}
+	}
+	old, oldSessionID, oldUnsub := c.manager.swapClient(c.key, c.client, c.info.SessionID)
+	c.manager.attachClientSubscriptions(c.key, c.client)
+	c.committed = true
+	transition.Unlock()
+
+	if oldUnsub != nil {
+		oldUnsub()
+	}
+	if old != nil && old != c.client {
+		_ = c.manager.closeClient(old, oldSessionID)
+	}
+	return nil
+}
+
+func (c *runtimeSessionCandidate) Abort() {
+	if c == nil || c.manager == nil || c.client == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.committed || c.closed {
+		return
+	}
+	c.closed = true
+	_ = c.manager.closeClient(c.client, c.info.SessionID)
 }
 
 func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
@@ -315,15 +394,45 @@ func (r *runtimeManager) SubscribeUpdates(key SessionKey, handler acp.UpdateHand
 	}
 }
 
-func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
+func (r *runtimeManager) TransitionCurrentSession(key SessionKey, expectedSessionID string, transition func() (Session, bool, error)) (Session, bool, error) {
+	runtime := currentRuntimeKey(key)
+	lock := r.transitionLock(runtime)
+	lock.Lock()
+
 	r.mu.Lock()
-	client := r.clients[key]
-	delete(r.clients, key)
-	sessionID := r.sessionIDs[key]
-	delete(r.sessionIDs, key)
-	unsub := r.clientUnsub[key]
-	delete(r.clientUnsub, key)
+	activeSessionID := r.sessionIDs[runtime]
 	r.mu.Unlock()
+	if activeSessionID != "" && activeSessionID != expectedSessionID {
+		lock.Unlock()
+		return Session{}, false, nil
+	}
+	session, changed, err := transition()
+	if err != nil || !changed {
+		lock.Unlock()
+		return session, changed, err
+	}
+	clients := r.detachSessionClients(key)
+	r.setRuntimeSessionID(runtime, session.ACPSessionID)
+	lock.Unlock()
+	var firstErr error
+	for _, client := range clients {
+		if client.unsub != nil {
+			client.unsub()
+		}
+		if client.client != nil {
+			if err := r.closeClient(client.client, client.sessionID); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return session, true, firstErr
+}
+
+func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
+	lock := r.transitionLock(key)
+	lock.Lock()
+	client, sessionID, unsub := r.detachClient(key)
+	lock.Unlock()
 	if unsub != nil {
 		unsub()
 	}
@@ -334,18 +443,19 @@ func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
 }
 
 func (r *runtimeManager) CloseSession(key SessionKey) error {
-	r.mu.Lock()
-	keys := make([]runtimeKey, 0)
-	for runtimeKey := range r.clients {
-		if runtimeKey.SessionKey == key {
-			keys = append(keys, runtimeKey)
-		}
-	}
-	r.mu.Unlock()
+	lock := r.transitionLock(currentRuntimeKey(key))
+	lock.Lock()
+	clients := r.detachSessionClients(key)
+	lock.Unlock()
 	var firstErr error
-	for _, runtimeKey := range keys {
-		if err := r.CloseRuntimeKey(runtimeKey); err != nil && firstErr == nil {
-			firstErr = err
+	for _, client := range clients {
+		if client.unsub != nil {
+			client.unsub()
+		}
+		if client.client != nil {
+			if err := r.closeClient(client.client, client.sessionID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
@@ -378,53 +488,137 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	if session.ACPSessionID == "" {
 		return nil, fmt.Errorf("当前会话还没有 ACP session，请先发送 /new")
 	}
+	lock := r.transitionLock(key)
+	lock.Lock()
 	r.mu.Lock()
 	client := r.clients[key]
+	activeSessionID := r.sessionIDs[key]
 	r.mu.Unlock()
-	if client != nil {
+	if client != nil && activeSessionID == session.ACPSessionID {
+		lock.Unlock()
 		return client, nil
+	}
+	if activeSessionID != "" && activeSessionID != session.ACPSessionID {
+		lock.Unlock()
+		return nil, fmt.Errorf("%w: runtime session %s 与当前映射 %s 不一致", errACPSessionUnavailable, activeSessionID, session.ACPSessionID)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
 	defer cancel()
 	client, err := acp.Start(ctx, agent, session.Workspace)
 	if err != nil {
+		lock.Unlock()
 		return nil, err
 	}
 	if err := client.Initialize(ctx); err != nil {
+		lock.Unlock()
 		_ = client.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
 	sessionInfo, err := client.ResumeSession(ctx, session.ACPSessionID, session.Cwd)
 	if err != nil {
 		if loadInfo, loadErr := client.LoadSession(ctx, session.ACPSessionID, session.Cwd); loadErr != nil {
+			lock.Unlock()
 			_ = client.Close()
 			return nil, fmt.Errorf("%w: session/resume: %v; session/load fallback: %v", errACPSessionUnavailable, err, loadErr)
 		} else {
 			sessionInfo = loadInfo
 		}
 	}
-	r.replaceClient(key, client, session.ACPSessionID)
+	old, oldSessionID, oldUnsub := r.swapClient(key, client, session.ACPSessionID)
+	r.attachClientSubscriptions(key, client)
+	lock.Unlock()
+	if oldUnsub != nil {
+		oldUnsub()
+	}
+	if old != nil && old != client {
+		_ = r.closeClient(old, oldSessionID)
+	}
 	r.dispatchSessionInfo(session.Key, session.ACPSessionID, sessionInfo)
 	return client, nil
 }
 
-func (r *runtimeManager) replaceClient(key runtimeKey, client *acp.Client, sessionID string) {
+func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) (*acp.Client, string, func()) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	old := r.clients[key]
 	oldSessionID := r.sessionIDs[key]
 	oldUnsub := r.clientUnsub[key]
 	delete(r.clientUnsub, key)
 	r.clients[key] = client
 	r.sessionIDs[key] = sessionID
-	r.mu.Unlock()
-	if oldUnsub != nil {
-		oldUnsub()
+	return old, oldSessionID, oldUnsub
+}
+
+func (r *runtimeManager) detachClient(key runtimeKey) (*acp.Client, string, func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	client := r.clients[key]
+	sessionID := r.sessionIDs[key]
+	unsub := r.clientUnsub[key]
+	delete(r.clients, key)
+	delete(r.sessionIDs, key)
+	delete(r.clientUnsub, key)
+	return client, sessionID, unsub
+}
+
+type detachedRuntimeClient struct {
+	client    *acp.Client
+	sessionID string
+	unsub     func()
+}
+
+func (r *runtimeManager) detachSessionClients(key SessionKey) []detachedRuntimeClient {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := make(map[runtimeKey]struct{})
+	for runtime := range r.clients {
+		if runtime.SessionKey == key {
+			keys[runtime] = struct{}{}
+		}
 	}
-	if old != nil && old != client {
-		r.closeClient(old, oldSessionID)
+	for runtime := range r.sessionIDs {
+		if runtime.SessionKey == key {
+			keys[runtime] = struct{}{}
+		}
 	}
-	r.attachClientSubscriptions(key, client)
+	for runtime := range r.clientUnsub {
+		if runtime.SessionKey != key {
+			continue
+		}
+		keys[runtime] = struct{}{}
+	}
+	clients := make([]detachedRuntimeClient, 0, len(keys))
+	for runtime := range keys {
+		clients = append(clients, detachedRuntimeClient{
+			client:    r.clients[runtime],
+			sessionID: r.sessionIDs[runtime],
+			unsub:     r.clientUnsub[runtime],
+		})
+		delete(r.clients, runtime)
+		delete(r.sessionIDs, runtime)
+		delete(r.clientUnsub, runtime)
+	}
+	return clients
+}
+
+func (r *runtimeManager) setRuntimeSessionID(key runtimeKey, sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionIDs[key] = sessionID
+}
+
+func (r *runtimeManager) transitionLock(key runtimeKey) *sync.Mutex {
+	hash := uint64(1469598103934665603)
+	for _, value := range []string{key.BotID, key.ChatID, key.ThreadID} {
+		for i := 0; i < len(value); i++ {
+			hash ^= uint64(value[i])
+			hash *= 1099511628211
+		}
+		hash ^= 0xff
+		hash *= 1099511628211
+	}
+	return &r.transitions[hash%uint64(len(r.transitions))]
 }
 
 func (r *runtimeManager) closeClient(client *acp.Client, sessionID string) error {

@@ -62,7 +62,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	pendingWiki, hasPendingWiki := s.takePendingWiki(key)
 	s.cancelRunningSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
-	sessionInfo, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
+	candidate, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
 	if err != nil {
 		if hasPendingWiki {
 			s.restorePendingWiki(pendingWiki)
@@ -70,6 +70,8 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
 	}
+	defer candidate.Abort()
+	sessionInfo := candidate.Info()
 	session := Session{
 		Key:               key,
 		Title:             req.Title,
@@ -85,21 +87,27 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		Mode:              sessionInfo.Mode,
 	}
 	if useDefaultTitle {
-		var err error
-		session, err = store.UpsertWithDefaultTitle(session)
-		if err != nil {
+		if err := candidate.Commit(func() error {
+			var persistErr error
+			session, persistErr = store.UpsertWithDefaultTitle(session)
+			return persistErr
+		}); err != nil {
 			if hasPendingWiki {
 				s.restorePendingWiki(pendingWiki)
 			}
 			slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
 			return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
 		}
-	} else if err := store.Upsert(session); err != nil {
-		if hasPendingWiki {
-			s.restorePendingWiki(pendingWiki)
+	} else {
+		if err := candidate.Commit(func() error {
+			return store.Upsert(session)
+		}); err != nil {
+			if hasPendingWiki {
+				s.restorePendingWiki(pendingWiki)
+			}
+			slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
+			return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
 		}
-		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
-		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
 	}
 	if hasPendingWiki {
 		s.runPendingWikiAsync(pendingWiki)
@@ -302,22 +310,20 @@ func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Me
 		return session
 	}
 	title := titleFromPrompt(userText)
-	if title == "" || title == session.Title {
+	if title == "" {
 		return session
 	}
-	session.Title = title
 	store := s.storeForMessage(msg)
 	if store == nil {
+		session.Title = title
 		return session
 	}
-	if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
-		session = latest
-		session.Title = title
-	}
-	if err := store.Upsert(session); err != nil {
+	updated, err := store.UpdateAutomaticTitle(session, title)
+	if err != nil {
 		slog.WarnContext(ctx, "保存自动会话标题失败", "session", session.ACPSessionID, "错误", err)
+		return session
 	}
-	return session
+	return updated
 }
 
 func displaySessionTitle(session Session) string {
@@ -414,10 +420,6 @@ func sessionLabel(msg feishu.Message) string {
 		return "当前群聊会话"
 	}
 	return "当前话题会话"
-}
-
-func isTopicGroupMessage(msg feishu.Message) bool {
-	return msg.IsTopicThread() || msg.IsTopicGroup()
 }
 
 func displayBotID(botID string) string {

@@ -47,19 +47,23 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	chat := s.chatConfigForMessage(msg)
 	switch strings.ToLower(strings.TrimSpace(fields[1])) {
 	case "on":
-		chat.WikiDisabled = false
-		if err := store.UpsertChat(chat); err != nil {
+		_, err := store.UpdateChat(chat, func(current *ChatConfig) {
+			current.WikiDisabled = false
+		})
+		if err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
 		}
 		return "已开启当前聊天的自动知识沉淀。"
 	case "off":
-		chat.WikiDisabled = true
 		if session, ok := s.findSession(msg); ok {
 			s.cancelWikiTimer(session.Key)
 			s.cancelWikiTasks(ctx, session.Key)
 		}
-		if err := store.UpsertChat(chat); err != nil {
+		_, err := store.UpdateChat(chat, func(current *ChatConfig) {
+			current.WikiDisabled = true
+		})
+		if err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
 		}
@@ -74,8 +78,10 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		if err != nil {
 			return err.Error()
 		}
-		chat.WikiIntervalSec = int(interval.Seconds())
-		if err := store.UpsertChat(chat); err != nil {
+		_, err = store.UpdateChat(chat, func(current *ChatConfig) {
+			current.WikiIntervalSec = int(interval.Seconds())
+		})
+		if err != nil {
 			slog.ErrorContext(ctx, "保存 wiki interval 失败", "错误", err)
 			return "保存 wiki interval 失败：" + err.Error()
 		}

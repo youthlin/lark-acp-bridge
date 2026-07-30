@@ -64,6 +64,39 @@ func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 	}
 }
 
+func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T) {
+	r := newRuntimeManager()
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "thread-a"}
+	r.setRuntimeSessionID(currentRuntimeKey(key), "session-2")
+
+	session, changed, err := r.TransitionCurrentSession(key, "session-2", func() (Session, bool, error) {
+		return Session{Key: key, ACPSessionID: "session-1"}, true, nil
+	})
+	if err != nil {
+		t.Fatalf("TransitionCurrentSession() error = %v", err)
+	}
+	if !changed || session.ACPSessionID != "session-1" {
+		t.Fatalf("TransitionCurrentSession() = %+v, %v; want session-1", session, changed)
+	}
+	r.mu.Lock()
+	activeSessionID := r.sessionIDs[currentRuntimeKey(key)]
+	client := r.clients[currentRuntimeKey(key)]
+	r.mu.Unlock()
+	if activeSessionID != "session-1" || client != nil {
+		t.Fatalf("runtime marker/client = %q/%v, want session-1 marker without client", activeSessionID, client)
+	}
+
+	if err := r.CloseSession(key); err != nil {
+		t.Fatalf("CloseSession() error = %v", err)
+	}
+	r.mu.Lock()
+	_, markerExists := r.sessionIDs[currentRuntimeKey(key)]
+	r.mu.Unlock()
+	if markerExists {
+		t.Fatal("CloseSession() left runtime session marker")
+	}
+}
+
 func TestPromptActivityTimeoutExpiresAfterIdlePeriod(t *testing.T) {
 	timeout := newPromptActivityTimeout(context.Background(), 30*time.Millisecond, time.Second)
 	defer timeout.Stop()

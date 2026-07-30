@@ -202,6 +202,178 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	}
 }
 
+func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo",
+		ACPMeta: map[string]any{
+			"source": "runtime",
+			"nested": map[string]any{
+				"items": []any{
+					map[string]any{"name": "original"},
+				},
+			},
+		},
+		AvailableCommands: []acp.AvailableCommand{
+			{Name: "review", Input: &acp.AvailableCommandInput{Hint: "original"}},
+		},
+		ConfigOptions: []acp.SessionConfigOption{
+			{
+				ID: "model",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+		},
+		Models: &acp.SessionModelState{
+			CurrentModelID:  "gpt-5.6",
+			AvailableModels: []acp.SessionModel{{ModelID: "gpt-5.6", Name: "GPT-5.6"}},
+		},
+		Mode: &acp.SessionModeState{
+			CurrentModeID:  "default",
+			AvailableModes: []acp.SessionMode{{ModeID: "default", Name: "Default"}},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	session.ACPMeta["source"] = "input changed"
+	session.ACPMeta["nested"].(map[string]any)["items"].([]any)[0].(map[string]any)["name"] = "input changed"
+	session.AvailableCommands[0].Input.Hint = "input changed"
+	session.ConfigOptions[0].Options[0].Name = "input changed"
+	session.Models.AvailableModels[0].Name = "input changed"
+	session.Mode.CurrentModeID = "input changed"
+
+	got, ok := store.Get(key)
+	if !ok {
+		t.Fatal("Get() ok = false, want true")
+	}
+	got.ACPMeta["source"] = "get changed"
+	got.ACPMeta["nested"].(map[string]any)["items"].([]any)[0].(map[string]any)["name"] = "get changed"
+	got.AvailableCommands[0].Input.Hint = "get changed"
+	got.ConfigOptions[0].Options[0].Name = "get changed"
+	got.Models.AvailableModels[0].Name = "get changed"
+	got.Mode.CurrentModeID = "get changed"
+	history := store.ListByChat(key.BotID, key.ChatID)
+	if len(history) != 1 {
+		t.Fatalf("ListByChat() = %+v, want one session", history)
+	}
+	history[0].Models.CurrentModelID = "history changed"
+
+	persisted, ok := store.Get(key)
+	if !ok {
+		t.Fatal("Get(persisted) ok = false, want true")
+	}
+	if persisted.ACPMeta["source"] != "runtime" ||
+		persisted.ACPMeta["nested"].(map[string]any)["items"].([]any)[0].(map[string]any)["name"] != "original" ||
+		persisted.AvailableCommands[0].Input.Hint != "original" ||
+		persisted.ConfigOptions[0].Options[0].Name != "GPT-5.6" ||
+		persisted.Models.CurrentModelID != "gpt-5.6" ||
+		persisted.Models.AvailableModels[0].Name != "GPT-5.6" ||
+		persisted.Mode.CurrentModeID != "default" {
+		t.Fatalf("persisted session shares mutable state: %+v", persisted)
+	}
+}
+
+func TestSessionStoreResumeSessionIfCurrentRejectsStaleSelection(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	for i := 1; i <= 3; i++ {
+		if err := store.Upsert(Session{
+			Key:          key,
+			Title:        fmt.Sprintf("会话%d", i),
+			AgentName:    "traex",
+			ACPSessionID: fmt.Sprintf("acp-session-%d", i),
+			Cwd:          fmt.Sprintf("/repo/%d", i),
+		}); err != nil {
+			t.Fatalf("Upsert(session %d) error = %v", i, err)
+		}
+	}
+
+	got, restored, err := store.ResumeSessionIfCurrent(key, "acp-session-2", "acp-session-1")
+	if err != nil {
+		t.Fatalf("ResumeSessionIfCurrent(stale) error = %v", err)
+	}
+	if restored {
+		t.Fatalf("ResumeSessionIfCurrent(stale) restored %+v, want rejection", got)
+	}
+	current, ok := store.Get(key)
+	if !ok || current.ACPSessionID != "acp-session-3" {
+		t.Fatalf("current after stale selection = %+v, %v; want session 3", current, ok)
+	}
+
+	got, restored, err = store.ResumeSessionIfCurrent(key, "acp-session-3", "acp-session-1")
+	if err != nil {
+		t.Fatalf("ResumeSessionIfCurrent(current) error = %v", err)
+	}
+	if !restored || got.ACPSessionID != "acp-session-1" || got.Cwd != "/repo/1" {
+		t.Fatalf("ResumeSessionIfCurrent(current) = %+v, %v; want session 1", got, restored)
+	}
+}
+
+func TestSessionStoreWriteFailureRestoresMemoryState(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSessionStore(filepath.Join(dir, "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if _, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo/1",
+	}); err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(initial) error = %v", err)
+	}
+	chatKey := ChatKey{BotID: key.BotID, ChatID: key.ChatID}
+	if _, err := store.UpdateChat(ChatConfig{Key: chatKey}, func(chat *ChatConfig) {
+		chat.HideTools = true
+	}); err != nil {
+		t.Fatalf("UpdateChat(initial) error = %v", err)
+	}
+
+	blockingPath := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockingPath, []byte("file"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocking path) error = %v", err)
+	}
+	store.path = filepath.Join(blockingPath, "sessions.json")
+
+	if _, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-2",
+		Cwd:          "/repo/2",
+	}); err == nil {
+		t.Fatal("UpsertWithDefaultTitle(write failure) error = nil, want error")
+	}
+	current, ok := store.Get(key)
+	if !ok || current.ACPSessionID != "acp-session-1" || current.Title != "session#1" {
+		t.Fatalf("current after write failure = %+v, %v; want initial session", current, ok)
+	}
+	history := store.ListByChat(key.BotID, key.ChatID)
+	if len(history) != 1 || history[0].ACPSessionID != "acp-session-1" {
+		t.Fatalf("history after write failure = %+v, want initial session only", history)
+	}
+	chat, ok := store.GetChat(chatKey)
+	if !ok || chat.NextSessionSeq != 2 || !chat.HideTools {
+		t.Fatalf("chat after session write failure = %+v, %v; want initial sequence and config", chat, ok)
+	}
+
+	if _, err := store.UpdateChat(chat, func(latest *ChatConfig) {
+		latest.HideTools = false
+		latest.HidePlans = true
+	}); err == nil {
+		t.Fatal("UpdateChat(write failure) error = nil, want error")
+	}
+	chat, ok = store.GetChat(chatKey)
+	if !ok || chat.NextSessionSeq != 2 || !chat.HideTools || chat.HidePlans {
+		t.Fatalf("chat after config write failure = %+v, %v; want initial config", chat, ok)
+	}
+}
+
 func TestSessionStoreLoadMissingFileClearsState(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
@@ -235,6 +407,132 @@ func TestSessionStoreLoadMissingFileClearsState(t *testing.T) {
 	}
 	if chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: key.ChatID}); ok {
 		t.Fatalf("GetChat() = %+v, want no chat config", chat)
+	}
+}
+
+func TestSessionStoreUpdateChatAppliesUpdateToLatestState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_chat"}
+	stale := ChatConfig{Key: key, HideTools: true}
+	if err := store.UpsertChat(ChatConfig{
+		Key:             key,
+		AgentName:       "traex",
+		WikiDisabled:    true,
+		WikiIntervalSec: 60,
+	}); err != nil {
+		t.Fatalf("UpsertChat(latest) error = %v", err)
+	}
+
+	updated, err := store.UpdateChat(stale, func(chat *ChatConfig) {
+		chat.HideStatusBar = true
+	})
+	if err != nil {
+		t.Fatalf("UpdateChat() error = %v", err)
+	}
+	if updated.AgentName != "traex" || !updated.WikiDisabled || updated.WikiIntervalSec != 60 {
+		t.Fatalf("UpdateChat() = %+v, want latest unrelated fields preserved", updated)
+	}
+	if !updated.HideStatusBar {
+		t.Fatalf("UpdateChat() = %+v, want declared field updated", updated)
+	}
+	if updated.HideTools {
+		t.Fatalf("UpdateChat() = %+v, want stale unrelated field ignored", updated)
+	}
+
+	persisted, ok := store.GetChat(key)
+	if !ok || persisted != updated {
+		t.Fatalf("GetChat() = %+v, %v; want persisted update %+v", persisted, ok, updated)
+	}
+}
+
+func TestSessionStoreInsertChatIfAbsentPreservesExistingConfig(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_chat"}
+	inserted, err := store.InsertChatIfAbsent(ChatConfig{
+		Key:             key,
+		HideStatusBar:   true,
+		HideUsageDetail: true,
+		WikiIntervalSec: 60,
+	})
+	if err != nil {
+		t.Fatalf("InsertChatIfAbsent(first) error = %v", err)
+	}
+	if !inserted {
+		t.Fatal("InsertChatIfAbsent(first) inserted = false, want true")
+	}
+
+	inserted, err = store.InsertChatIfAbsent(ChatConfig{
+		Key:             key,
+		AgentName:       "traex",
+		WikiDisabled:    true,
+		WikiIntervalSec: 300,
+	})
+	if err != nil {
+		t.Fatalf("InsertChatIfAbsent(existing) error = %v", err)
+	}
+	if inserted {
+		t.Fatal("InsertChatIfAbsent(existing) inserted = true, want false")
+	}
+	chat, ok := store.GetChat(key)
+	if !ok || !chat.HideStatusBar || !chat.HideUsageDetail || chat.WikiIntervalSec != 60 {
+		t.Fatalf("GetChat() = %+v, %v; want first config preserved", chat, ok)
+	}
+	if chat.AgentName != "" || chat.WikiDisabled {
+		t.Fatalf("GetChat() = %+v, want later candidate ignored", chat)
+	}
+}
+
+func TestSessionStoreReplaceCurrentACPSessionPreservesLatestState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	current := Session{
+		Key:          key,
+		Title:        "手动标题",
+		ManualTitle:  true,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          "/repo",
+	}
+	if err := store.Upsert(current); err != nil {
+		t.Fatalf("Upsert(current) error = %v", err)
+	}
+	replacement := current
+	replacement.Title = "旧快照标题"
+	replacement.ManualTitle = false
+	replacement.ACPSessionID = "acp-session-refreshed"
+	replacement.ACPMeta = map[string]any{"refreshed": true}
+	replacement.AvailableCommands = []acp.AvailableCommand{{Name: "review"}}
+
+	updated, replaced, err := store.ReplaceCurrentACPSession("acp-session-old", replacement)
+	if err != nil {
+		t.Fatalf("ReplaceCurrentACPSession() error = %v", err)
+	}
+	if !replaced {
+		t.Fatal("ReplaceCurrentACPSession() replaced = false, want true")
+	}
+	if updated.Title != current.Title || !updated.ManualTitle {
+		t.Fatalf("updated session = %+v, want latest manual title preserved", updated)
+	}
+	if updated.ACPSessionID != replacement.ACPSessionID || !sessionHasCommand(updated, "review") {
+		t.Fatalf("updated session = %+v, want replacement runtime state", updated)
+	}
+
+	newCurrent := current
+	newCurrent.ACPSessionID = "acp-session-new"
+	newCurrent.Title = "新会话"
+	newCurrent.ManualTitle = false
+	if err := store.Upsert(newCurrent); err != nil {
+		t.Fatalf("Upsert(newCurrent) error = %v", err)
+	}
+	got, replaced, err := store.ReplaceCurrentACPSession("acp-session-old", replacement)
+	if err != nil {
+		t.Fatalf("ReplaceCurrentACPSession(stale) error = %v", err)
+	}
+	if replaced {
+		t.Fatal("ReplaceCurrentACPSession(stale) replaced = true, want false")
+	}
+	if got.ACPSessionID != newCurrent.ACPSessionID || got.Title != newCurrent.Title {
+		t.Fatalf("session after stale replacement = %+v, want new current session", got)
 	}
 }
 

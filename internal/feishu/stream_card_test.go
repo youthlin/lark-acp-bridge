@@ -1139,6 +1139,7 @@ func TestNewSessionSelectionCardJSONContainsDropdownAndCallbackContext(t *testin
 		BotID:               "default",
 		ChatID:              "oc_chat",
 		ThreadID:            "omt_thread",
+		GroupMessageType:    "thread",
 		RequesterID:         "ou_requester",
 		CurrentACPSessionID: "session-2",
 		Options: []SessionOption{
@@ -1158,6 +1159,18 @@ func TestNewSessionSelectionCardJSONContainsDropdownAndCallbackContext(t *testin
 	} {
 		if !jsonContainsValue(card, want) {
 			t.Fatalf("session card does not contain %q: %#v", want, card)
+		}
+	}
+	cardData, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal session card: %v", err)
+	}
+	for _, want := range []string{
+		`"current_acp_session_id":"session-2"`,
+		`"group_message_type":"thread"`,
+	} {
+		if !strings.Contains(string(cardData), want) {
+			t.Fatalf("session card does not contain %s callback context: %s", want, cardData)
 		}
 	}
 }
@@ -1204,11 +1217,13 @@ func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.
 				Tag:    "select_static",
 				Option: "session-1",
 				Value: map[string]interface{}{
-					"action":       sessionSelectionCardAction,
-					"bot_id":       "default",
-					"chat_id":      "oc_chat",
-					"thread_id":    "omt_thread",
-					"requester_id": "ou_requester",
+					"action":                 sessionSelectionCardAction,
+					"bot_id":                 "default",
+					"chat_id":                "oc_chat",
+					"thread_id":              "omt_thread",
+					"group_message_type":     "thread",
+					"requester_id":           "ou_requester",
+					"current_acp_session_id": "session-2",
 				},
 			},
 		},
@@ -1219,7 +1234,10 @@ func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.
 	if resp == nil || resp.Toast == nil || resp.Toast.Type != "success" || resp.Card == nil {
 		t.Fatalf("response = %+v, want success card replacement", resp)
 	}
-	if handler.selection.ACPSessionID != "session-1" || handler.selection.OperatorID != "ou_owner" {
+	if handler.selection.ACPSessionID != "session-1" ||
+		handler.selection.CurrentACPSessionID != "session-2" ||
+		handler.selection.GroupMessageType != "thread" ||
+		handler.selection.OperatorID != "ou_owner" {
 		t.Fatalf("selection = %+v, want selected session and operator", handler.selection)
 	}
 	if jsonContainsValue(resp.Card.Data, "select_static") {

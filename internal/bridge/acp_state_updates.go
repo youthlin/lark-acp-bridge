@@ -30,25 +30,25 @@ func (s *Service) handleACPStateUpdate(ctx context.Context, msg feishu.Message, 
 	if store == nil {
 		return
 	}
-	session, ok := store.Get(key)
-	if !ok || session.ACPSessionID != sessionID {
-		return
-	}
-	changed := applyACPStateUpdate(&session, update)
-	if !changed {
-		return
-	}
-	if err := store.Upsert(session); err != nil {
+	if err := store.UpdateCurrentSession(key, sessionID, func(session *Session) bool {
+		return applyACPStateUpdate(session, update)
+	}); err != nil {
 		slog.WarnContext(ctx, "保存 ACP session 状态失败", "session", sessionID, "update", update.SessionUpdate, "错误", err)
 	}
 }
 
-func (s *Service) saveSessionState(ctx context.Context, msg feishu.Message, session Session) {
+func (s *Service) updateSessionState(ctx context.Context, msg feishu.Message, session Session, update func(*Session)) {
 	store := s.storeForMessage(msg)
 	if store == nil {
 		return
 	}
-	if err := store.Upsert(session); err != nil {
+	if err := store.UpdateCurrentSession(session.Key, session.ACPSessionID, func(current *Session) bool {
+		if update == nil {
+			return false
+		}
+		update(current)
+		return true
+	}); err != nil {
 		slog.WarnContext(ctx, "保存会话状态失败", "session", session.ACPSessionID, "错误", err)
 	}
 }

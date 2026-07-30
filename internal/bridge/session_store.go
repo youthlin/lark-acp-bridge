@@ -22,6 +22,12 @@ type SessionStore struct {
 	chats    map[ChatKey]ChatConfig
 }
 
+type sessionStoreSnapshot struct {
+	sessions map[SessionKey]Session
+	history  []Session
+	chats    map[ChatKey]ChatConfig
+}
+
 // NewSessionStore 创建会话存储
 func NewSessionStore(path string) *SessionStore {
 	return &SessionStore{
@@ -91,9 +97,10 @@ func (s *SessionStore) Upsert(session Session) error {
 	if !session.Key.Valid() {
 		return fmt.Errorf("会话 key 不能为空")
 	}
+	snapshot := s.snapshotLocked()
 	now := time.Now()
 	s.upsertSessionLocked(session, now)
-	return s.writeLocked()
+	return s.writeOrRestoreLocked(snapshot)
 }
 
 func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) {
@@ -111,6 +118,7 @@ func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) 
 	if !chatKey.Valid() {
 		return Session{}, fmt.Errorf("chat key 不能为空")
 	}
+	snapshot := s.snapshotLocked()
 	now := time.Now()
 	chat := s.chats[chatKey]
 	chat.Key = chatKey
@@ -127,10 +135,136 @@ func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) 
 
 	s.upsertSessionLocked(session, now)
 	s.chats[chatKey] = chat
-	return session, s.writeLocked()
+	return session, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) UpdateAutomaticTitle(session Session, title string) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session = normalizeSessionForStore(session)
+	if !session.Key.Valid() {
+		return Session{}, fmt.Errorf("会话 key 不能为空")
+	}
+	if latest, ok := s.sessions[session.Key]; ok {
+		if latest.ACPSessionID != session.ACPSessionID || latest.ManualTitle {
+			return cloneSession(latest), nil
+		}
+		session = cloneSession(latest)
+	}
+	if session.ManualTitle || session.Title == title {
+		return session, nil
+	}
+	snapshot := s.snapshotLocked()
+	session.Title = title
+	s.upsertSessionLocked(session, time.Now())
+	return session, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) UpdateManualTitle(key SessionKey, acpSessionID, title string) (Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key = normalizeSessionKey(key)
+	session, ok := s.sessions[key]
+	if !ok || session.ACPSessionID != strings.TrimSpace(acpSessionID) {
+		return cloneSession(session), false, nil
+	}
+	snapshot := s.snapshotLocked()
+	session = cloneSession(session)
+	session.Title = title
+	session.ManualTitle = true
+	s.upsertSessionLocked(session, time.Now())
+	return session, true, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) ReplaceCurrentACPSession(previousACPSessionID string, replacement Session) (Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	replacement = normalizeSessionForStore(replacement)
+	if !replacement.Key.Valid() {
+		return Session{}, false, fmt.Errorf("会话 key 不能为空")
+	}
+	current, ok := s.sessions[replacement.Key]
+	if !ok || current.ACPSessionID != strings.TrimSpace(previousACPSessionID) {
+		return cloneSession(current), false, nil
+	}
+	snapshot := s.snapshotLocked()
+	current = cloneSession(current)
+	current.AgentName = replacement.AgentName
+	current.ACPSessionID = replacement.ACPSessionID
+	current.ACPUpdatedAt = replacement.ACPUpdatedAt
+	current.ACPMeta = replacement.ACPMeta
+	current.Cwd = replacement.Cwd
+	current.Workspace = replacement.Workspace
+	current.AvailableCommands = replacement.AvailableCommands
+	current.ConfigOptions = replacement.ConfigOptions
+	current.Models = replacement.Models
+	current.Mode = replacement.Mode
+	s.upsertSessionLocked(current, time.Now())
+	return current, true, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) UpdateCurrentSession(key SessionKey, acpSessionID string, update func(*Session) bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key = normalizeSessionKey(key)
+	session, ok := s.sessions[key]
+	if !ok || session.ACPSessionID != strings.TrimSpace(acpSessionID) || update == nil {
+		return nil
+	}
+	session = cloneSession(session)
+	if !update(&session) {
+		return nil
+	}
+	snapshot := s.snapshotLocked()
+	s.upsertSessionLocked(session, time.Now())
+	return s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) ResumeSession(key SessionKey, acpSessionID string) (Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.resumeSessionLocked(key, acpSessionID)
+}
+
+func (s *SessionStore) ResumeSessionIfCurrent(key SessionKey, currentACPSessionID, acpSessionID string) (Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key = normalizeSessionKey(key)
+	current, ok := s.sessions[key]
+	expectedCurrentACPSessionID := strings.TrimSpace(currentACPSessionID)
+	if (ok && current.ACPSessionID != expectedCurrentACPSessionID) || (!ok && expectedCurrentACPSessionID != "") {
+		return cloneSession(current), false, nil
+	}
+	return s.resumeSessionLocked(key, acpSessionID)
+}
+
+func (s *SessionStore) resumeSessionLocked(key SessionKey, acpSessionID string) (Session, bool, error) {
+	key = normalizeSessionKey(key)
+	acpSessionID = strings.TrimSpace(acpSessionID)
+	if !key.Valid() || acpSessionID == "" {
+		return Session{}, false, nil
+	}
+	for _, item := range s.history {
+		if item.Key.BotID != key.BotID || item.Key.ChatID != key.ChatID || item.ACPSessionID != acpSessionID {
+			continue
+		}
+		snapshot := s.snapshotLocked()
+		session := cloneSession(item)
+		session.Key = key
+		s.upsertSessionLocked(session, time.Now())
+		return session, true, s.writeOrRestoreLocked(snapshot)
+	}
+	return Session{}, false, nil
 }
 
 func (s *SessionStore) upsertSessionLocked(session Session, now time.Time) {
+	session = cloneSession(session)
 	if session.CreatedAt.IsZero() {
 		if existing, ok := s.sessions[session.Key]; ok {
 			if existing.ACPSessionID == session.ACPSessionID {
@@ -143,9 +277,9 @@ func (s *SessionStore) upsertSessionLocked(session Session, now time.Time) {
 		}
 	}
 	session.UpdatedAt = now
-	s.sessions[session.Key] = session
+	s.sessions[session.Key] = cloneSession(session)
 	if session.ACPSessionID != "" {
-		s.upsertHistoryLocked(session)
+		s.upsertHistoryLocked(cloneSession(session))
 		s.trimHistoryLocked()
 	}
 }
@@ -155,7 +289,7 @@ func (s *SessionStore) Get(key SessionKey) (Session, bool) {
 	defer s.mu.Unlock()
 	key = normalizeSessionKey(key)
 	session, ok := s.sessions[key]
-	return session, ok
+	return cloneSession(session), ok
 }
 
 func (s *SessionStore) GetChat(key ChatKey) (ChatConfig, bool) {
@@ -174,7 +308,48 @@ func (s *SessionStore) UpsertChat(chat ChatConfig) error {
 	if !chat.Key.Valid() {
 		return fmt.Errorf("chat key 不能为空")
 	}
-	now := time.Now()
+	snapshot := s.snapshotLocked()
+	s.upsertChatLocked(chat, time.Now())
+	return s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) InsertChatIfAbsent(chat ChatConfig) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	chat = normalizeChatForStore(chat)
+	if !chat.Key.Valid() {
+		return false, fmt.Errorf("chat key 不能为空")
+	}
+	if _, ok := s.chats[chat.Key]; ok {
+		return false, nil
+	}
+	snapshot := s.snapshotLocked()
+	s.upsertChatLocked(chat, time.Now())
+	return true, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) UpdateChat(chat ChatConfig, update func(*ChatConfig)) (ChatConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	chat = normalizeChatForStore(chat)
+	if !chat.Key.Valid() {
+		return ChatConfig{}, fmt.Errorf("chat key 不能为空")
+	}
+	if latest, ok := s.chats[chat.Key]; ok {
+		chat = latest
+	}
+	if update == nil {
+		return chat, nil
+	}
+	update(&chat)
+	snapshot := s.snapshotLocked()
+	chat = s.upsertChatLocked(chat, time.Now())
+	return chat, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) upsertChatLocked(chat ChatConfig, now time.Time) ChatConfig {
 	if chat.CreatedAt.IsZero() {
 		if existing, ok := s.chats[chat.Key]; ok {
 			chat.CreatedAt = existing.CreatedAt
@@ -184,7 +359,7 @@ func (s *SessionStore) UpsertChat(chat ChatConfig) error {
 	}
 	chat.UpdatedAt = now
 	s.chats[chat.Key] = chat
-	return s.writeLocked()
+	return chat
 }
 
 func (s *SessionStore) Count() int {
@@ -204,7 +379,7 @@ func (s *SessionStore) ListByChat(botID, chatID string) []Session {
 	items := make([]Session, 0)
 	for _, session := range s.history {
 		if session.Key.BotID == botID && session.Key.ChatID == chatID && session.ACPSessionID != "" {
-			items = append(items, session)
+			items = append(items, cloneSession(session))
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -266,6 +441,34 @@ func sameHistorySession(a, b Session) bool {
 	return a.Key.BotID == b.Key.BotID &&
 		a.Key.ChatID == b.Key.ChatID &&
 		a.ACPSessionID == b.ACPSessionID
+}
+
+func (s *SessionStore) snapshotLocked() sessionStoreSnapshot {
+	snapshot := sessionStoreSnapshot{
+		sessions: make(map[SessionKey]Session, len(s.sessions)),
+		history:  make([]Session, len(s.history)),
+		chats:    make(map[ChatKey]ChatConfig, len(s.chats)),
+	}
+	for key, session := range s.sessions {
+		snapshot.sessions[key] = cloneSession(session)
+	}
+	for i, session := range s.history {
+		snapshot.history[i] = cloneSession(session)
+	}
+	for key, chat := range s.chats {
+		snapshot.chats[key] = chat
+	}
+	return snapshot
+}
+
+func (s *SessionStore) writeOrRestoreLocked(snapshot sessionStoreSnapshot) error {
+	if err := s.writeLocked(); err != nil {
+		s.sessions = snapshot.sessions
+		s.history = snapshot.history
+		s.chats = snapshot.chats
+		return err
+	}
+	return nil
 }
 
 func (s *SessionStore) writeLocked() error {
@@ -384,6 +587,74 @@ func normalizeSessionForStore(session Session) Session {
 	session.AgentName = strings.TrimSpace(session.AgentName)
 	session.ACPSessionID = strings.TrimSpace(session.ACPSessionID)
 	return session
+}
+
+func cloneSession(session Session) Session {
+	session.ACPMeta = cloneJSONMap(session.ACPMeta)
+	session.AvailableCommands = cloneAvailableCommands(session.AvailableCommands)
+	session.ConfigOptions = cloneConfigOptions(session.ConfigOptions)
+	if session.Models != nil {
+		models := *session.Models
+		models.AvailableModels = append([]acp.SessionModel(nil), session.Models.AvailableModels...)
+		session.Models = &models
+	}
+	if session.Mode != nil {
+		mode := *session.Mode
+		mode.AvailableModes = append([]acp.SessionMode(nil), session.Mode.AvailableModes...)
+		session.Mode = &mode
+	}
+	return session
+}
+
+func cloneJSONMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(value))
+	for key, item := range value {
+		cloned[key] = cloneJSONValue(item)
+	}
+	return cloned
+}
+
+func cloneJSONValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneJSONMap(value)
+	case []any:
+		cloned := make([]any, len(value))
+		for i, item := range value {
+			cloned[i] = cloneJSONValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func cloneAvailableCommands(commands []acp.AvailableCommand) []acp.AvailableCommand {
+	if commands == nil {
+		return nil
+	}
+	cloned := append([]acp.AvailableCommand(nil), commands...)
+	for i := range cloned {
+		if cloned[i].Input != nil {
+			input := *cloned[i].Input
+			cloned[i].Input = &input
+		}
+	}
+	return cloned
+}
+
+func cloneConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOption {
+	if options == nil {
+		return nil
+	}
+	cloned := append([]acp.SessionConfigOption(nil), options...)
+	for i := range cloned {
+		cloned[i].Options = append([]acp.SessionConfigOptionValue(nil), cloned[i].Options...)
+	}
+	return cloned
 }
 
 func normalizeChatForStore(chat ChatConfig) ChatConfig {
