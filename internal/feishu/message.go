@@ -368,3 +368,14 @@ func value(p *string) string {
 	}
 	return strings.TrimSpace(*p)
 }
+
+func valueInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func valueBool(p *bool) bool {
+	return p != nil && *p
+}

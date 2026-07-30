@@ -57,7 +57,7 @@ type Adapter struct {
 	messages        messageClient           // 消息读取
 	chatInfo        chatInfoClient          // 群信息读取
 	applications    applicationClient       // 应用信息读取
-	driveComments   driveCommentClient      // Drive 评论读取和回复
+	driveComments   driveCommentClient      // 云文档评论读取和回复
 	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
 	chatInfoCache   *chatInfoCache          // 群信息缓存
 }
@@ -405,29 +405,90 @@ func (c larkDriveCommentClient) GetComment(ctx context.Context, fileToken, fileT
 	fileType = strings.TrimSpace(fileType)
 	commentID = strings.TrimSpace(commentID)
 	if fileToken == "" || fileType == "" || commentID == "" {
-		return DriveCommentDetail{}, fmt.Errorf("Drive 评论参数不完整")
+		return DriveCommentDetail{}, fmt.Errorf("云文档评论参数不完整")
 	}
-	req := larkdrive.NewGetFileCommentReqBuilder().
-		FileToken(fileToken).
-		CommentId(commentID).
-		FileType(fileType).
-		UserIdType(larkdrive.UserIdTypeGetFileCommentOpenId).
+	body := larkdrive.NewBatchQueryFileCommentReqBodyBuilder().
+		CommentIds([]string{commentID}).
 		Build()
-	resp, err := c.client.Drive.V1.FileComment.Get(ctx, req)
+	req := larkdrive.NewBatchQueryFileCommentReqBuilder().
+		FileToken(fileToken).
+		FileType(fileType).
+		UserIdType(larkdrive.UserIdTypeBatchQueryFileCommentOpenId).
+		Body(body).
+		Build()
+	resp, err := c.client.Drive.V1.FileComment.BatchQuery(ctx, req)
 	if err != nil {
-		return DriveCommentDetail{}, fmt.Errorf("调用飞书获取 Drive 评论接口: %w", err)
+		return DriveCommentDetail{}, fmt.Errorf("调用飞书获取云文档评论接口: %w", err)
 	}
 	if resp == nil || !resp.Success() {
 		code, msg := 0, ""
 		if resp != nil {
 			code, msg = resp.Code, resp.Msg
 		}
-		return DriveCommentDetail{}, fmt.Errorf("飞书获取 Drive 评论接口返回错误: code=%d msg=%s", code, msg)
+		return DriveCommentDetail{}, fmt.Errorf("飞书获取云文档评论接口返回错误: code=%d msg=%s", code, msg)
 	}
 	if resp.Data == nil {
-		return DriveCommentDetail{}, fmt.Errorf("飞书获取 Drive 评论接口未返回数据")
+		return DriveCommentDetail{}, fmt.Errorf("飞书获取云文档评论接口未返回数据")
 	}
-	return driveCommentDetailFromGetResp(resp.Data), nil
+	for _, item := range resp.Data.Items {
+		if item == nil || strings.TrimSpace(value(item.CommentId)) != commentID {
+			continue
+		}
+		detail := driveCommentDetailFromFileComment(item)
+		if detail.HasMore {
+			replies, err := c.listCommentReplies(ctx, fileToken, fileType, commentID)
+			if err != nil {
+				slog.WarnContext(ctx, "读取云文档评论回复列表失败，使用批量接口返回的部分回复", "错误", err)
+				return detail, nil
+			}
+			detail.Replies = replies
+			detail.HasMore = false
+			detail.PageToken = ""
+			detail.RepliesComplete = true
+		}
+		return detail, nil
+	}
+	return DriveCommentDetail{}, fmt.Errorf("飞书获取云文档评论接口未返回评论: comment_id=%s", commentID)
+}
+
+func (c larkDriveCommentClient) listCommentReplies(ctx context.Context, fileToken, fileType, commentID string) ([]DriveCommentReply, error) {
+	var replies []DriveCommentReply
+	pageToken := ""
+	for {
+		builder := larkdrive.NewListFileCommentReplyReqBuilder().
+			FileToken(fileToken).
+			CommentId(commentID).
+			FileType(fileType).
+			PageSize(100).
+			UserIdType(larkdrive.UserIdTypeListFileCommentReplyOpenId)
+		if pageToken != "" {
+			builder.PageToken(pageToken)
+		}
+		resp, err := c.client.Drive.V1.FileCommentReply.List(ctx, builder.Build())
+		if err != nil {
+			return nil, fmt.Errorf("调用飞书获取云文档评论回复接口: %w", err)
+		}
+		if resp == nil || !resp.Success() {
+			code, msg := 0, ""
+			if resp != nil {
+				code, msg = resp.Code, resp.Msg
+			}
+			return nil, fmt.Errorf("飞书获取云文档评论回复接口返回错误: code=%d msg=%s", code, msg)
+		}
+		if resp.Data == nil {
+			return nil, fmt.Errorf("飞书获取云文档评论回复接口未返回数据")
+		}
+		for _, reply := range resp.Data.Items {
+			replies = appendDriveCommentReply(replies, reply)
+		}
+		if !valueBool(resp.Data.HasMore) {
+			return replies, nil
+		}
+		pageToken = value(resp.Data.PageToken)
+		if pageToken == "" {
+			return replies, nil
+		}
+	}
 }
 
 func (c larkDriveCommentClient) ReplyComment(ctx context.Context, comment DriveComment, text string) error {
@@ -454,14 +515,14 @@ func (c larkDriveCommentClient) ReplyComment(ctx context.Context, comment DriveC
 		Build()
 	resp, err := c.client.Drive.V1.FileCommentReply.Create(ctx, req)
 	if err != nil {
-		return fmt.Errorf("调用飞书回复 Drive 评论接口: %w", err)
+		return fmt.Errorf("调用飞书回复云文档评论接口: %w", err)
 	}
 	if resp == nil || !resp.Success() {
 		code, msg := 0, ""
 		if resp != nil {
 			code, msg = resp.Code, resp.Msg
 		}
-		return fmt.Errorf("飞书回复 Drive 评论接口返回错误: code=%d msg=%s", code, msg)
+		return fmt.Errorf("飞书回复云文档评论接口返回错误: code=%d msg=%s", code, msg)
 	}
 	return nil
 }

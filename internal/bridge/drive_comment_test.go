@@ -37,18 +37,35 @@ func TestDriveCommentSessionKeyAndPromptMetadata(t *testing.T) {
 	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
 
 	comment := feishu.DriveComment{
-		BotID:       "bot-a",
-		Workspace:   workspace,
-		FileToken:   "doc-token",
-		FileType:    "docx",
-		CommentID:   "comment-1",
-		ReplyID:     "reply-1",
-		NoticeType:  "add_reply",
-		OperatorID:  "ou_user",
-		RecipientID: "ou_bot",
-		IsMentioned: true,
-		CommentText: "root text",
-		ReplyText:   "reply text",
+		BotID:             "bot-a",
+		Workspace:         workspace,
+		FileToken:         "doc-token",
+		FileType:          "docx",
+		CommentID:         "comment-1",
+		ReplyID:           "reply-1",
+		NoticeType:        "add_reply",
+		OperatorID:        "ou_user",
+		RecipientID:       "ou_bot",
+		IsMentioned:       true,
+		DetailLoaded:      true,
+		CommentUserID:     "ou_comment_user",
+		CommentText:       "root text",
+		CommentCreateTime: 111,
+		CommentUpdateTime: 222,
+		CommentIsSolved:   false,
+		CommentIsWhole:    false,
+		Quote:             "quote text",
+		ReplyUserID:       "ou_reply_user",
+		ReplyText:         "reply text",
+		ReplyCreateTime:   333,
+		ReplyUpdateTime:   444,
+		ReplyCount:        6,
+		RepliesComplete:   true,
+		Replies: []feishu.DriveCommentReply{
+			{ReplyID: "comment-root", UserID: "ou_comment_user", Text: "root text", CreateTime: 111, UpdateTime: 222},
+			{ReplyID: "reply-0", UserID: "ou_other", Text: "older reply", CreateTime: 300, UpdateTime: 300},
+			{ReplyID: "reply-1", UserID: "ou_reply_user", Text: "reply text", CreateTime: 333, UpdateTime: 444},
+		},
 		DocumentURL: "https://example.test/doc",
 	}
 	if err := svc.HandleDriveComment(ctx, comment); err != nil {
@@ -63,21 +80,54 @@ func TestDriveCommentSessionKeyAndPromptMetadata(t *testing.T) {
 		t.Fatalf("prompt calls = %+v, want drive comment key", rt.promptCalls)
 	}
 	prompt := rt.promptCalls[0].Text
-	assertPromptContainsSectionMetadata(t, prompt, "## Drive Comment Metadata", map[string]string{
-		"source":            sessionSourceDriveComment,
-		"file_token":        "doc-token",
-		"file_type":         "docx",
-		"comment_id":        "comment-1",
-		"reply_id":          "reply-1",
-		"notice_type":       "add_reply",
-		"operator_open_id":  "ou_user",
-		"recipient_open_id": "ou_bot",
-		"comment_content":   "root text",
-		"reply_content":     "reply text",
-		"document_url":      "https://example.test/doc",
+	assertPromptContainsSectionMetadata(t, prompt, "## 云文档评论 Metadata", map[string]string{
+		"source":              sessionSourceDriveComment,
+		"file_token":          "doc-token",
+		"file_type":           "docx",
+		"comment_id":          "comment-1",
+		"reply_id":            "reply-1",
+		"notice_type":         "add_reply",
+		"is_mentioned":        "true",
+		"operator_open_id":    "ou_user",
+		"recipient_open_id":   "ou_bot",
+		"comment_user_id":     "ou_comment_user",
+		"comment_create_time": "111",
+		"comment_update_time": "222",
+		"comment_is_solved":   "false",
+		"comment_is_whole":    "false",
+		"quote":               "quote text",
+		"comment_content":     "root text",
+		"reply_user_id":       "ou_reply_user",
+		"reply_create_time":   "333",
+		"reply_update_time":   "444",
+		"reply_content":       "reply text",
+		"reply_count":         "6",
+		"replies_complete":    "true",
+		"document_url":        "https://example.test/doc",
 	})
-	if !strings.Contains(prompt, "## User Message") || !strings.Contains(prompt, "reply text") {
-		t.Fatalf("prompt = %q, want user message from reply text", prompt)
+	for _, want := range []string{
+		"## 云文档评论线程",
+		"引用正文：\nquote text",
+		"评论根内容：",
+		"[user=ou_comment_user, create_time=111, update_time=222] root text",
+		"评论回复列表：",
+		"[2. reply-0, user=ou_other, create_time=300, update_time=300] older reply",
+		"[3. reply-1, user=ou_reply_user, create_time=333, update_time=444, current_event=true] reply text",
+		"## User Message",
+		"reply text",
+		"## 云文档评论处理规则",
+		"如需更多文档正文上下文，可以使用 lark-cli 读取当前云文档正文",
+		"不要调用 lark-cli、飞书 API 或其它工具读取、回复、修改当前云文档评论",
+		"如果要回复某条 reply，请使用 `<at id=\"ou_openid\"></at>回复内容` 格式",
+		"bridge 会把你的最终正文写回评论",
+		"本次评论事件提及了当前 bot，必须回复",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want drive comment instruction %q", prompt, want)
+		}
+	}
+	if strings.Contains(prompt, "[1. comment-root") {
+		t.Fatalf("prompt = %q, want root reply omitted from reply list", prompt)
 	}
 	if len(replies.texts) != 1 || replies.texts[0] != "agent reply" {
 		t.Fatalf("replies = %+v, want final result reply", replies.texts)
@@ -143,7 +193,103 @@ func TestDriveCommentReusesSameCommentSessionAndIsolatesDifferentComments(t *tes
 	}
 }
 
-func TestDriveCommentSkipsUnmentionedAndRequiresDefaultCwd(t *testing.T) {
+func TestDriveCommentMissingBodyRepliesWithoutTriggerPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+	}, store)
+	rt := &fakeRuntime{promptReply: "agent reply"}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+
+	err := svc.HandleDriveComment(ctx, feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		ReplyID:     "reply-1",
+		IsMentioned: true,
+	})
+	if err != nil {
+		t.Fatalf("HandleDriveComment() error = %v", err)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime new/prompt calls = %d/%d, want no ACP trigger for missing body", len(rt.newCalls), len(rt.promptCalls))
+	}
+	if len(replies.texts) != 1 || replies.texts[0] != driveCommentMissingBodyReply {
+		t.Fatalf("replies = %+v, want missing body reply", replies.texts)
+	}
+	if len(replies.comments) != 1 || replies.comments[0].CommentID != "comment-1" {
+		t.Fatalf("reply comments = %+v, want original comment target", replies.comments)
+	}
+}
+
+func TestDriveCommentUnmentionedUsesSilentAutoJudgement(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+	}, store)
+	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "需要回复"}}}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+
+	comment := feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		ReplyID:     "reply-1",
+		IsMentioned: false,
+		CommentText: "root text",
+		ReplyText:   "reply text",
+		Replies: []feishu.DriveCommentReply{
+			{ReplyID: "comment-root", UserID: "ou_user", Text: "root text"},
+			{ReplyID: "reply-1", UserID: "ou_user", Text: "reply text"},
+		},
+	}
+	if err := svc.HandleDriveComment(ctx, comment); err != nil {
+		t.Fatalf("HandleDriveComment(silent) error = %v", err)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want unmentioned comment to be judged by ACP", rt.promptCalls)
+	}
+	if len(replies.texts) != 0 {
+		t.Fatalf("replies = %+v, want SILENT suppressed", replies.texts)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{
+		"本次评论事件没有提及当前 bot，请先判断是否需要回复",
+		"最终只输出 SILENT",
+		"## 云文档评论线程",
+		"reply text",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+
+	comment.ReplyID = "reply-2"
+	comment.ReplyText = "follow-up"
+	comment.Replies = append(comment.Replies, feishu.DriveCommentReply{ReplyID: "reply-2", UserID: "ou_user", Text: "follow-up"})
+	if err := svc.HandleDriveComment(ctx, comment); err != nil {
+		t.Fatalf("HandleDriveComment(reply) error = %v", err)
+	}
+	if len(replies.texts) != 1 || replies.texts[0] != "需要回复" {
+		t.Fatalf("replies = %+v, want non-SILENT auto reply", replies.texts)
+	}
+}
+
+func TestDriveCommentRequiresDefaultCwd(t *testing.T) {
 	workspace := t.TempDir()
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
@@ -152,20 +298,6 @@ func TestDriveCommentSkipsUnmentionedAndRequiresDefaultCwd(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "ok"}
 	svc.setRuntime(rt)
 
-	if err := svc.HandleDriveComment(context.Background(), feishu.DriveComment{
-		BotID:       "bot-a",
-		Workspace:   workspace,
-		FileToken:   "doc-token",
-		FileType:    "docx",
-		CommentID:   "comment-1",
-		IsMentioned: false,
-	}); err != nil {
-		t.Fatalf("HandleDriveComment(unmentioned) error = %v", err)
-	}
-	if len(rt.promptCalls) != 0 {
-		t.Fatalf("prompt calls = %+v, want unmentioned skipped", rt.promptCalls)
-	}
-
 	err := svc.HandleDriveComment(context.Background(), feishu.DriveComment{
 		BotID:       "bot-a",
 		Workspace:   workspace,
@@ -173,6 +305,7 @@ func TestDriveCommentSkipsUnmentionedAndRequiresDefaultCwd(t *testing.T) {
 		FileType:    "docx",
 		CommentID:   "comment-1",
 		IsMentioned: true,
+		CommentText: "please handle",
 	})
 	if err == nil || !strings.Contains(err.Error(), "default_cwd") {
 		t.Fatalf("HandleDriveComment(missing default cwd) error = %v, want default_cwd error", err)

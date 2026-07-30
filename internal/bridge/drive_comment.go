@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
@@ -11,17 +12,22 @@ import (
 
 const sessionSourceDriveComment = "drive_comment"
 
-// HandleDriveComment 处理飞书 Drive 评论 mention 事件。
+const driveCommentMissingBodyReply = "我这边没有读取到这条评论的正文，暂时无法判断需要处理的内容。请补充具体问题或重新评论 @ 我。"
+
+// HandleDriveComment 处理飞书云文档评论事件。
 func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveComment) error {
 	comment = comment.Normalized()
-	if !comment.IsMentioned {
-		return nil
-	}
 	if comment.BotID == "" {
 		return fmt.Errorf("云文档评论 bot_id 不能为空")
 	}
 	if comment.FileToken == "" || comment.FileType == "" || comment.CommentID == "" {
 		return fmt.Errorf("云文档评论字段不完整")
+	}
+	if driveCommentUserTextMissing(comment) {
+		if !comment.IsMentioned {
+			return nil
+		}
+		return s.replyDriveComment(ctx, comment, driveCommentMissingBodyReply)
 	}
 	if _, err := ensureWorkspace(comment.Workspace, comment.BotID); err != nil {
 		return fmt.Errorf("初始化 workspace 失败: %w", err)
@@ -32,19 +38,28 @@ func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveCo
 	}
 	result, err := s.runTriggerPrompt(ctx, req)
 	if err != nil {
-		s.replyDriveCommentError(ctx, comment, err)
+		if comment.IsMentioned {
+			s.replyDriveCommentError(ctx, comment, err)
+		}
 		return err
 	}
 	text := strings.TrimSpace(result.Text)
+	if driveCommentShouldSuppressReply(comment, text) {
+		return nil
+	}
 	if text == "" {
 		text = "已完成。"
 	}
+	return s.replyDriveComment(ctx, comment, text)
+}
+
+func (s *Service) replyDriveComment(ctx context.Context, comment feishu.DriveComment, text string) error {
 	sent, err := feishu.ReplyDriveComment(ctx, comment, text)
 	if err != nil {
-		return fmt.Errorf("回复 Drive 评论: %w", err)
+		return fmt.Errorf("回复云文档评论: %w", err)
 	}
 	if !sent {
-		slog.WarnContext(ctx, "缺少 Drive 评论回复发送器", "file_token", comment.FileToken, "comment_id", comment.CommentID)
+		slog.WarnContext(ctx, "缺少云文档评论回复发送器", "file_token", comment.FileToken, "comment_id", comment.CommentID)
 	}
 	return nil
 }
@@ -55,11 +70,11 @@ func (s *Service) replyDriveCommentError(ctx context.Context, comment feishu.Dri
 	}
 	sent, replyErr := feishu.ReplyDriveComment(ctx, comment, "处理评论失败："+err.Error())
 	if replyErr != nil {
-		slog.WarnContext(ctx, "回复 Drive 评论错误失败", "file_token", comment.FileToken, "comment_id", comment.CommentID, "错误", replyErr)
+		slog.WarnContext(ctx, "回复云文档评论错误失败", "file_token", comment.FileToken, "comment_id", comment.CommentID, "错误", replyErr)
 		return
 	}
 	if !sent {
-		slog.WarnContext(ctx, "缺少 Drive 评论错误回复发送器", "file_token", comment.FileToken, "comment_id", comment.CommentID)
+		slog.WarnContext(ctx, "缺少云文档评论错误回复发送器", "file_token", comment.FileToken, "comment_id", comment.CommentID)
 	}
 }
 
@@ -75,7 +90,7 @@ func (s *Service) driveCommentTriggerRequest(comment feishu.DriveComment) (Trigg
 	}
 	cwd := strings.TrimSpace(agent.DefaultCwd)
 	if cwd == "" {
-		return TriggerRequest{}, fmt.Errorf("当前默认 agent %s 未配置 default_cwd，不能处理 Drive 评论", agentName)
+		return TriggerRequest{}, fmt.Errorf("当前默认 agent %s 未配置 default_cwd，不能处理云文档评论", agentName)
 	}
 	workspace := strings.TrimSpace(comment.Workspace)
 	if workspace == "" {
@@ -114,8 +129,40 @@ func driveCommentSessionTitle(comment feishu.DriveComment) string {
 
 func driveCommentPrompt(comment feishu.DriveComment) string {
 	return promptWithUserMessage([]string{
-		promptMetadataSection("## Drive Comment Metadata", driveCommentOrderedMetadata(comment)),
+		promptMetadataSection("## 云文档评论 Metadata", driveCommentOrderedMetadata(comment)),
+		driveCommentThreadSection(comment),
+		driveCommentInstructions(comment),
 	}, driveCommentUserText(comment))
+}
+
+func driveCommentInstructions(comment feishu.DriveComment) string {
+	lines := []string{
+		"## 云文档评论处理规则",
+		"",
+		"- 只基于本 prompt 提供的评论正文和 metadata 回复。",
+		"- 如需更多文档正文上下文，可以使用 lark-cli 读取当前云文档正文。",
+		"- 不要调用 lark-cli、飞书 API 或其它工具读取、回复、修改当前云文档评论。",
+		"- 如果要回复某条 reply，请使用 `<at id=\"ou_openid\"></at>回复内容` 格式，其中 `ou_openid` 使用该 reply 的 `reply_user_id` 或评论线程中对应回复的 user。",
+		"- 不要声明你已经或即将写回评论；bridge 会把你的最终正文写回评论。",
+	}
+	if comment.Normalized().IsMentioned {
+		lines = append(lines,
+			"- 本次评论事件提及了当前 bot，必须回复。",
+			"- 最终只输出要回复给用户的正文。",
+		)
+	} else {
+		lines = append(lines,
+			"- 本次评论事件没有提及当前 bot，请先判断是否需要回复。",
+			"- 如果评论线程与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT。",
+			"- 如果需要回复，请正常处理评论线程，不要解释本判断规则。",
+		)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func driveCommentUserTextMissing(comment feishu.DriveComment) bool {
+	comment = comment.Normalized()
+	return comment.CommentText == "" && comment.ReplyText == ""
 }
 
 func driveCommentUserText(comment feishu.DriveComment) string {
@@ -127,6 +174,14 @@ func driveCommentUserText(comment feishu.DriveComment) string {
 		return comment.CommentText
 	}
 	return "（用户在飞书云文档评论中提及你，但本次未读取到评论正文，请结合 metadata 回复。）"
+}
+
+func driveCommentShouldSuppressReply(comment feishu.DriveComment, reply string) bool {
+	if comment.Normalized().IsMentioned {
+		return false
+	}
+	reply = strings.TrimSpace(reply)
+	return reply == "" || strings.EqualFold(reply, "SILENT")
 }
 
 func driveCommentMetadata(comment feishu.DriveComment) map[string]string {
@@ -150,10 +205,107 @@ func driveCommentOrderedMetadata(comment feishu.DriveComment) orderedPromptMetad
 		{"comment_id", comment.CommentID},
 		{"reply_id", comment.ReplyID},
 		{"notice_type", comment.NoticeType},
+		{"is_mentioned", strconv.FormatBool(comment.IsMentioned)},
 		{"operator_open_id", comment.OperatorID},
 		{"recipient_open_id", comment.RecipientID},
+		{"comment_user_id", comment.CommentUserID},
+		{"comment_create_time", driveCommentIntMetadata(comment.CommentCreateTime)},
+		{"comment_update_time", driveCommentIntMetadata(comment.CommentUpdateTime)},
+		{"comment_is_solved", driveCommentBoolMetadata(comment.DetailLoaded, comment.CommentIsSolved)},
+		{"comment_is_whole", driveCommentBoolMetadata(comment.DetailLoaded, comment.CommentIsWhole)},
+		{"quote", comment.Quote},
 		{"comment_content", comment.CommentText},
+		{"reply_user_id", comment.ReplyUserID},
+		{"reply_create_time", driveCommentIntMetadata(comment.ReplyCreateTime)},
+		{"reply_update_time", driveCommentIntMetadata(comment.ReplyUpdateTime)},
 		{"reply_content", comment.ReplyText},
+		{"reply_count", driveCommentIntMetadata(comment.ReplyCount)},
+		{"replies_complete", driveCommentBoolMetadata(comment.DetailLoaded, comment.RepliesComplete)},
 		{"document_url", comment.DocumentURL},
 	}
+}
+
+func driveCommentThreadSection(comment feishu.DriveComment) string {
+	comment = comment.Normalized()
+	var lines []string
+	lines = append(lines, "## 云文档评论线程")
+	if comment.DocumentURL != "" {
+		lines = append(lines, "", "文档链接："+comment.DocumentURL)
+	}
+	if comment.Quote != "" {
+		lines = append(lines, "", "引用正文：", comment.Quote)
+	}
+	if comment.CommentText != "" {
+		lines = append(lines, "", "评论根内容：")
+		lines = append(lines, driveCommentThreadItem("", comment.CommentUserID, comment.CommentCreateTime, comment.CommentUpdateTime, comment.CommentText, comment.ReplyID == ""))
+	}
+	if len(comment.Replies) > 0 {
+		lines = append(lines, "", "评论回复列表：")
+		rootIndex := driveCommentRootReplyIndex(comment)
+		for i, reply := range comment.Replies {
+			if i == rootIndex {
+				continue
+			}
+			current := comment.ReplyID != "" && strings.TrimSpace(reply.ReplyID) == comment.ReplyID
+			lines = append(lines, driveCommentThreadItem(strconv.Itoa(i+1)+". "+strings.TrimSpace(reply.ReplyID), reply.UserID, reply.CreateTime, reply.UpdateTime, reply.Text, current))
+		}
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func driveCommentRootReplyIndex(comment feishu.DriveComment) int {
+	comment = comment.Normalized()
+	if comment.CommentText == "" {
+		return -1
+	}
+	for i, reply := range comment.Replies {
+		if strings.TrimSpace(reply.Text) != comment.CommentText {
+			continue
+		}
+		if comment.CommentUserID == "" || strings.TrimSpace(reply.UserID) == comment.CommentUserID {
+			return i
+		}
+	}
+	return -1
+}
+
+func driveCommentThreadItem(id, userID string, createTime int, updateTime int, text string, current bool) string {
+	var attrs []string
+	if strings.TrimSpace(id) != "" {
+		attrs = append(attrs, strings.TrimSpace(id))
+	}
+	if strings.TrimSpace(userID) != "" {
+		attrs = append(attrs, "user="+strings.TrimSpace(userID))
+	}
+	if createTime != 0 {
+		attrs = append(attrs, "create_time="+strconv.Itoa(createTime))
+	}
+	if updateTime != 0 {
+		attrs = append(attrs, "update_time="+strconv.Itoa(updateTime))
+	}
+	if current {
+		attrs = append(attrs, "current_event=true")
+	}
+	prefix := "- "
+	if len(attrs) > 0 {
+		prefix += "[" + strings.Join(attrs, ", ") + "] "
+	}
+	return prefix + strings.TrimSpace(text)
+}
+
+func driveCommentIntMetadata(value int) string {
+	if value == 0 {
+		return ""
+	}
+	return strconv.Itoa(value)
+}
+
+func driveCommentBoolMetadata(known bool, value bool) string {
+	if !known {
+		return ""
+	}
+	return strconv.FormatBool(value)
 }

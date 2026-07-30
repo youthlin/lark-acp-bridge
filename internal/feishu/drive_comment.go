@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,39 +13,63 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
+var driveReplyAtTagPattern = regexp.MustCompile(`<at\s+id=(?:"([^"]+)"|([^\s>]+))\s*></at>`)
+
 const (
 	driveCommentDeduperTTL = 30 * time.Minute
 	driveCommentDeduperMax = 10000
 )
 
 type DriveComment struct {
-	BotID       string
-	BotOpenID   string
-	Workspace   string
-	FileToken   string
-	FileType    string
-	CommentID   string
-	ReplyID     string
-	NoticeType  string
-	OperatorID  string
-	RecipientID string
-	IsMentioned bool
-	CommentText string
-	ReplyText   string
-	DocumentURL string
+	BotID             string
+	BotOpenID         string
+	Workspace         string
+	FileToken         string
+	FileType          string
+	CommentID         string
+	ReplyID           string
+	NoticeType        string
+	OperatorID        string
+	RecipientID       string
+	IsMentioned       bool
+	DetailLoaded      bool
+	CommentUserID     string
+	CommentText       string
+	CommentCreateTime int
+	CommentUpdateTime int
+	CommentIsSolved   bool
+	CommentIsWhole    bool
+	Quote             string
+	ReplyUserID       string
+	ReplyText         string
+	ReplyCreateTime   int
+	ReplyUpdateTime   int
+	ReplyCount        int
+	RepliesComplete   bool
+	Replies           []DriveCommentReply
+	DocumentURL       string
 }
 
 type DriveCommentDetail struct {
-	CommentID string
-	UserID    string
-	Quote     string
-	Replies   []DriveCommentReply
+	CommentID       string
+	UserID          string
+	Quote           string
+	CreateTime      int
+	UpdateTime      int
+	IsSolved        bool
+	IsWhole         bool
+	HasMore         bool
+	PageToken       string
+	RepliesComplete bool
+	Replies         []DriveCommentReply
 }
 
 type DriveCommentReply struct {
-	ReplyID string
-	UserID  string
-	Text    string
+	ReplyID    string
+	UserID     string
+	Text       string
+	CreateTime int
+	UpdateTime int
 }
 
 func (c DriveComment) Normalized() DriveComment {
@@ -58,15 +83,31 @@ func (c DriveComment) Normalized() DriveComment {
 	c.NoticeType = strings.TrimSpace(c.NoticeType)
 	c.OperatorID = strings.TrimSpace(c.OperatorID)
 	c.RecipientID = strings.TrimSpace(c.RecipientID)
+	c.CommentUserID = strings.TrimSpace(c.CommentUserID)
 	c.CommentText = strings.TrimSpace(c.CommentText)
+	c.Quote = strings.TrimSpace(c.Quote)
+	c.ReplyUserID = strings.TrimSpace(c.ReplyUserID)
 	c.ReplyText = strings.TrimSpace(c.ReplyText)
 	c.DocumentURL = strings.TrimSpace(c.DocumentURL)
+	if len(c.Replies) > 0 {
+		replies := make([]DriveCommentReply, 0, len(c.Replies))
+		for _, reply := range c.Replies {
+			reply.ReplyID = strings.TrimSpace(reply.ReplyID)
+			reply.UserID = strings.TrimSpace(reply.UserID)
+			reply.Text = strings.TrimSpace(reply.Text)
+			if reply.ReplyID == "" && reply.Text == "" {
+				continue
+			}
+			replies = append(replies, reply)
+		}
+		c.Replies = replies
+	}
 	return c
 }
 
 func ParseDriveComment(event *larkdrive.P2NoticeCommentAddV1) (DriveComment, error) {
 	if event == nil || event.Event == nil {
-		return DriveComment{}, fmt.Errorf("飞书 Drive 评论事件为空")
+		return DriveComment{}, fmt.Errorf("飞书云文档评论事件为空")
 	}
 	raw := event.Event
 	notice := raw.NoticeMeta
@@ -91,12 +132,12 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 	if event != nil && event.EventReq != nil {
 		body = event.Body
 	}
-	slog.DebugContext(ctx, "Bot收到 Drive 评论事件", "body", eventLogBody(body, event))
+	slog.DebugContext(ctx, "Bot收到云文档评论事件", "body", eventLogBody(body, event))
 
 	comment, err := ParseDriveComment(event)
 	if err != nil {
-		slog.WarnContext(ctx, "解析飞书 Drive 评论事件失败", "错误", err)
-		slog.DebugContext(ctx, "解析飞书 Drive 评论事件失败详情", "错误", err, "事件", larkcore.Prettify(event))
+		slog.WarnContext(ctx, "解析飞书云文档评论事件失败", "错误", err)
+		slog.DebugContext(ctx, "解析飞书云文档评论事件失败详情", "错误", err, "事件", larkcore.Prettify(event))
 		return nil
 	}
 	comment.BotID = a.cfg.ID
@@ -112,36 +153,32 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 		slog.String("reply_id", comment.ReplyID),
 	)
 
-	if !comment.IsMentioned {
-		slog.InfoContext(ctx, "跳过未 mention bot 的 Drive 评论事件")
-		return nil
-	}
 	if comment.FileToken == "" || comment.FileType == "" || comment.CommentID == "" {
-		slog.WarnContext(ctx, "跳过缺少必要字段的 Drive 评论事件")
+		slog.WarnContext(ctx, "跳过缺少必要字段的云文档评论事件")
 		return nil
 	}
 	if comment.BotOpenID != "" && comment.OperatorID == comment.BotOpenID {
-		slog.InfoContext(ctx, "跳过 bot 自己触发的 Drive 评论事件")
+		slog.InfoContext(ctx, "跳过 bot 自己触发的云文档评论事件")
 		return nil
 	}
 	if a.deduper != nil {
 		allowed, err := a.deduper.Allow(comment.BotID, driveCommentDedupeID(comment))
 		if err != nil {
-			slog.ErrorContext(ctx, "记录 Drive 评论去重状态失败", "错误", err)
+			slog.ErrorContext(ctx, "记录云文档评论去重状态失败", "错误", err)
 		}
 		if !allowed {
-			slog.InfoContext(ctx, "跳过重复 Drive 评论事件")
+			slog.InfoContext(ctx, "跳过重复云文档评论事件")
 			return nil
 		}
 	}
 	if a.driveComments != nil {
-		detail, err := a.driveComments.GetComment(ctx, comment.FileToken, comment.FileType, comment.CommentID)
+		detail, err := a.getDriveCommentDetail(ctx, comment)
 		if err != nil {
-			slog.WarnContext(ctx, "读取 Drive 评论详情失败", "错误", err)
+			slog.WarnContext(ctx, "读取云文档评论详情失败", "错误", err)
 		} else {
 			comment = comment.withDetail(detail).Normalized()
 			if comment.BotOpenID != "" && driveCommentFromBot(comment, detail) {
-				slog.InfoContext(ctx, "跳过 bot 自己的 Drive 评论或回复")
+				slog.InfoContext(ctx, "跳过 bot 自己的云文档评论或回复")
 				return nil
 			}
 		}
@@ -152,14 +189,21 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 	}
 	ctx = WithDriveCommentReplySender(ctx, a.ReplyDriveComment)
 	if err := handler.HandleDriveComment(ctx, comment); err != nil {
-		slog.ErrorContext(ctx, "处理 Drive 评论事件失败", "错误", err)
+		slog.ErrorContext(ctx, "处理云文档评论事件失败", "错误", err)
 	}
 	return nil
 }
 
+func (a *Adapter) getDriveCommentDetail(ctx context.Context, comment DriveComment) (DriveCommentDetail, error) {
+	if a.driveComments == nil {
+		return DriveCommentDetail{}, fmt.Errorf("缺少云文档评论 client")
+	}
+	return a.driveComments.GetComment(ctx, comment.FileToken, comment.FileType, comment.CommentID)
+}
+
 func (a *Adapter) ReplyDriveComment(ctx context.Context, comment DriveComment, text string) error {
 	if a.driveComments == nil {
-		slog.WarnContext(ctx, "缺少 Drive 评论回复 client", "comment_id", comment.CommentID)
+		slog.WarnContext(ctx, "缺少云文档评论回复 client", "comment_id", comment.CommentID)
 		return nil
 	}
 	return a.driveComments.ReplyComment(ctx, comment, text)
@@ -170,6 +214,16 @@ func (c DriveComment) withDetail(detail DriveCommentDetail) DriveComment {
 	if detail.CommentID != "" {
 		c.CommentID = detail.CommentID
 	}
+	c.DetailLoaded = true
+	c.CommentUserID = strings.TrimSpace(detail.UserID)
+	c.Quote = strings.TrimSpace(detail.Quote)
+	c.CommentCreateTime = detail.CreateTime
+	c.CommentUpdateTime = detail.UpdateTime
+	c.CommentIsSolved = detail.IsSolved
+	c.CommentIsWhole = detail.IsWhole
+	c.ReplyCount = len(detail.Replies)
+	c.RepliesComplete = detail.RepliesComplete
+	c.Replies = append([]DriveCommentReply(nil), detail.Replies...)
 	for _, reply := range detail.Replies {
 		reply.ReplyID = strings.TrimSpace(reply.ReplyID)
 		if reply.ReplyID == "" {
@@ -179,7 +233,10 @@ func (c DriveComment) withDetail(detail DriveCommentDetail) DriveComment {
 			c.CommentText = reply.Text
 		}
 		if c.ReplyID != "" && reply.ReplyID == c.ReplyID {
+			c.ReplyUserID = strings.TrimSpace(reply.UserID)
 			c.ReplyText = reply.Text
+			c.ReplyCreateTime = reply.CreateTime
+			c.ReplyUpdateTime = reply.UpdateTime
 			break
 		}
 	}
@@ -191,23 +248,60 @@ func driveCommentDetailFromGetResp(data *larkdrive.GetFileCommentRespData) Drive
 		return DriveCommentDetail{}
 	}
 	detail := DriveCommentDetail{
-		CommentID: value(data.CommentId),
-		UserID:    value(data.UserId),
-		Quote:     value(data.Quote),
+		CommentID:       value(data.CommentId),
+		UserID:          value(data.UserId),
+		Quote:           value(data.Quote),
+		CreateTime:      valueInt(data.CreateTime),
+		UpdateTime:      valueInt(data.UpdateTime),
+		IsSolved:        valueBool(data.IsSolved),
+		IsWhole:         valueBool(data.IsWhole),
+		HasMore:         valueBool(data.HasMore),
+		PageToken:       value(data.PageToken),
+		RepliesComplete: !valueBool(data.HasMore),
 	}
 	if data.ReplyList != nil {
 		for _, reply := range data.ReplyList.Replies {
-			if reply == nil {
-				continue
-			}
-			detail.Replies = append(detail.Replies, DriveCommentReply{
-				ReplyID: value(reply.ReplyId),
-				UserID:  value(reply.UserId),
-				Text:    textFromDriveReplyContent(reply.Content),
-			})
+			detail.Replies = appendDriveCommentReply(detail.Replies, reply)
 		}
 	}
 	return detail
+}
+
+func driveCommentDetailFromFileComment(comment *larkdrive.FileComment) DriveCommentDetail {
+	if comment == nil {
+		return DriveCommentDetail{}
+	}
+	detail := DriveCommentDetail{
+		CommentID:       value(comment.CommentId),
+		UserID:          value(comment.UserId),
+		Quote:           value(comment.Quote),
+		CreateTime:      valueInt(comment.CreateTime),
+		UpdateTime:      valueInt(comment.UpdateTime),
+		IsSolved:        valueBool(comment.IsSolved),
+		IsWhole:         valueBool(comment.IsWhole),
+		HasMore:         valueBool(comment.HasMore),
+		PageToken:       value(comment.PageToken),
+		RepliesComplete: !valueBool(comment.HasMore),
+	}
+	if comment.ReplyList != nil {
+		for _, reply := range comment.ReplyList.Replies {
+			detail.Replies = appendDriveCommentReply(detail.Replies, reply)
+		}
+	}
+	return detail
+}
+
+func appendDriveCommentReply(replies []DriveCommentReply, reply *larkdrive.FileCommentReply) []DriveCommentReply {
+	if reply == nil {
+		return replies
+	}
+	return append(replies, DriveCommentReply{
+		ReplyID:    value(reply.ReplyId),
+		UserID:     value(reply.UserId),
+		Text:       textFromDriveReplyContent(reply.Content),
+		CreateTime: valueInt(reply.CreateTime),
+		UpdateTime: valueInt(reply.UpdateTime),
+	})
 }
 
 func textFromDriveReplyContent(content *larkdrive.ReplyContent) string {
@@ -229,8 +323,10 @@ func textFromDriveReplyContent(content *larkdrive.ReplyContent) string {
 				parts = append(parts, strings.TrimSpace(*element.DocsLink.Url))
 			}
 		case "person":
-			if element.Person != nil && element.Person.UserId != nil {
-				parts = append(parts, "@"+strings.TrimSpace(*element.Person.UserId))
+			if element.Person != nil {
+				if userID := value(element.Person.UserId); userID != "" {
+					parts = append(parts, "@"+userID)
+				}
 			}
 		}
 	}
@@ -238,12 +334,47 @@ func textFromDriveReplyContent(content *larkdrive.ReplyContent) string {
 }
 
 func driveReplyContentFromText(text string) *larkdrive.ReplyContent {
-	return larkdrive.NewReplyContentBuilder().Elements([]*larkdrive.ReplyElement{
-		larkdrive.NewReplyElementBuilder().
-			Type("text_run").
-			TextRun(larkdrive.NewTextRunBuilder().Text(strings.TrimSpace(text)).Build()).
-			Build(),
-	}).Build()
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return larkdrive.NewReplyContentBuilder().Build()
+	}
+	var elements []*larkdrive.ReplyElement
+	last := 0
+	for _, loc := range driveReplyAtTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		if len(loc) < 6 {
+			continue
+		}
+		if loc[0] > last {
+			elements = appendDriveReplyTextRun(elements, text[last:loc[0]])
+		}
+		userID := ""
+		if loc[2] >= 0 && loc[3] >= 0 {
+			userID = strings.TrimSpace(text[loc[2]:loc[3]])
+		} else if loc[4] >= 0 && loc[5] >= 0 {
+			userID = strings.TrimSpace(text[loc[4]:loc[5]])
+		}
+		if userID != "" {
+			elements = append(elements, larkdrive.NewReplyElementBuilder().
+				Type("person").
+				Person(larkdrive.NewPersonBuilder().UserId(userID).Build()).
+				Build())
+		}
+		last = loc[1]
+	}
+	if last < len(text) {
+		elements = appendDriveReplyTextRun(elements, text[last:])
+	}
+	return larkdrive.NewReplyContentBuilder().Elements(elements).Build()
+}
+
+func appendDriveReplyTextRun(elements []*larkdrive.ReplyElement, text string) []*larkdrive.ReplyElement {
+	if text == "" {
+		return elements
+	}
+	return append(elements, larkdrive.NewReplyElementBuilder().
+		Type("text_run").
+		TextRun(larkdrive.NewTextRunBuilder().Text(text).Build()).
+		Build())
 }
 
 func openIDFromDriveUserID(userID *larkdrive.UserId) string {

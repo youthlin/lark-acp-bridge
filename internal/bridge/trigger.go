@@ -329,11 +329,11 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 		err := fmt.Errorf("未找到 trigger session 的 agent 配置: %s", session.AgentName)
 		return newTriggerResult(req, session, acp.PromptResult{}, "", false, err), err
 	}
-	textFallback := &triggerTextFallback{}
+	chunks := &triggerTextAccumulator{}
 	out, err := runPromptTask(s, ctx, session, agent, runningTaskOptions{}, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
 		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, acp.PromptOptions{
 			OnUpdate: func(update acp.PromptUpdate) {
-				textFallback.add(update)
+				chunks.add(update)
 				if req.Sink != nil {
 					_ = req.Sink.OnUpdate(taskCtx, newTriggerUpdateResult(req, session, update))
 				}
@@ -344,9 +344,9 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 		})
 		return result, false, err
 	})
-	text := ""
-	if strings.TrimSpace(out.result.Text) == "" {
-		text = textFallback.text()
+	text := chunks.finalText()
+	if text != "" && strings.TrimSpace(out.result.Text) == "" {
+		out.result.Text = text
 	}
 	return newTriggerResult(req, session, out.result, text, out.sentProgress, err), err
 }
@@ -363,20 +363,44 @@ func defaultTriggerPermissionOutcome(ctx context.Context, session Session, req a
 	return outcome
 }
 
-type triggerTextFallback struct {
-	builder strings.Builder
+type triggerTextAccumulator struct {
+	reply          strings.Builder
+	finalCandidate strings.Builder
+	hasBoundary    bool
 }
 
-func (f *triggerTextFallback) add(update acp.PromptUpdate) {
+func (a *triggerTextAccumulator) add(update acp.PromptUpdate) {
 	chunk, ok := promptUpdateChunk(update)
-	if !ok || chunk.Target != promptChunkTargetText {
+	if ok {
+		if chunk.ToolBoundary {
+			a.markBoundary()
+		}
+		if chunk.Target == promptChunkTargetText {
+			a.reply.WriteString(chunk.Text)
+			a.finalCandidate.WriteString(chunk.Text)
+		}
 		return
 	}
-	f.builder.WriteString(chunk.Text)
+	if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
+		a.markBoundary()
+	}
 }
 
-func (f *triggerTextFallback) text() string {
-	return strings.TrimSpace(f.builder.String())
+func (a *triggerTextAccumulator) markBoundary() {
+	if strings.TrimSpace(a.finalCandidate.String()) != "" {
+		a.finalCandidate.Reset()
+	}
+	a.hasBoundary = true
+}
+
+func (a *triggerTextAccumulator) finalText() string {
+	if text := strings.TrimSpace(a.finalCandidate.String()); text != "" {
+		return text
+	}
+	if a.hasBoundary {
+		return ""
+	}
+	return strings.TrimSpace(a.reply.String())
 }
 
 func (s *Service) prepareTriggerRequest(req TriggerRequest) (TriggerRequest, *SessionStore, error) {

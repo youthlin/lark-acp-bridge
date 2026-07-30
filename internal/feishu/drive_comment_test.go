@@ -137,7 +137,7 @@ func TestHandleDriveCommentAddFetchesDetailAndDispatches(t *testing.T) {
 	if handler.count != 1 {
 		t.Fatalf("handler count = %d, want 1", handler.count)
 	}
-	if got := handler.comment; got.BotID != "bot-a" || got.Workspace != "/workspace" || got.CommentText != "root text" || got.ReplyText != "reply text" {
+	if got := handler.comment; got.BotID != "bot-a" || got.Workspace != "/workspace" || got.CommentText != "root text" || got.ReplyText != "reply text" || len(got.Replies) != 2 {
 		t.Fatalf("handled comment = %+v, want hydrated comment", got)
 	}
 	if len(client.getCalls) != 1 || client.getCalls[0] != (fakeDriveCommentGetCall{FileToken: "doc-token", FileType: "docx", CommentID: "comment-1"}) {
@@ -145,6 +145,96 @@ func TestHandleDriveCommentAddFetchesDetailAndDispatches(t *testing.T) {
 	}
 	if len(client.replyCalls) != 1 || client.replyTexts[0] != "agent reply" {
 		t.Fatalf("reply calls = %+v texts = %+v, want handler reply", client.replyCalls, client.replyTexts)
+	}
+}
+
+func TestHandleDriveCommentAddContinuesWithoutRetryWhenDetailFails(t *testing.T) {
+	client := &fakeDriveCommentClient{
+		err: errors.New("飞书获取云文档评论接口返回错误: code=1069307 msg=not exist"),
+	}
+	handler := &driveCommentRecordingHandler{}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a", BotOpenID: "ou_bot"}, handler)
+	adapter.driveComments = client
+	adapter.deduper = newMessageDeduper(driveCommentDeduperTTL, driveCommentDeduperMax)
+
+	if err := adapter.handleDriveCommentAdd(context.Background(), driveCommentEvent(true, "ou_user", "ou_bot", "reply-1")); err != nil {
+		t.Fatalf("handleDriveCommentAdd() error = %v", err)
+	}
+	if len(client.getCalls) != 1 {
+		t.Fatalf("get calls = %+v, want single detail lookup", client.getCalls)
+	}
+	if handler.count != 1 || handler.comment.ReplyText != "" {
+		t.Fatalf("handled comment = %+v count = %d, want unhydrated comment after detail failure", handler.comment, handler.count)
+	}
+}
+
+func TestDriveCommentDetailFromFileComment(t *testing.T) {
+	comment := larkdrive.NewFileCommentBuilder().
+		CommentId("comment-1").
+		UserId("ou_user").
+		CreateTime(111).
+		UpdateTime(222).
+		IsSolved(false).
+		IsWhole(false).
+		HasMore(true).
+		PageToken("reply-next").
+		Quote("quote text").
+		ReplyList(larkdrive.NewReplyListBuilder().Replies([]*larkdrive.FileCommentReply{
+			larkdrive.NewFileCommentReplyBuilder().
+				ReplyId("reply-1").
+				UserId("ou_user").
+				CreateTime(333).
+				UpdateTime(444).
+				Content(larkdrive.NewReplyContentBuilder().Elements([]*larkdrive.ReplyElement{
+					larkdrive.NewReplyElementBuilder().
+						Type("person").
+						Person(larkdrive.NewPersonBuilder().UserId("ou_bot").Build()).
+						Build(),
+					larkdrive.NewReplyElementBuilder().
+						Type("text_run").
+						TextRun(larkdrive.NewTextRunBuilder().Text(" 测试评论文本").Build()).
+						Build(),
+				}).Build()).
+				Build(),
+		}).Build()).
+		Build()
+
+	detail := driveCommentDetailFromFileComment(comment)
+	if detail.CommentID != "comment-1" || detail.UserID != "ou_user" || detail.Quote != "quote text" {
+		t.Fatalf("detail = %+v, want parsed comment metadata", detail)
+	}
+	if detail.CreateTime != 111 || detail.UpdateTime != 222 || detail.IsSolved || detail.IsWhole || !detail.HasMore || detail.PageToken != "reply-next" || detail.RepliesComplete {
+		t.Fatalf("detail = %+v, want parsed status, timestamps and pagination", detail)
+	}
+	if len(detail.Replies) != 1 {
+		t.Fatalf("replies = %+v, want one reply", detail.Replies)
+	}
+	if got := detail.Replies[0]; got.ReplyID != "reply-1" || got.UserID != "ou_user" || got.Text != "@ou_bot测试评论文本" || got.CreateTime != 333 || got.UpdateTime != 444 {
+		t.Fatalf("reply = %+v, want parsed reply text", got)
+	}
+
+	hydrated := (DriveComment{ReplyID: "reply-1"}).withDetail(detail).Normalized()
+	if !hydrated.DetailLoaded || hydrated.CommentUserID != "ou_user" || hydrated.Quote != "quote text" || hydrated.CommentCreateTime != 111 || hydrated.CommentUpdateTime != 222 || hydrated.CommentIsSolved || hydrated.CommentIsWhole {
+		t.Fatalf("hydrated comment = %+v, want comment metadata", hydrated)
+	}
+	if hydrated.CommentText != "@ou_bot测试评论文本" || hydrated.ReplyUserID != "ou_user" || hydrated.ReplyText != "@ou_bot测试评论文本" || hydrated.ReplyCreateTime != 333 || hydrated.ReplyUpdateTime != 444 || hydrated.ReplyCount != 1 || hydrated.RepliesComplete {
+		t.Fatalf("hydrated comment = %+v, want reply metadata", hydrated)
+	}
+}
+
+func TestDriveReplyContentFromTextParsesAtTags(t *testing.T) {
+	content := driveReplyContentFromText(` <at id=ou_user></at> 收到 <at id="ou_other"></at> `)
+	if content == nil || len(content.Elements) != 3 {
+		t.Fatalf("content = %+v, want 3 reply elements", content)
+	}
+	if got := content.Elements[0]; got.Type == nil || *got.Type != "person" || got.Person == nil || value(got.Person.UserId) != "ou_user" {
+		t.Fatalf("first element = %+v, want person mention ou_user", got)
+	}
+	if got := content.Elements[1]; got.Type == nil || *got.Type != "text_run" || got.TextRun == nil || strings.TrimSpace(value(got.TextRun.Text)) != "收到" {
+		t.Fatalf("second element = %+v, want text", got)
+	}
+	if got := content.Elements[2]; got.Type == nil || *got.Type != "person" || got.Person == nil || value(got.Person.UserId) != "ou_other" {
+		t.Fatalf("third element = %+v, want person mention ou_other", got)
 	}
 }
 
@@ -170,7 +260,7 @@ func TestEventDispatcherRoutesDriveCommentAdd(t *testing.T) {
 		t.Fatalf("dispatcher Do() error = %v", err)
 	}
 	if handler.count != 1 {
-		t.Fatalf("handler count = %d, want dispatcher to route Drive comment event", handler.count)
+		t.Fatalf("handler count = %d, want dispatcher to route cloud document comment event", handler.count)
 	}
 	if len(client.getCalls) != 1 {
 		t.Fatalf("get calls = %d, want detail lookup through dispatcher", len(client.getCalls))
@@ -180,11 +270,14 @@ func TestEventDispatcherRoutesDriveCommentAdd(t *testing.T) {
 	}
 }
 
-func TestHandleDriveCommentAddSkipsUnmentionedDuplicateAndBotSelf(t *testing.T) {
+func TestHandleDriveCommentAddFetchesUnmentionedAndSkipsDuplicateAndBotSelf(t *testing.T) {
 	client := &fakeDriveCommentClient{detail: DriveCommentDetail{
 		CommentID: "comment-1",
 		UserID:    "ou_user",
-		Replies:   []DriveCommentReply{{ReplyID: "reply-1", UserID: "ou_user", Text: "reply text"}},
+		Replies: []DriveCommentReply{
+			{ReplyID: "reply-1", UserID: "ou_user", Text: "reply text"},
+			{ReplyID: "reply-2", UserID: "ou_user", Text: "mentioned reply"},
+		},
 	}}
 	handler := &driveCommentRecordingHandler{}
 	adapter := NewAdapter(config.BotConfig{ID: "bot-a", BotOpenID: "ou_bot"}, handler)
@@ -194,19 +287,19 @@ func TestHandleDriveCommentAddSkipsUnmentionedDuplicateAndBotSelf(t *testing.T) 
 	if err := adapter.handleDriveCommentAdd(context.Background(), driveCommentEvent(false, "ou_user", "ou_bot", "reply-1")); err != nil {
 		t.Fatalf("handle unmentioned error = %v", err)
 	}
-	if handler.count != 0 || len(client.getCalls) != 0 {
-		t.Fatalf("unmentioned handler/get = %d/%d, want skipped", handler.count, len(client.getCalls))
+	if handler.count != 1 || len(client.getCalls) != 1 || handler.comment.IsMentioned {
+		t.Fatalf("unmentioned handler/get/comment = %d/%d/%+v, want fetched and dispatched unmentioned event", handler.count, len(client.getCalls), handler.comment)
 	}
 
-	event := driveCommentEvent(true, "ou_user", "ou_bot", "reply-1")
+	event := driveCommentEvent(true, "ou_user", "ou_bot", "reply-2")
 	if err := adapter.handleDriveCommentAdd(context.Background(), event); err != nil {
 		t.Fatalf("handle first event error = %v", err)
 	}
 	if err := adapter.handleDriveCommentAdd(context.Background(), event); err != nil {
 		t.Fatalf("handle duplicate event error = %v", err)
 	}
-	if handler.count != 1 {
-		t.Fatalf("handler count = %d, want duplicate skipped", handler.count)
+	if handler.count != 2 {
+		t.Fatalf("handler count = %d, want unmentioned event and first mentioned event with duplicate skipped", handler.count)
 	}
 
 	selfClient := &fakeDriveCommentClient{detail: DriveCommentDetail{
