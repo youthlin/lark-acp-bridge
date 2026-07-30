@@ -14,8 +14,9 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "NoReply"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
 	session := Session{
-		Key:             SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"},
+		Key:             key,
 		AgentName:       "traex",
 		ACPSessionID:    "acp-session-1",
 		Cwd:             t.TempDir(),
@@ -29,8 +30,8 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 		t.Fatalf("wiki prompt = %q, want reflection prompt", got)
 	}
 	svc.taskMu.Lock()
-	status := svc.wikiStatuses[session.Key]
-	_, hasTimer := svc.wikiTimers[session.Key]
+	status := svc.wikiStatuses[key]
+	_, hasTimer := svc.wikiTimers[key]
 	svc.taskMu.Unlock()
 	if hasTimer {
 		t.Fatal("wiki timer should not reschedule itself after reflection")

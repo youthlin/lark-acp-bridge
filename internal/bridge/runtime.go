@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,15 +54,22 @@ const (
 )
 
 func currentRuntimeKey(key SessionKey) runtimeKey {
-	return runtimeKey{SessionKey: key, Scope: runtimeScopeCurrent}
+	return runtimeKey{SessionKey: normalizeSessionKey(key), Scope: runtimeScopeCurrent}
 }
 
 func wikiRuntimeKey(key SessionKey, generation int64, sessionID string) runtimeKey {
 	return runtimeKey{
-		SessionKey: key,
+		SessionKey: normalizeSessionKey(key),
 		Scope:      runtimeScopeWiki,
 		RunID:      fmt.Sprintf("%d:%s", generation, sessionID),
 	}
+}
+
+func normalizeRuntimeKey(key runtimeKey) runtimeKey {
+	key.SessionKey = normalizeSessionKey(key.SessionKey)
+	key.Scope = strings.TrimSpace(key.Scope)
+	key.RunID = strings.TrimSpace(key.RunID)
+	return key
 }
 
 type runtimeManager struct {
@@ -84,6 +92,7 @@ func newRuntimeManager() *runtimeManager {
 }
 
 func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
+	key = normalizeSessionKey(key)
 	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
 	defer cancel()
 
@@ -328,6 +337,7 @@ func (t *promptActivityTimeout) expire(cause error) {
 }
 
 func (r *runtimeManager) CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error {
+	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	client := r.clients[key]
 	r.mu.Unlock()
@@ -370,6 +380,7 @@ func (r *runtimeManager) SubscribeUpdates(key SessionKey, handler acp.UpdateHand
 	if handler == nil {
 		return func() {}
 	}
+	key = normalizeSessionKey(key)
 	r.mu.Lock()
 	r.nextSubID++
 	id := r.nextSubID
@@ -395,6 +406,7 @@ func (r *runtimeManager) SubscribeUpdates(key SessionKey, handler acp.UpdateHand
 }
 
 func (r *runtimeManager) TransitionCurrentSession(key SessionKey, expectedSessionID string, transition func() (Session, bool, error)) (Session, bool, error) {
+	key = normalizeSessionKey(key)
 	runtime := currentRuntimeKey(key)
 	lock := r.transitionLock(runtime)
 	lock.Lock()
@@ -429,6 +441,7 @@ func (r *runtimeManager) TransitionCurrentSession(key SessionKey, expectedSessio
 }
 
 func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
+	key = normalizeRuntimeKey(key)
 	lock := r.transitionLock(key)
 	lock.Lock()
 	client, sessionID, unsub := r.detachClient(key)
@@ -443,6 +456,7 @@ func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
 }
 
 func (r *runtimeManager) CloseSession(key SessionKey) error {
+	key = normalizeSessionKey(key)
 	lock := r.transitionLock(currentRuntimeKey(key))
 	lock.Lock()
 	clients := r.detachSessionClients(key)
@@ -485,6 +499,8 @@ func (r *runtimeManager) Shutdown(ctx context.Context) error {
 }
 
 func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) (*acp.Client, error) {
+	key = normalizeRuntimeKey(key)
+	session.Key = normalizeSessionKey(session.Key)
 	if session.ACPSessionID == "" {
 		return nil, fmt.Errorf("当前会话还没有 ACP session，请先发送 /new")
 	}
@@ -539,6 +555,7 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 }
 
 func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) (*acp.Client, string, func()) {
+	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old := r.clients[key]
@@ -551,6 +568,7 @@ func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionI
 }
 
 func (r *runtimeManager) detachClient(key runtimeKey) (*acp.Client, string, func()) {
+	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	client := r.clients[key]
@@ -569,6 +587,7 @@ type detachedRuntimeClient struct {
 }
 
 func (r *runtimeManager) detachSessionClients(key SessionKey) []detachedRuntimeClient {
+	key = normalizeSessionKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	keys := make(map[runtimeKey]struct{})
@@ -603,14 +622,16 @@ func (r *runtimeManager) detachSessionClients(key SessionKey) []detachedRuntimeC
 }
 
 func (r *runtimeManager) setRuntimeSessionID(key runtimeKey, sessionID string) {
+	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sessionIDs[key] = sessionID
 }
 
 func (r *runtimeManager) transitionLock(key runtimeKey) *sync.Mutex {
+	key = normalizeRuntimeKey(key)
 	hash := uint64(1469598103934665603)
-	for _, value := range []string{key.BotID, key.ChatID, key.ThreadID} {
+	for _, value := range []string{key.BotID, sessionKeySource(key.SessionKey), sessionKeyMainID(key.SessionKey), key.ChatID, key.SubID, key.Scope, key.RunID} {
 		for i := 0; i < len(value); i++ {
 			hash ^= uint64(value[i])
 			hash *= 1099511628211
@@ -643,6 +664,7 @@ func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.C
 	if client == nil {
 		return
 	}
+	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	if old := r.clientUnsub[key]; old != nil {
 		old()
@@ -663,6 +685,7 @@ func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.C
 }
 
 func (r *runtimeManager) dispatchSessionInfo(key SessionKey, sessionID string, info acp.SessionInfo) {
+	key = normalizeSessionKey(key)
 	if info.Meta != nil {
 		r.dispatchUpdate(key, sessionID, acp.SessionUpdate{
 			SessionUpdate: "session_info_update",
@@ -691,6 +714,7 @@ func (r *runtimeManager) dispatchSessionInfo(key SessionKey, sessionID string, i
 }
 
 func (r *runtimeManager) dispatchUpdate(key SessionKey, sessionID string, update acp.SessionUpdate) {
+	key = normalizeSessionKey(key)
 	r.mu.Lock()
 	handlers := make([]acp.UpdateHandler, 0, len(r.subscriptions[key]))
 	for _, handler := range r.subscriptions[key] {

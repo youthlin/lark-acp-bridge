@@ -47,7 +47,7 @@ func TestUpdateAutomaticSessionTitleKeepsNewerSessionState(t *testing.T) {
 			got := svc.updateAutomaticSessionTitle(context.Background(), feishu.Message{
 				BotID:    stale.Key.BotID,
 				ChatID:   stale.Key.ChatID,
-				ThreadID: stale.Key.ThreadID,
+				ThreadID: stale.Key.SubID,
 			}, stale, "自动标题")
 
 			if got.Title != latest.Title || got.ManualTitle != latest.ManualTitle || got.ACPSessionID != latest.ACPSessionID {

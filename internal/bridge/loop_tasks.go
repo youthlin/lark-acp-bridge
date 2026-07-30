@@ -92,7 +92,7 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	cardReq := feishu.LoopStatusCardRequest{
 		BotID:        session.Key.BotID,
 		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
+		ThreadID:     session.Key.SubID,
 		ACPSessionID: session.ACPSessionID,
 		Text:         startText,
 	}
@@ -343,6 +343,7 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 }
 
 func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopRequest) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	s.loopStatuses[key] = loopRunStatus{
 		running:     true,
@@ -356,6 +357,7 @@ func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopReq
 }
 
 func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	status := s.loopStatuses[key]
 	if status.started.Equal(started) {
@@ -382,6 +384,7 @@ func (s *Service) handleLoopAddCommand(ctx context.Context, msg feishu.Message, 
 }
 
 func (s *Service) addLoopPendingMessage(key SessionKey, text string) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	status, ok := s.loopStatuses[key]
@@ -399,6 +402,7 @@ func (s *Service) addLoopPendingMessage(key SessionKey, text string) bool {
 }
 
 func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	status, ok := s.loopStatuses[key]
@@ -412,6 +416,7 @@ func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
 }
 
 func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason string, err error) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	status := s.loopStatuses[key]
 	if status.started.Equal(started) {
@@ -452,12 +457,16 @@ func (s *Service) HandleLoopCancel(ctx context.Context, cancel feishu.LoopCancel
 		}
 		return "", fmt.Errorf("只有 bot owner 可以取消 loop")
 	}
-	key := SessionKey{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: msg.ThreadID}
+	key := imSessionKey(msg.BotID, msg.ChatID, msg.ThreadID)
 	store := s.storeForMessage(msg)
 	if store != nil {
-		session, ok := store.Get(key)
-		if !ok && key.ThreadID != "" {
-			session, ok = store.Get(SessionKey{BotID: msg.BotID, ChatID: msg.ChatID})
+		var session Session
+		ok := false
+		for _, candidate := range callbackSessionKeys(msg) {
+			session, ok = store.Get(candidate)
+			if ok {
+				break
+			}
 		}
 		if !ok {
 			return "", fmt.Errorf("该 loop 会话不存在或已过期")
@@ -475,6 +484,7 @@ func (s *Service) HandleLoopCancel(ctx context.Context, cancel feishu.LoopCancel
 }
 
 func (s *Service) cancelLoopTask(ctx context.Context, key SessionKey, reason string) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	task := s.tasks[key]
 	if task == nil || task.kind != taskKindLoop {

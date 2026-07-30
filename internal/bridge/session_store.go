@@ -14,6 +14,8 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
+const sessionSourceIM = "im"
+
 type SessionStore struct {
 	path     string
 	mu       sync.Mutex
@@ -114,28 +116,46 @@ func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) 
 	if session.ACPSessionID == "" {
 		return Session{}, fmt.Errorf("ACP session 不能为空")
 	}
-	chatKey := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
-	if !chatKey.Valid() {
-		return Session{}, fmt.Errorf("chat key 不能为空")
-	}
+	chatKey := chatKeyFromSessionKey(session.Key)
 	snapshot := s.snapshotLocked()
 	now := time.Now()
-	chat := s.chats[chatKey]
-	chat.Key = chatKey
-	if chat.CreatedAt.IsZero() {
-		chat.CreatedAt = now
+	nextSeq := s.nextSessionSeqLocked(session.Key)
+	if chatKey.Valid() {
+		chat := s.chats[chatKey]
+		chat.Key = chatKey
+		if chat.CreatedAt.IsZero() {
+			chat.CreatedAt = now
+		}
+		if chat.NextSessionSeq < 1 {
+			chat.NextSessionSeq = nextSeq
+		}
+		nextSeq = chat.NextSessionSeq
+		chat.NextSessionSeq++
+		chat.UpdatedAt = now
+		s.chats[chatKey] = chat
 	}
-	if chat.NextSessionSeq < 1 {
-		chat.NextSessionSeq = 1
-	}
-	session.Title = fmt.Sprintf("session#%d", chat.NextSessionSeq)
+	session.Title = fmt.Sprintf("session#%d", nextSeq)
 	session.ManualTitle = false
-	chat.NextSessionSeq++
-	chat.UpdatedAt = now
 
 	s.upsertSessionLocked(session, now)
-	s.chats[chatKey] = chat
 	return session, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) nextSessionSeqLocked(key SessionKey) int {
+	nextSeq := 1
+	main := sessionMain(key)
+	for _, session := range s.history {
+		if !sameSessionMain(session.Key, key) || strings.TrimSpace(session.ACPSessionID) == "" {
+			continue
+		}
+		nextSeq++
+	}
+	if main.Source == sessionSourceIM {
+		if chat := s.chats[ChatKey{BotID: main.BotID, ChatID: main.MainID}]; chat.NextSessionSeq > nextSeq {
+			nextSeq = chat.NextSessionSeq
+		}
+	}
+	return nextSeq
 }
 
 func (s *SessionStore) UpdateAutomaticTitle(session Session, title string) (Session, error) {
@@ -251,7 +271,7 @@ func (s *SessionStore) resumeSessionLocked(key SessionKey, acpSessionID string) 
 		return Session{}, false, nil
 	}
 	for _, item := range s.history {
-		if item.Key.BotID != key.BotID || item.Key.ChatID != key.ChatID || item.ACPSessionID != acpSessionID {
+		if !sameSessionMain(item.Key, key) || item.ACPSessionID != acpSessionID {
 			continue
 		}
 		snapshot := s.snapshotLocked()
@@ -369,16 +389,19 @@ func (s *SessionStore) Count() int {
 }
 
 func (s *SessionStore) ListByChat(botID, chatID string) []Session {
+	return s.ListByMain(SessionKey{BotID: botID, Source: sessionSourceIM, MainID: chatID, ChatID: chatID})
+}
+
+func (s *SessionStore) ListByMain(key SessionKey) []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	botID = strings.TrimSpace(botID)
-	chatID = strings.TrimSpace(chatID)
-	if chatID == "" {
+	key = normalizeSessionKey(key)
+	if !key.Valid() {
 		return nil
 	}
 	items := make([]Session, 0)
 	for _, session := range s.history {
-		if session.Key.BotID == botID && session.Key.ChatID == chatID && session.ACPSessionID != "" {
+		if sameSessionMain(session.Key, key) && session.ACPSessionID != "" {
 			items = append(items, cloneSession(session))
 		}
 	}
@@ -408,13 +431,12 @@ func (s *SessionStore) trimHistoryLocked() {
 	if len(s.history) <= maxSessionHistoryPerChat {
 		return
 	}
-	grouped := make(map[ChatKey][]int)
+	grouped := make(map[sessionMainKey][]int)
 	for i, session := range s.history {
 		if !session.Key.Valid() || session.ACPSessionID == "" {
 			continue
 		}
-		key := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
-		grouped[key] = append(grouped[key], i)
+		grouped[sessionMain(session.Key)] = append(grouped[sessionMain(session.Key)], i)
 	}
 	keep := make([]bool, len(s.history))
 	for _, indexes := range grouped {
@@ -438,8 +460,7 @@ func (s *SessionStore) trimHistoryLocked() {
 }
 
 func sameHistorySession(a, b Session) bool {
-	return a.Key.BotID == b.Key.BotID &&
-		a.Key.ChatID == b.Key.ChatID &&
+	return sameSessionMain(a.Key, b.Key) &&
 		a.ACPSessionID == b.ACPSessionID
 }
 
@@ -566,13 +587,21 @@ func persistedModeState(state *acp.SessionModeState) *acp.SessionModeState {
 }
 
 func sessionKeyLess(a, b SessionKey) bool {
+	a = normalizeSessionKey(a)
+	b = normalizeSessionKey(b)
 	if a.BotID != b.BotID {
 		return a.BotID < b.BotID
+	}
+	if sessionKeySource(a) != sessionKeySource(b) {
+		return sessionKeySource(a) < sessionKeySource(b)
+	}
+	if sessionKeyMainID(a) != sessionKeyMainID(b) {
+		return sessionKeyMainID(a) < sessionKeyMainID(b)
 	}
 	if a.ChatID != b.ChatID {
 		return a.ChatID < b.ChatID
 	}
-	return a.ThreadID < b.ThreadID
+	return a.SubID < b.SubID
 }
 
 func chatKeyLess(a, b ChatKey) bool {
@@ -664,11 +693,25 @@ func normalizeChatForStore(chat ChatConfig) ChatConfig {
 }
 
 func normalizeSessionKey(key SessionKey) SessionKey {
-	return SessionKey{
-		BotID:    strings.TrimSpace(key.BotID),
-		ChatID:   strings.TrimSpace(key.ChatID),
-		ThreadID: strings.TrimSpace(key.ThreadID),
+	normalized := SessionKey{
+		BotID:  strings.TrimSpace(key.BotID),
+		Source: strings.TrimSpace(key.Source),
+		MainID: strings.TrimSpace(key.MainID),
+		SubID:  strings.TrimSpace(key.SubID),
+		ChatID: strings.TrimSpace(key.ChatID),
 	}
+	if normalized.Source == "" {
+		normalized.Source = sessionSourceIM
+	}
+	if normalized.Source == sessionSourceIM {
+		if normalized.MainID == "" {
+			normalized.MainID = normalized.ChatID
+		}
+		if normalized.ChatID == "" {
+			normalized.ChatID = normalized.MainID
+		}
+	}
+	return normalized
 }
 
 func normalizeChatKey(key ChatKey) ChatKey {
@@ -676,6 +719,52 @@ func normalizeChatKey(key ChatKey) ChatKey {
 		BotID:  strings.TrimSpace(key.BotID),
 		ChatID: strings.TrimSpace(key.ChatID),
 	}
+}
+
+type sessionMainKey struct {
+	BotID  string
+	Source string
+	MainID string
+}
+
+func sessionKeySource(key SessionKey) string {
+	source := strings.TrimSpace(key.Source)
+	if source == "" {
+		return sessionSourceIM
+	}
+	return source
+}
+
+func sessionKeyMainID(key SessionKey) string {
+	mainID := strings.TrimSpace(key.MainID)
+	if mainID != "" {
+		return mainID
+	}
+	if sessionKeySource(key) == sessionSourceIM {
+		return strings.TrimSpace(key.ChatID)
+	}
+	return ""
+}
+
+func sessionMain(key SessionKey) sessionMainKey {
+	key = normalizeSessionKey(key)
+	return sessionMainKey{
+		BotID:  key.BotID,
+		Source: sessionKeySource(key),
+		MainID: sessionKeyMainID(key),
+	}
+}
+
+func sameSessionMain(a, b SessionKey) bool {
+	return sessionMain(a) == sessionMain(b)
+}
+
+func chatKeyFromSessionKey(key SessionKey) ChatKey {
+	key = normalizeSessionKey(key)
+	if sessionKeySource(key) != sessionSourceIM {
+		return ChatKey{BotID: key.BotID}
+	}
+	return ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)}
 }
 
 type sessionFile struct {

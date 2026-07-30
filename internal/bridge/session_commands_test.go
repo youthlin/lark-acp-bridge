@@ -167,7 +167,7 @@ func TestHandleSessionSelectionRejectsStaleCard(t *testing.T) {
 
 func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_topic", ThreadID: "omt_topic"}
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_topic", SubID: "omt_topic"}
 	for i := 1; i <= 2; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -186,7 +186,7 @@ func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 	display, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:               key.BotID,
 		ChatID:              key.ChatID,
-		ThreadID:            key.ThreadID,
+		ThreadID:            key.SubID,
 		GroupMessageType:    "thread",
 		RequesterID:         testOwnerOpenID,
 		OperatorID:          testOwnerOpenID,
@@ -206,7 +206,7 @@ func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 	if _, ok := store.Get(SessionKey{BotID: key.BotID, ChatID: key.ChatID}); ok {
 		t.Fatal("topic card restore unexpectedly changed chat-level session")
 	}
-	if active := rt.activeSessionIDs[key]; active != "acp-topic-1" {
+	if active := rt.activeSessionIDs[normalizeSessionKey(key)]; active != "acp-topic-1" {
 		t.Fatalf("active runtime session = %q, want acp-topic-1 marker", active)
 	}
 }
@@ -246,7 +246,7 @@ func TestHandleSessionSelectionOrdinaryGroupThreadIDUsesChatSession(t *testing.T
 	if !ok || current.ACPSessionID != "acp-group-1" {
 		t.Fatalf("current group session = %+v, %v; want acp-group-1", current, ok)
 	}
-	if _, ok := store.Get(SessionKey{BotID: key.BotID, ChatID: key.ChatID, ThreadID: "omt_reply_thread"}); ok {
+	if _, ok := store.Get(SessionKey{BotID: key.BotID, ChatID: key.ChatID, SubID: "omt_reply_thread"}); ok {
 		t.Fatal("ordinary group card restore unexpectedly created a topic session")
 	}
 }
@@ -367,7 +367,7 @@ func TestResumeSessionDoesNotCloseConcurrentlyCreatedRuntime(t *testing.T) {
 	if !ok || current.ACPSessionID != newSession.ACPSessionID {
 		t.Fatalf("current session = %+v, %v; want concurrent new session", current, ok)
 	}
-	if active := rt.activeSessionIDs[key]; active != newSession.ACPSessionID {
+	if active := rt.activeSessionIDs[normalizeSessionKey(key)]; active != newSession.ACPSessionID {
 		t.Fatalf("active runtime session = %q, want concurrent new session", active)
 	}
 }
@@ -384,7 +384,7 @@ func TestSetSessionTitleOnlyUpdatesCurrentSessionTitle(t *testing.T) {
 	msg := feishu.Message{
 		BotID:            stale.Key.BotID,
 		ChatID:           stale.Key.ChatID,
-		ThreadID:         stale.Key.ThreadID,
+		ThreadID:         stale.Key.SubID,
 		GroupMessageType: "thread",
 	}
 

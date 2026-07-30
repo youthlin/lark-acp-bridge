@@ -367,7 +367,7 @@ func (s *Service) storeForMessage(msg feishu.Message) *SessionStore {
 func sessionKeyFromMessage(msg feishu.Message) SessionKey {
 	keys := sessionKeysFromMessage(msg)
 	if len(keys) == 0 {
-		return SessionKey{BotID: msg.BotID, ChatID: msg.ChatID}
+		return imSessionKey(msg.BotID, msg.ChatID, "")
 	}
 	return keys[0]
 }
@@ -394,13 +394,13 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 		if msg.ChatID == "" {
 			return nil
 		}
-		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
+		return []SessionKey{imSessionKey(msg.BotID, msg.ChatID, "")}
 	}
 	if !msg.IsTopicThread() && !msg.IsTopicGroup() {
 		if msg.ChatID == "" {
 			return nil
 		}
-		return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID}}
+		return []SessionKey{imSessionKey(msg.BotID, msg.ChatID, "")}
 	}
 	id := strings.TrimSpace(msg.ThreadID)
 	if id == "" {
@@ -409,7 +409,17 @@ func sessionKeysFromMessage(msg feishu.Message) []SessionKey {
 	if msg.ChatID == "" || id == "" {
 		return nil
 	}
-	return []SessionKey{{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: id}}
+	return []SessionKey{imSessionKey(msg.BotID, msg.ChatID, id)}
+}
+
+func imSessionKey(botID, chatID, threadID string) SessionKey {
+	return normalizeSessionKey(SessionKey{
+		BotID:  botID,
+		Source: sessionSourceIM,
+		MainID: chatID,
+		ChatID: chatID,
+		SubID:  threadID,
+	})
 }
 
 func sessionLabel(msg feishu.Message) string {

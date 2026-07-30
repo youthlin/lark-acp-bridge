@@ -36,6 +36,7 @@ func (s *Service) startTask(ctx context.Context, session Session, agent config.A
 }
 
 func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func()) {
+	session.Key = normalizeSessionKey(session.Key)
 	s.cancelWikiTimer(session.Key)
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
@@ -76,6 +77,7 @@ func (s *Service) setTaskCancelHandler(key SessionKey, handler func(context.Cont
 	if handler == nil {
 		return
 	}
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	if task := s.tasks[key]; task != nil {
 		task.onCancel = handler
@@ -93,6 +95,7 @@ func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
 }
 
 func (s *Service) cancelRunningSessionWork(ctx context.Context, key SessionKey) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	task := s.tasks[key]
 	delete(s.tasks, key)
@@ -119,6 +122,7 @@ func (s *Service) markCanceledTask(task *runningTask, reason string) {
 	if task == nil || task.kind != taskKindLoop {
 		return
 	}
+	task.session.Key = normalizeSessionKey(task.session.Key)
 	s.taskMu.Lock()
 	status, ok := s.loopStatuses[task.session.Key]
 	if ok {
@@ -132,6 +136,7 @@ func (s *Service) markCanceledTask(task *runningTask, reason string) {
 }
 
 func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {
+	key = normalizeSessionKey(key)
 	s.cancelWikiTimer(key)
 	s.cancelRunningSessionWork(ctx, key)
 	s.cancelWikiTasks(ctx, key)

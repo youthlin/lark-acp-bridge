@@ -115,6 +115,70 @@ func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
 	}
 }
 
+func TestSessionStoreListByMainIsolatesSources(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	imKey := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	scheduleKey := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
+	commentKey := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+	for _, session := range []Session{
+		{Key: imKey, AgentName: "traex", ACPSessionID: "im-session", Cwd: "/repo"},
+		{Key: scheduleKey, AgentName: "traex", ACPSessionID: "schedule-session", Cwd: "/repo"},
+		{Key: commentKey, AgentName: "traex", ACPSessionID: "comment-session", Cwd: "/repo"},
+	} {
+		if err := store.Upsert(session); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", session.ACPSessionID, err)
+		}
+	}
+
+	scheduleItems := store.ListByMain(SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily"})
+	if len(scheduleItems) != 1 || scheduleItems[0].ACPSessionID != "schedule-session" {
+		t.Fatalf("schedule history = %+v, want only schedule session", scheduleItems)
+	}
+	commentItems := store.ListByMain(SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token"})
+	if len(commentItems) != 1 || commentItems[0].ACPSessionID != "comment-session" {
+		t.Fatalf("comment history = %+v, want only comment session", commentItems)
+	}
+	imItems := store.ListByChat("bot-a", "oc_chat")
+	if len(imItems) != 1 || imItems[0].ACPSessionID != "im-session" {
+		t.Fatalf("im history = %+v, want only im session", imItems)
+	}
+}
+
+func TestSessionStoreUpsertWithDefaultTitleSupportsNonIMParent(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	store := NewSessionStore(storePath)
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily"}
+
+	first, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "schedule-session-1",
+		Cwd:          "/repo",
+	})
+	if err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(first) error = %v", err)
+	}
+	if first.Title != "session#1" || first.ManualTitle {
+		t.Fatalf("first title = %q manual=%v, want automatic session#1", first.Title, first.ManualTitle)
+	}
+	if _, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "task:daily"}); ok {
+		t.Fatal("non-IM default title should not create chat config")
+	}
+
+	second, err := store.UpsertWithDefaultTitle(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "schedule-session-2",
+		Cwd:          "/repo",
+	})
+	if err != nil {
+		t.Fatalf("UpsertWithDefaultTitle(second) error = %v", err)
+	}
+	if second.Title != "session#2" {
+		t.Fatalf("second title = %q, want session#2", second.Title)
+	}
+}
+
 func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
@@ -179,6 +243,9 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 		t.Fatalf("len(file.Sessions) = %d, want 1", len(file.Sessions))
 	}
 	persisted := file.Sessions[0]
+	if persisted.Key.Source != "" || persisted.Key.MainID != "" || persisted.Key.ChatID != "oc_chat" {
+		t.Fatalf("persisted IM key = %+v, want legacy chat/thread JSON shape", persisted.Key)
+	}
 	if len(persisted.AvailableCommands) != 0 {
 		t.Fatalf("AvailableCommands persisted = %+v, want omitted", persisted.AvailableCommands)
 	}
@@ -542,7 +609,7 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		Version: 1,
 		Sessions: []Session{
 			{
-				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", ThreadID: " omt_thread "},
+				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " omt_thread "},
 				AgentName:    " traex ",
 				ACPSessionID: " acp-session-current ",
 				Cwd:          "/repo",
@@ -550,7 +617,7 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		},
 		History: []Session{
 			{
-				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", ThreadID: " old_thread "},
+				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " old_thread "},
 				AgentName:    " traex ",
 				ACPSessionID: " acp-session-old ",
 				Cwd:          "/repo",
@@ -577,17 +644,17 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"})
+	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
 	if !ok {
 		t.Fatalf("Get(normalized session key) ok = false, want true")
 	}
-	if session.Key != (SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}) {
+	if session.Key != normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}) {
 		t.Fatalf("session key = %+v, want normalized key", session.Key)
 	}
 	if session.AgentName != "traex" || session.ACPSessionID != "acp-session-current" {
 		t.Fatalf("session agent/session = %q/%q, want normalized values", session.AgentName, session.ACPSessionID)
 	}
-	if _, ok := store.Get(SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", ThreadID: " omt_thread "}); !ok {
+	if _, ok := store.Get(SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " omt_thread "}); !ok {
 		t.Fatalf("Get(spaced session key) ok = false, want lookup to normalize key")
 	}
 
@@ -620,7 +687,7 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 			Cwd:          "/repo",
 		},
 		{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", ThreadID: "thread-b"},
+			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-b"},
 			AgentName:    "traex",
 			ACPSessionID: "session-a2b",
 			Cwd:          "/repo",
@@ -632,7 +699,7 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 			Cwd:          "/repo",
 		},
 		{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", ThreadID: "thread-a"},
+			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-a"},
 			AgentName:    "traex",
 			ACPSessionID: "session-a2a",
 			Cwd:          "/repo",
@@ -668,8 +735,8 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 	}
 	wantSessions := []SessionKey{
 		{BotID: "bot-a", ChatID: "oc_1"},
-		{BotID: "bot-a", ChatID: "oc_2", ThreadID: "thread-a"},
-		{BotID: "bot-a", ChatID: "oc_2", ThreadID: "thread-b"},
+		{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-a"},
+		{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-b"},
 		{BotID: "bot-b", ChatID: "oc_1"},
 	}
 	if !sessionKeysEqual(gotSessions, wantSessions) {

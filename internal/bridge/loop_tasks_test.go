@@ -111,7 +111,7 @@ func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -184,7 +184,7 @@ func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
 	rt := &fakeRuntime{}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
 	session := Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -245,7 +245,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "omt_thread"}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -333,7 +333,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -356,7 +356,7 @@ func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
 func TestHandleLoopCancelRejectsExpiredCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",

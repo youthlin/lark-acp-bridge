@@ -43,7 +43,8 @@ func (s *Service) sendSessionList(ctx context.Context, msg feishu.Message) strin
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
-	items := store.ListByChat(msg.BotID, msg.ChatID)
+	key := sessionKeyFromMessage(msg)
+	items := store.ListByMain(key)
 	if len(items) == 0 {
 		return "当前聊天还没有历史 ACP 会话。发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。"
 	}
@@ -71,7 +72,7 @@ func (s *Service) formatSessionList(msg feishu.Message, limit int) string {
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
-	items := store.ListByChat(msg.BotID, msg.ChatID)
+	items := store.ListByMain(sessionKeyFromMessage(msg))
 	if len(items) == 0 {
 		return "当前聊天还没有历史 ACP 会话。发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。"
 	}
@@ -129,7 +130,7 @@ func (s *Service) resumeSession(ctx context.Context, msg feishu.Message, index i
 	if store == nil {
 		return "会话持久化未初始化。"
 	}
-	items := store.ListByChat(msg.BotID, msg.ChatID)
+	items := store.ListByMain(sessionKeyFromMessage(msg))
 	if len(items) == 0 {
 		return "当前聊天还没有历史 ACP 会话。"
 	}

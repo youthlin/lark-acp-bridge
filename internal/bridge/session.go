@@ -2,19 +2,72 @@ package bridge
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
 type SessionKey struct {
-	BotID    string `json:"bot_id"`
-	ChatID   string `json:"chat_id"`
-	ThreadID string `json:"thread_id"`
+	BotID  string `json:"bot_id"`
+	Source string `json:"source,omitempty"`
+	MainID string `json:"main_id,omitempty"`
+	SubID  string `json:"sub_id,omitempty"`
+	ChatID string `json:"chat_id,omitempty"`
 }
 
 func (k SessionKey) Valid() bool {
-	return k.ChatID != ""
+	return sessionKeySource(k) != "" && sessionKeyMainID(k) != ""
+}
+
+func (k SessionKey) MarshalJSON() ([]byte, error) {
+	type sessionKeyJSON struct {
+		BotID    string `json:"bot_id"`
+		Source   string `json:"source,omitempty"`
+		MainID   string `json:"main_id,omitempty"`
+		SubID    string `json:"sub_id,omitempty"`
+		ChatID   string `json:"chat_id,omitempty"`
+		ThreadID string `json:"thread_id,omitempty"` // IM 兼容旧 sessions.json
+	}
+	source := strings.TrimSpace(k.Source)
+	mainID := strings.TrimSpace(k.MainID)
+	chatID := strings.TrimSpace(k.ChatID)
+	if source == "" || (source == sessionSourceIM && (mainID == "" || mainID == chatID)) {
+		return json.Marshal(sessionKeyJSON{
+			BotID:    k.BotID,
+			ChatID:   k.ChatID,
+			ThreadID: k.SubID,
+		})
+	}
+	return json.Marshal(sessionKeyJSON{
+		BotID:  k.BotID,
+		Source: k.Source,
+		MainID: k.MainID,
+		SubID:  k.SubID,
+		ChatID: k.ChatID,
+	})
+}
+
+func (k *SessionKey) UnmarshalJSON(data []byte) error {
+	type sessionKeyJSON struct {
+		BotID          string `json:"bot_id"`
+		Source         string `json:"source,omitempty"`
+		MainID         string `json:"main_id,omitempty"`
+		SubID          string `json:"sub_id,omitempty"`
+		LegacyParentID string `json:"parent_id,omitempty"`
+		ChatID         string `json:"chat_id,omitempty"`
+		LegacyThreadID string `json:"thread_id,omitempty"`
+	}
+	var raw sessionKeyJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	k.BotID = raw.BotID
+	k.Source = raw.Source
+	k.MainID = firstNonEmpty(raw.MainID, raw.LegacyParentID)
+	k.SubID = firstNonEmpty(raw.SubID, raw.LegacyThreadID)
+	k.ChatID = raw.ChatID
+	return nil
 }
 
 type ChatKey struct {

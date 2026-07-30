@@ -143,13 +143,14 @@ func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message
 		return "当前 ACP server 没有上报可选模型，请使用 /model <model> 设置。"
 	}
 	sent, err := feishu.SendModelSelectionCard(ctx, msg, feishu.ModelSelectionCard{
-		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
-		ACPSessionID: session.ACPSessionID,
-		RequesterID:  msg.SenderID,
-		CurrentModel: currentModelDisplay(session),
-		Options:      options,
+		BotID:            session.Key.BotID,
+		ChatID:           session.Key.ChatID,
+		ThreadID:         session.Key.SubID,
+		GroupMessageType: msg.GroupMessageType,
+		ACPSessionID:     session.ACPSessionID,
+		RequesterID:      msg.SenderID,
+		CurrentModel:     currentModelDisplay(session),
+		Options:          options,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "发送模型选择卡片失败", "错误", err)
@@ -220,13 +221,14 @@ func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message,
 		return "当前 ACP server 没有上报可选模式，请使用 /mode <mode> 设置。"
 	}
 	sent, err := feishu.SendModeSelectionCard(ctx, msg, feishu.ModeSelectionCard{
-		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
-		ThreadID:     session.Key.ThreadID,
-		ACPSessionID: session.ACPSessionID,
-		RequesterID:  msg.SenderID,
-		CurrentMode:  currentModeDisplay(session),
-		Options:      options,
+		BotID:            session.Key.BotID,
+		ChatID:           session.Key.ChatID,
+		ThreadID:         session.Key.SubID,
+		GroupMessageType: msg.GroupMessageType,
+		ACPSessionID:     session.ACPSessionID,
+		RequesterID:      msg.SenderID,
+		CurrentMode:      currentModeDisplay(session),
+		Options:          options,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "发送模式选择卡片失败", "错误", err)
@@ -264,9 +266,10 @@ func (s *Service) HandleModeSelection(ctx context.Context, selection feishu.Mode
 		return "", err
 	}
 	msg := feishu.Message{
-		BotID:    selection.BotID,
-		ChatID:   selection.ChatID,
-		ThreadID: selection.ThreadID,
+		BotID:            selection.BotID,
+		ChatID:           selection.ChatID,
+		ThreadID:         selection.ThreadID,
+		GroupMessageType: selection.GroupMessageType,
 	}
 	session, err := s.selectionSession(
 		msg,
@@ -344,9 +347,10 @@ func (s *Service) HandleModelSelection(ctx context.Context, selection feishu.Mod
 		return "", err
 	}
 	msg := feishu.Message{
-		BotID:    selection.BotID,
-		ChatID:   selection.ChatID,
-		ThreadID: selection.ThreadID,
+		BotID:            selection.BotID,
+		ChatID:           selection.ChatID,
+		ThreadID:         selection.ThreadID,
+		GroupMessageType: selection.GroupMessageType,
 	}
 	session, err := s.selectionSession(
 		msg,
@@ -406,12 +410,33 @@ func (s *Service) selectionSession(msg feishu.Message, acpSessionID string, expi
 	if store == nil {
 		return Session{}, fmt.Errorf("会话持久化未初始化")
 	}
-	key := SessionKey{BotID: msg.BotID, ChatID: msg.ChatID, ThreadID: msg.ThreadID}
-	session, ok := store.Get(key)
-	if !ok || session.ACPSessionID != acpSessionID {
-		return Session{}, errors.New(expiredMessage)
+	for _, key := range callbackSessionKeys(msg) {
+		session, ok := store.Get(key)
+		if ok && session.ACPSessionID == acpSessionID {
+			return session, nil
+		}
 	}
-	return session, nil
+	return Session{}, errors.New(expiredMessage)
+}
+
+func callbackSessionKeys(msg feishu.Message) []SessionKey {
+	keys := make([]SessionKey, 0, 2)
+	if strings.TrimSpace(msg.ThreadID) != "" && strings.TrimSpace(msg.ChatID) != "" {
+		keys = append(keys, imSessionKey(msg.BotID, msg.ChatID, msg.ThreadID))
+	}
+	for _, key := range sessionKeysFromMessage(msg) {
+		duplicate := false
+		for _, existing := range keys {
+			if existing == key {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func validateSelectionRequester(requesterID string, operatorID string, label string, command string, action string) error {

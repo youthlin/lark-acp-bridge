@@ -12,7 +12,7 @@ import (
 
 func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "thread-a"}
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
 	var updates []acp.SessionUpdate
 	unsub := r.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
 		if sessionID != "session-1" {
@@ -42,7 +42,7 @@ func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
 
 func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "thread-a"}
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
 	var updates []acp.SessionUpdate
 	unsub := r.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
 		if sessionID != "session-1" {
@@ -66,7 +66,7 @@ func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 
 func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", ThreadID: "thread-a"}
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
 	r.setRuntimeSessionID(currentRuntimeKey(key), "session-2")
 
 	session, changed, err := r.TransitionCurrentSession(key, "session-2", func() (Session, bool, error) {

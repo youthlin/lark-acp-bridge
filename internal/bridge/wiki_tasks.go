@@ -140,11 +140,12 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 	var task *runningTask
 	wikiTaskRunning := false
 	if hasSession {
-		status = s.wikiStatuses[session.Key]
-		_, timerSet = s.wikiTimers[session.Key]
-		task = s.tasks[session.Key]
+		key := normalizeSessionKey(session.Key)
+		status = s.wikiStatuses[key]
+		_, timerSet = s.wikiTimers[key]
+		task = s.tasks[key]
 		for runtime := range s.wikiTasks {
-			if runtime.SessionKey == session.Key {
+			if normalizeSessionKey(runtime.SessionKey) == key {
 				wikiTaskRunning = true
 				break
 			}
@@ -190,6 +191,8 @@ func wikiReflectionPrompt(workspace string) string {
 }
 
 func (s *Service) startWikiTask(ctx context.Context, session Session, agent config.AgentConfig, runtime runtimeKey) (context.Context, func()) {
+	session.Key = normalizeSessionKey(session.Key)
+	runtime = normalizeRuntimeKey(runtime)
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
 		kind:    taskKindWiki,
@@ -217,6 +220,7 @@ func (s *Service) startWikiTask(ctx context.Context, session Session, agent conf
 }
 
 func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	tasks := make([]*runningTask, 0)
 	for runtime, task := range s.wikiTasks {
@@ -236,6 +240,7 @@ func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
 }
 
 func (s *Service) cancelWikiTimer(key SessionKey) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	if s.wikiGenerations == nil {
 		s.wikiGenerations = make(map[SessionKey]int64)
@@ -250,12 +255,14 @@ func (s *Service) cancelWikiTimer(key SessionKey) {
 }
 
 func (s *Service) hasWikiTimer(key SessionKey) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	return s.wikiTimers[key] != nil
 }
 
 func (s *Service) takePendingWiki(key SessionKey) (pendingWikiRun, bool) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	if s.wikiGenerations == nil {
 		s.wikiGenerations = make(map[SessionKey]int64)
@@ -274,6 +281,7 @@ func (s *Service) takePendingWiki(key SessionKey) (pendingWikiRun, bool) {
 }
 
 func (s *Service) restorePendingWiki(pending pendingWikiRun) {
+	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	if strings.TrimSpace(pending.session.ACPSessionID) == "" {
 		return
 	}
@@ -304,6 +312,7 @@ func (s *Service) restorePendingWiki(pending pendingWikiRun) {
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
+	session.Key = normalizeSessionKey(session.Key)
 	chat := s.wikiConfigForSession(session)
 	if chat.WikiDisabled || strings.TrimSpace(session.ACPSessionID) == "" {
 		s.cancelWikiTimer(session.Key)
@@ -337,7 +346,7 @@ func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.Agen
 }
 
 func (s *Service) wikiConfigForSession(session Session) ChatConfig {
-	key := ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID}
+	key := chatKeyFromSessionKey(session.Key)
 	chat := ChatConfig{Key: key}
 	store := s.storeForMessage(feishu.Message{BotID: session.Key.BotID})
 	if store != nil {
@@ -351,6 +360,8 @@ func (s *Service) wikiConfigForSession(session Session) ChatConfig {
 }
 
 func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {
+	key = normalizeSessionKey(key)
+	session.Key = normalizeSessionKey(session.Key)
 	s.taskMu.Lock()
 	if s.wikiGenerations[key] != generation {
 		s.taskMu.Unlock()
@@ -380,6 +391,7 @@ func (s *Service) runPendingWikiAsync(pending pendingWikiRun) {
 }
 
 func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
+	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	key := pending.session.Key
 	runtime := wikiRuntimeKey(key, pending.generation, pending.session.ACPSessionID)
 	ctx, finish := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
@@ -395,6 +407,7 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 }
 
 func (s *Service) markWikiStarted(key SessionKey) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	status := s.wikiStatuses[key]
 	status.running = true
@@ -407,6 +420,7 @@ func (s *Service) markWikiStarted(key SessionKey) {
 }
 
 func (s *Service) markWikiFinished(key SessionKey, session Session, err error) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	status := s.wikiStatuses[key]
 	status.running = false

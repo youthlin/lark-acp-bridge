@@ -105,23 +105,25 @@ type ConfigDetailCard struct {
 }
 
 type ModelSelectionCard struct {
-	BotID        string
-	ChatID       string
-	ThreadID     string
-	ACPSessionID string
-	RequesterID  string
-	CurrentModel string
-	Options      []ModelOption
+	BotID            string
+	ChatID           string
+	ThreadID         string
+	GroupMessageType string
+	ACPSessionID     string
+	RequesterID      string
+	CurrentModel     string
+	Options          []ModelOption
 }
 
 type ModeSelectionCard struct {
-	BotID        string
-	ChatID       string
-	ThreadID     string
-	ACPSessionID string
-	RequesterID  string
-	CurrentMode  string
-	Options      []ModeOption
+	BotID            string
+	ChatID           string
+	ThreadID         string
+	GroupMessageType string
+	ACPSessionID     string
+	RequesterID      string
+	CurrentMode      string
+	Options          []ModeOption
 }
 
 type SessionSelectionCard struct {

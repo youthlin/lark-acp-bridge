@@ -12,13 +12,14 @@ import (
 const modeSelectionCardAction = "acp_mode_selection"
 
 type ModeSelection struct {
-	BotID        string
-	ChatID       string
-	ThreadID     string
-	ACPSessionID string
-	RequesterID  string
-	OperatorID   string
-	Mode         string
+	BotID            string
+	ChatID           string
+	ThreadID         string
+	GroupMessageType string
+	ACPSessionID     string
+	RequesterID      string
+	OperatorID       string
+	Mode             string
 }
 
 func (a *Adapter) SendModeSelectionCard(ctx context.Context, msg Message, card ModeSelectionCard) error {
@@ -42,12 +43,13 @@ func (a *Adapter) handleModeSelectionAction(ctx context.Context, event *callback
 		mode = stringValue(value, "mode")
 	}
 	selection := ModeSelection{
-		BotID:        stringValue(value, "bot_id"),
-		ChatID:       stringValue(value, "chat_id"),
-		ThreadID:     stringValue(value, "thread_id"),
-		ACPSessionID: stringValue(value, "acp_session_id"),
-		RequesterID:  stringValue(value, "requester_id"),
-		Mode:         mode,
+		BotID:            stringValue(value, "bot_id"),
+		ChatID:           stringValue(value, "chat_id"),
+		ThreadID:         stringValue(value, "thread_id"),
+		GroupMessageType: stringValue(value, "group_message_type"),
+		ACPSessionID:     stringValue(value, "acp_session_id"),
+		RequesterID:      stringValue(value, "requester_id"),
+		Mode:             mode,
 	}
 	if event.Event.Operator != nil {
 		selection.OperatorID = strings.TrimSpace(event.Event.Operator.OpenID)
@@ -98,12 +100,13 @@ func newModeSelectionCardJSON(card ModeSelectionCard) string {
 			cardJSON{
 				"type": "callback",
 				"value": cardJSON{
-					"action":         modeSelectionCardAction,
-					"bot_id":         card.BotID,
-					"chat_id":        card.ChatID,
-					"thread_id":      card.ThreadID,
-					"acp_session_id": card.ACPSessionID,
-					"requester_id":   card.RequesterID,
+					"action":             modeSelectionCardAction,
+					"bot_id":             card.BotID,
+					"chat_id":            card.ChatID,
+					"thread_id":          card.ThreadID,
+					"group_message_type": card.GroupMessageType,
+					"acp_session_id":     card.ACPSessionID,
+					"requester_id":       card.RequesterID,
 				},
 			},
 		},
