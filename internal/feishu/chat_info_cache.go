@@ -39,6 +39,7 @@ func (c *chatInfoCache) Get(chatID string) (chatInfo, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// TODO 先清理过期的 keys
 	entry, ok := c.entries[chatID]
 	if !ok {
 		return chatInfo{}, false
@@ -64,4 +65,5 @@ func (c *chatInfoCache) Set(chatID string, info chatInfo) {
 		info:      info,
 		expiresAt: time.Now().Add(c.ttl),
 	}
+	// TODO 清理过期的 keys
 }
