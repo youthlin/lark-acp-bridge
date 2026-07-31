@@ -96,8 +96,8 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
 	}
-	if cfg.FeishuMessageReactionPromptEnabled {
-		t.Fatal("config.example.json should keep feishu_message_reaction_prompt_enabled disabled by default")
+	if cfg.MessageReactionPrompt {
+		t.Fatal("config.example.json should keep message_reaction_prompt disabled by default")
 	}
 }
 
@@ -150,10 +150,10 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
-func TestLoadFeishuMessageReactionPromptEnabled(t *testing.T) {
+func TestLoadMessageReactionPrompt(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-  "feishu_message_reaction_prompt_enabled": true,
+  "message_reaction_prompt": true,
   "bots": [
     {
       "id": "default",
@@ -178,8 +178,8 @@ func TestLoadFeishuMessageReactionPromptEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !cfg.FeishuMessageReactionPromptEnabled {
-		t.Fatal("FeishuMessageReactionPromptEnabled = false, want true")
+	if !cfg.MessageReactionPrompt {
+		t.Fatal("MessageReactionPrompt = false, want true")
 	}
 }
 

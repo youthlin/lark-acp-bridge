@@ -15,10 +15,10 @@ import (
 const appName = "lark-acp-bridge"
 
 type Config struct {
-	AgentList                          []NamedAgentConfig `json:"agent_list,omitempty"`
-	Bots                               []BotConfig        `json:"bots"`
-	RestartCommand                     []string           `json:"restart_command,omitempty"`
-	FeishuMessageReactionPromptEnabled bool               `json:"feishu_message_reaction_prompt_enabled,omitempty"`
+	AgentList             []NamedAgentConfig `json:"agent_list,omitempty"`
+	Bots                  []BotConfig        `json:"bots"`
+	RestartCommand        []string           `json:"restart_command,omitempty"`
+	MessageReactionPrompt bool               `json:"message_reaction_prompt,omitempty"`
 }
 
 type NamedAgentConfig struct {
