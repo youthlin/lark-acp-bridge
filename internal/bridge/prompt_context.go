@@ -125,12 +125,51 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 	return msg.Workspace
 }
 
+func (s *Service) promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
+	return promptTextWithWorkspaceContextOptions(workspace, msg, text, s.cfg.FeishuMessageReactionPromptEnabled)
+}
+
 func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
+	return promptTextWithWorkspaceContextOptions(workspace, msg, text, false)
+}
+
+func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message, text string, reactionPromptEnabled bool) string {
 	return promptWithUserMessage([]string{
 		workspaceContextPrompt(workspace),
 		workspaceMemoryPolicyPrompt(workspace),
 		messageMetadataPrompt(msg),
+		feishuMessageReactionPrompt(msg, reactionPromptEnabled),
 	}, text)
+}
+
+var feishuMessageReactionEmojiTypes = []string{
+	"OK",        // OK
+	"Get",       // 收到
+	"THUMBSUP",  // 赞
+	"APPLAUSE",  // 鼓掌
+	"HEART",     // 爱心
+	"Fire",      // 火
+	"WITTY",     // 灵光一闪
+	"THINKING",  // 思考
+	"OnIt",      // 在看了
+	"Done",      // 完成
+	"GoGoGo",    // 开始干
+	"OneSecond", // 再等一下
+}
+
+func feishuMessageReactionPrompt(msg feishu.Message, enabled bool) string {
+	if !enabled || strings.TrimSpace(msg.MessageID) == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		"## Feishu Message Reaction",
+		"",
+		"- 如果你认为本次收到的飞书消息适合用一个轻量 reaction 表达已收到、认可、完成、思考或正在处理，可以给该消息添加一个表情 reaction。",
+		"- reaction 是可选动作；只有在自然、合适且不会替代必要文字回复时才添加。",
+		"- 目标消息 ID 使用 Message Metadata 中的 `message_id`。",
+		"- 可用 emoji_type 建议从以下列表选择：" + strings.Join(feishuMessageReactionEmojiTypes, ", ") + "。",
+		"- 可使用 `lark-cli im reactions create --message-id <message_id> --data '{\"reaction_type\":{\"emoji_type\":\"OK\"}}' --as bot --profile <profile>`，或调用飞书 IM MessageReaction Create API。",
+	}, "\n")
 }
 
 func formatNewSessionReply(session Session, source string) string {

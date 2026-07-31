@@ -52,7 +52,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		text := s.promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
 		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
 	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
@@ -60,7 +60,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		text := s.promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
 		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
@@ -75,7 +75,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		}
 		session = created
 	}
-	text = promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
+	text = s.promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
 	return preparedPrompt{session: session, agent: agent, text: text}, nil
 }
 

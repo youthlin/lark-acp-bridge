@@ -9,6 +9,7 @@
       "owner_open_ids": []
     }
   ],
+  "feishu_message_reaction_prompt_enabled": false,
   "agent_list": [
     {
       "name": "traex",

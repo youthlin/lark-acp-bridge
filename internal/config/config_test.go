@@ -96,6 +96,9 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
 	}
+	if cfg.FeishuMessageReactionPromptEnabled {
+		t.Fatal("config.example.json should keep feishu_message_reaction_prompt_enabled disabled by default")
+	}
 }
 
 func TestLoadExpandsHomePath(t *testing.T) {
@@ -144,6 +147,39 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 	if cfg.MissingBotConfig() {
 		t.Fatalf("MissingBotConfig() = true, want false")
+	}
+}
+
+func TestLoadFeishuMessageReactionPromptEnabled(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+  "feishu_message_reaction_prompt_enabled": true,
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_xxx",
+      "app_secret": "secret",
+      "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "args": ["acp", "serve"]
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.FeishuMessageReactionPromptEnabled {
+		t.Fatal("FeishuMessageReactionPromptEnabled = false, want true")
 	}
 }
 
