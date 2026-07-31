@@ -84,7 +84,7 @@ https://open.larkoffice.com/page/launcher
 
 如果当前 bridge 是内置后台 daemon 子进程，未配置时会使用当前可执行文件按内置后台 `restart` 模式重启；通过 `--config` 启动时会把当前配置路径传给新进程。如果使用 `run` 前台模式、systemd 或其他进程管理器运行，必须配置 `restart_command`，避免额外拉起一个后台实例。
 
-可选配置 `feishu_message_reaction_prompt_enabled` 用于控制是否在普通飞书消息 prompt 中提示 ACP agent：如果收到的消息适合用轻量表情表达已收到、认可、完成、思考或正在处理，可以给原消息添加 reaction。该配置是全局开关，不按 chat 单独配置，默认 `false`。开启后，prompt 会提供当前消息的 `message_id` 用法、推荐 `emoji_type` 列表，以及 `lark-cli im reactions create` / 飞书 IM MessageReaction Create API 的操作提示。
+可选配置 `feishu_message_reaction_prompt_enabled` 用于控制是否在普通飞书消息 prompt 中提示 ACP agent：如果收到的消息适合用轻量表情表达判断、认可、惊讶、好笑、无语或鼓励，可以给原消息添加 reaction。该配置是全局开关，不按 chat 单独配置，默认 `false`。开启后，prompt 会提供当前消息的 `message_id` 用法、推荐 `emoji_type` 列表，以及 `lark-cli im reactions create` / 飞书 IM MessageReaction Create API 的操作提示。
 
 第一次和 bot 对话时，如果 workspace 尚未标记为 ready，服务会创建基础知识文件：
 

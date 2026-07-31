@@ -384,12 +384,34 @@ func TestHandleFeishuMessageIncludesReactionPromptWhenEnabled(t *testing.T) {
 		"## Feishu Message Reaction",
 		"message_id",
 		"om_user",
-		"OK, Get, THUMBSUP",
+		"THUMBSUP, APPLAUSE, FISTBUMP",
 		"lark-cli im reactions create --message-id <message_id>",
 		"MessageReaction Create API",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestFeishuMessageReactionEmojiTypesDoNotOverlapProcessingReactions(t *testing.T) {
+	processing := map[string]struct{}{
+		"OK":         {},
+		"Get":        {},
+		"WINK":       {},
+		"WITTY":      {},
+		"DIZZY":      {},
+		"MeMeMe":     {},
+		"THINKING":   {},
+		"Typing":     {},
+		"OnIt":       {},
+		"OneSecond":  {},
+		"GoGoGo":     {},
+		"SaluteFace": {},
+	}
+	for _, emoji := range feishuMessageReactionEmojiTypes {
+		if _, ok := processing[emoji]; ok {
+			t.Fatalf("feishuMessageReactionEmojiTypes contains processing reaction %q", emoji)
 		}
 	}
 }

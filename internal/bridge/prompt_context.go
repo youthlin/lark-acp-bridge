@@ -143,18 +143,18 @@ func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message,
 }
 
 var feishuMessageReactionEmojiTypes = []string{
-	"OK",        // OK
-	"Get",       // 收到
-	"THUMBSUP",  // 赞
-	"APPLAUSE",  // 鼓掌
-	"HEART",     // 爱心
-	"Fire",      // 火
-	"WITTY",     // 灵光一闪
-	"THINKING",  // 思考
-	"OnIt",      // 在看了
-	"Done",      // 完成
-	"GoGoGo",    // 开始干
-	"OneSecond", // 再等一下
+	"THUMBSUP",    // 赞
+	"APPLAUSE",    // 鼓掌
+	"FISTBUMP",    // 碰拳
+	"FINGERHEART", // 比心
+	"MUSCLE",      // 加油
+	"LAUGH",       // 笑
+	"LOL",         // 笑哭
+	"FACEPALM",    // 捂脸
+	"SPEECHLESS",  // 无语
+	"WOW",         // 惊讶
+	"HEART",       // 爱心
+	"Fire",        // 火
 }
 
 func feishuMessageReactionPrompt(msg feishu.Message, enabled bool) string {
@@ -164,11 +164,11 @@ func feishuMessageReactionPrompt(msg feishu.Message, enabled bool) string {
 	return strings.Join([]string{
 		"## Feishu Message Reaction",
 		"",
-		"- 如果你认为本次收到的飞书消息适合用一个轻量 reaction 表达已收到、认可、完成、思考或正在处理，可以给该消息添加一个表情 reaction。",
+		"- 如果你认为本次收到的飞书消息适合用一个轻量 reaction 表达判断、认可、惊讶、好笑、无语或鼓励，可以给该消息添加一个表情 reaction。",
 		"- reaction 是可选动作；只有在自然、合适且不会替代必要文字回复时才添加。",
 		"- 目标消息 ID 使用 Message Metadata 中的 `message_id`。",
 		"- 可用 emoji_type 建议从以下列表选择：" + strings.Join(feishuMessageReactionEmojiTypes, ", ") + "。",
-		"- 可使用 `lark-cli im reactions create --message-id <message_id> --data '{\"reaction_type\":{\"emoji_type\":\"OK\"}}' --as bot --profile <profile>`，或调用飞书 IM MessageReaction Create API。",
+		"- 可使用 `lark-cli im reactions create --message-id <message_id> --data '{\"reaction_type\":{\"emoji_type\":\"THUMBSUP\"}}' --as bot --profile <profile>`，或调用飞书 IM MessageReaction Create API。",
 	}, "\n")
 }
 
