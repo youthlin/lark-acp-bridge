@@ -825,9 +825,11 @@ func TestRunScheduledTaskOnceSendsResultToServiceIMSender(t *testing.T) {
 	var sent []string
 	var sentMsgs []feishu.Message
 	ctx := context.Background()
-	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string) error {
+	var sentRender []feishu.OutboundRenderContext
+	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
 		sent = append(sent, text)
 		sentMsgs = append(sentMsgs, msg)
+		sentRender = append(sentRender, render)
 		return nil
 	}
 
@@ -840,6 +842,9 @@ func TestRunScheduledTaskOnceSendsResultToServiceIMSender(t *testing.T) {
 	}
 	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "omt_thread" || sentMsgs[0].MessageID != "om_source" || !sentMsgs[0].ForceReplyInThread {
 		t.Fatalf("sent messages = %+v, want configured IM sink target", sentMsgs)
+	}
+	if len(sentRender) != 1 || sentRender[0].BaseDir != task.Cwd {
+		t.Fatalf("sent render contexts = %+v, want task cwd", sentRender)
 	}
 }
 

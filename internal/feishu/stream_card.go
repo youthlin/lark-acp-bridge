@@ -44,7 +44,11 @@ func newStreamCardJSONWithPanels(includeProcessPanel, includeStatusBar bool) str
 }
 
 func newStreamCardJSONFromState(text, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
-	elements := []any{cardJSON{"tag": "markdown", "content": text, "element_id": streamCardTextElementID}}
+	return newStreamCardJSONFromBlocks([]outboundBlock{{Kind: outboundBlockMarkdown, Text: text}}, process, status, usage, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode)
+}
+
+func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
+	elements := outboundBlocksStreamCardElements(blocks)
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanelWithContent(process))
 	}
@@ -78,6 +82,10 @@ func newStreamCardJSONFromState(text, process, status, usage string, includeProc
 		},
 	})
 	return string(data)
+}
+
+func streamCardImageElementID(index int) string {
+	return fmt.Sprintf("img_stream_%d", index)
 }
 
 func newStreamCardProcessPanelJSON() string {
@@ -158,6 +166,7 @@ type sdkStreamCard struct {
 	usageTargetID    string
 	lastNormalUpdate time.Time
 	text             string
+	finalBlocks      []outboundBlock
 	process          string
 	status           string
 	usageDetail      string
@@ -273,6 +282,30 @@ func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
 	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardTextElementID, text))
 }
 
+func (c *sdkStreamCard) SetFinalText(ctx context.Context, text string, render OutboundRenderContext) error {
+	blocks, err := c.adapter.renderOutboundBlocks(ctx, text, outboundRenderContextFromPublic(render))
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	normalizedText := strings.TrimSpace(text)
+	hasImage := outboundBlocksHaveImage(blocks)
+	if !hasImage && strings.TrimSpace(c.text) == normalizedText && !c.shouldUseNormalUpdateLocked() {
+		return nil
+	}
+	c.text = normalizedText
+	c.finalBlocks = blocks
+	if hasImage || c.shouldUseNormalUpdateLocked() {
+		c.streamingClosed = true
+		return c.updateFullCardLocked(ctx, true)
+	}
+	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardTextElementID, c.text))
+}
+
 func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
 	seq := c.nextSequenceLocked()
 	elements := newStreamCardProcessPanelJSON()
@@ -348,7 +381,11 @@ func (c *sdkStreamCard) fullCardJSONLocked() string {
 	includeProcess := c.processCreated || strings.TrimSpace(c.process) != ""
 	includeStatus := c.statusCreated || strings.TrimSpace(c.status) != ""
 	includeUsage := c.usageCreated || strings.TrimSpace(c.usageDetail) != ""
-	return newStreamCardJSONFromState(c.text, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false)
+	blocks := c.finalBlocks
+	if len(blocks) == 0 {
+		blocks = []outboundBlock{{Kind: outboundBlockMarkdown, Text: c.text}}
+	}
+	return newStreamCardJSONFromBlocks(blocks, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false)
 }
 
 func (c *sdkStreamCard) nextSequenceLocked() int {

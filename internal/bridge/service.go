@@ -73,7 +73,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
 		adapter := feishu.NewAdapter(bot, s)
 		s.feishu = append(s.feishu, adapter)
-		s.scheduleSenders[strings.TrimSpace(bot.ID)] = adapter.SendText
+		s.scheduleSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextWithRenderContext
 		if store != nil {
 			s.stores[bot.ID] = store
 		} else if strings.TrimSpace(bot.Workspace) != "" {

@@ -94,10 +94,11 @@ type scheduledTaskActiveRun struct {
 	cancel context.CancelFunc
 }
 
-type scheduledTaskIMSender func(context.Context, feishu.Message, string) error
+type scheduledTaskIMSender func(context.Context, feishu.Message, string, feishu.OutboundRenderContext) error
 
 type scheduledTaskIMSink struct {
 	message feishu.Message
+	cwd     string
 	sender  scheduledTaskIMSender
 }
 
@@ -503,7 +504,7 @@ func (s *Service) scheduledTaskSink(task ScheduledTask) TriggerSink {
 		ChatID:             task.ResultSink.ChatID,
 		ThreadID:           task.ResultSink.ThreadID,
 		ForceReplyInThread: strings.TrimSpace(task.ResultSink.ThreadID) != "",
-	}, sender: s.scheduleIMSender(task.BotID)}
+	}, cwd: task.Cwd, sender: s.scheduleIMSender(task.BotID)}
 }
 
 func (s *Service) scheduleIMSender(botID string) scheduledTaskIMSender {
@@ -546,7 +547,7 @@ func (s scheduledTaskIMSink) send(ctx context.Context, text string) error {
 		return nil
 	}
 	if s.sender != nil {
-		return s.sender(ctx, s.message, text)
+		return s.sender(ctx, s.message, text, feishu.OutboundRenderContext{BaseDir: s.cwd})
 	}
 	slog.WarnContext(ctx, "缺少定时任务 IM result sink 发送器", "chat_id", s.message.ChatID, "thread_id", s.message.ThreadID)
 	return nil

@@ -2935,8 +2935,8 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if len(cards) != 1 {
 		t.Fatalf("cards = %+v, want one delayed auto stream card when reply is needed", cards)
 	}
-	if got := cards[0].textUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "需要回复" {
-		t.Fatalf("textUpdates = %+v, want final auto reply card text", got)
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "需要回复" {
+		t.Fatalf("finalTextUpdates = %+v, want final auto reply card text", got)
 	}
 	if got := cards[0].processUpdatesSnapshot(); len(got) != 0 {
 		t.Fatalf("processUpdates = %+v, want no process rows when auto reply has no tool boundary", got)
@@ -3244,8 +3244,8 @@ func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCar
 		t.Fatalf("cards = %+v, want one delayed auto stream card", cards)
 	}
 	card := cards[0]
-	if got := card.textUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "能查。当前群有 5 个成员。" {
-		t.Fatalf("textUpdates = %+v, want only final text after last tool on card", got)
+	if got := card.finalTextUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "能查。当前群有 5 个成员。" {
+		t.Fatalf("finalTextUpdates = %+v, want only final text after last tool on card", got)
 	}
 	processUpdates := card.processUpdatesSnapshot()
 	if len(processUpdates) == 0 {
@@ -4552,6 +4552,59 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 	t.Cleanup(func() { svc.cancelWikiTimer(session.Key) })
 	if !svc.hasWikiTimer(session.Key) {
 		t.Fatal("wiki timer not scheduled after successful IM prompt")
+	}
+}
+
+func TestHandleFeishuMessageFinalStreamCardUsesMarkdownImageRenderContext(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "结果如下：\n\n![截图](result.png)",
+		promptUpdates: []acp.PromptUpdate{
+			{SessionID: "acp-session-1", Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "结果如下：\n\n![截图](result.png)"},
+			}},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "发图",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because card was used", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "结果如下：\n\n![截图](result.png)" {
+		t.Fatalf("final text updates = %+v, want markdown image final text", got)
+	}
+	if got := cards[0].finalRenderContextsSnapshot(); len(got) != 1 || got[0].BaseDir != workDir {
+		t.Fatalf("final render contexts = %+v, want session cwd", got)
+	}
+	if !cards[0].isClosed() {
+		t.Fatalf("stream card should be closed")
 	}
 }
 
@@ -8488,6 +8541,8 @@ func (f *fakeRuntime) cancelCallCount() int {
 type fakeStreamCard struct {
 	mu                    sync.Mutex
 	textUpdates           []string
+	finalTextUpdates      []string
+	finalRenderContexts   []feishu.OutboundRenderContext
 	processUpdates        []string
 	statusUpdates         []string
 	usageDetails          []string
@@ -8502,6 +8557,17 @@ func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {
 		return ctx.Err()
 	}
 	f.textUpdates = append(f.textUpdates, text)
+	return nil
+}
+
+func (f *fakeStreamCard) SetFinalText(ctx context.Context, text string, render feishu.OutboundRenderContext) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	f.finalTextUpdates = append(f.finalTextUpdates, text)
+	f.finalRenderContexts = append(f.finalRenderContexts, render)
 	return nil
 }
 
@@ -8549,6 +8615,18 @@ func (f *fakeStreamCard) textUpdatesSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.textUpdates...)
+}
+
+func (f *fakeStreamCard) finalTextUpdatesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.finalTextUpdates...)
+}
+
+func (f *fakeStreamCard) finalRenderContextsSnapshot() []feishu.OutboundRenderContext {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]feishu.OutboundRenderContext(nil), f.finalRenderContexts...)
 }
 
 func (f *fakeStreamCard) processUpdatesSnapshot() []string {

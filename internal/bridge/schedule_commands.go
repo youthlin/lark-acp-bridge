@@ -41,6 +41,11 @@ func (s *Service) handleScheduleCommand(ctx context.Context, text string, msg fe
 			return "请使用 /schedule run <id>。"
 		}
 		return s.handleScheduleRunCommand(ctx, msg, fields[2])
+	case "edit":
+		if len(fields) < 3 {
+			return "请使用 /schedule edit <id> [--cwd <path>] [--agent <name>] <spec> <prompt>。"
+		}
+		return s.handleScheduleEditCommand(ctx, text, msg, fields[2])
 	case "pause":
 		if len(fields) < 3 {
 			return "请使用 /schedule pause <id>。"
@@ -69,6 +74,7 @@ func scheduleCommandUsage() string {
 		"/schedule list",
 		"/schedule status <id>",
 		"/schedule run <id>",
+		"/schedule edit <id> [--cwd <path>] [--agent <name>] <spec> <prompt>",
 		"/schedule pause <id>",
 		"/schedule resume <id>",
 		"/schedule delete <id>",
@@ -188,9 +194,17 @@ func scheduleHowPrompt(goal string) (string, error) {
 }
 
 func (s *Service) parseScheduleAddArgs(args string, msg feishu.Message) (scheduleAddArgs, string) {
+	return s.parseScheduleTaskArgs(args, msg, "add")
+}
+
+func (s *Service) parseScheduleTaskArgs(args string, msg feishu.Message, commandName string) (scheduleAddArgs, string) {
 	args = strings.TrimSpace(args)
+	commandName = strings.TrimSpace(commandName)
+	if commandName == "" {
+		commandName = "add"
+	}
 	if args == "" {
-		return scheduleAddArgs{}, "请使用 /schedule add <spec> <prompt>。"
+		return scheduleAddArgs{}, "请使用 /schedule " + commandName + " <spec> <prompt>。"
 	}
 	fields := strings.Fields(args)
 	if len(fields) < 2 {
@@ -235,7 +249,7 @@ func (s *Service) parseScheduleAddArgs(args string, msg feishu.Message) (schedul
 			parsed.AgentName = strings.TrimSpace(strings.TrimPrefix(field, "--agent="))
 			index++
 		case strings.HasPrefix(field, "-"):
-			return scheduleAddArgs{}, "未知 schedule add 参数：" + field
+			return scheduleAddArgs{}, "未知 schedule " + commandName + " 参数：" + field
 		default:
 			fields = fields[index:]
 			args = strings.Join(fields, " ")
@@ -321,6 +335,62 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, msg feishu.Message, id string) string {
+	store := s.scheduledTaskStoreForBotID(msg.BotID)
+	if store == nil {
+		return "当前 bot workspace 未初始化，无法编辑定时任务。"
+	}
+	id = strings.TrimSpace(id)
+	existing, ok := store.Get(id)
+	if !ok {
+		return "定时任务不存在：" + id
+	}
+	args, errText := s.parseScheduleTaskArgs(commandRemainder(text, 3), msg, "edit")
+	if errText != "" {
+		return errText
+	}
+	if _, err := parseScheduleSpec(args.Spec, ""); err != nil {
+		return "定时任务 spec 无效：" + err.Error()
+	}
+	agentName := args.AgentName
+	if agentName == "" {
+		agentName = existing.AgentName
+	}
+	if _, ok := s.registry.Get(agentName); !ok {
+		return "未知 agent：" + agentName
+	}
+	cwd := args.Cwd
+	if cwd == "" {
+		cwd = existing.Cwd
+	}
+	task, ok, err := store.Update(id, func(task *ScheduledTask) {
+		task.Spec = args.Spec
+		task.AgentName = agentName
+		task.Cwd = cwd
+		task.Prompt = args.Prompt
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "编辑定时任务失败", "task_id", id, "错误", err)
+		return "编辑定时任务失败：" + err.Error()
+	}
+	if !ok {
+		return "定时任务不存在：" + id
+	}
+	if task.Enabled {
+		workspace := strings.TrimSpace(s.botWorkspace(task.BotID))
+		if workspace == "" {
+			workspace = strings.TrimSpace(msg.Workspace)
+		}
+		if err := s.startScheduledTask(context.Background(), task, workspace); err != nil {
+			slog.ErrorContext(ctx, "重新注册定时任务失败", "task_id", task.ID, "错误", err)
+			return "定时任务已保存，但重新注册到当前进程失败：" + err.Error()
+		}
+	} else {
+		s.stopScheduledTask(task)
+	}
+	return formatScheduledTaskUpdated(task)
 }
 
 func (s *Service) handleScheduleRunCommand(ctx context.Context, msg feishu.Message, id string) string {
@@ -435,6 +505,18 @@ func formatScheduledTaskCreated(task ScheduledTask) string {
 		"spec：" + task.Spec,
 		"agent：" + task.AgentName,
 		"cwd：" + task.Cwd,
+		"回传：" + scheduledTaskSinkText(task.ResultSink),
+	}, "\n")
+}
+
+func formatScheduledTaskUpdated(task ScheduledTask) string {
+	return strings.Join([]string{
+		"已更新定时任务：" + task.ID,
+		"状态：" + scheduledTaskEnabledText(task.Enabled),
+		"spec：" + task.Spec,
+		"agent：" + task.AgentName,
+		"cwd：" + task.Cwd,
+		"prompt：" + task.Prompt,
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
 	}, "\n")
 }

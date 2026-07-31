@@ -265,8 +265,8 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 		if err == nil && strings.TrimSpace(result.Text) != "" && !s.shouldSuppressAtAutoReply(msg, result.Text) {
 			finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
 			defer finalCancel()
-			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() && finalReply != streamedReply {
-				stream.updateTextWithContext(finalCtx, finalReply)
+			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() {
+				stream.setFinalTextWithContext(finalCtx, finalReply)
 			}
 			stream.flushDelayedWithContext(finalCtx, result, result.StopReason)
 		}
@@ -313,8 +313,8 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 	if stream.hasStarted() {
 		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
 		defer finalCancel()
-		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() && finalReply != streamedReply {
-			stream.updateTextWithContext(finalCtx, finalReply)
+		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() {
+			stream.setFinalTextWithContext(finalCtx, finalReply)
 		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) {

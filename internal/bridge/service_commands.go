@@ -35,7 +35,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/queue <prompt> - 暂存提示词，当前任务结束后按顺序执行",
 			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
 			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
-			"/schedule list|status <id>|pause <id>|resume <id>|delete <id> - 管理定时任务",
+			"/schedule list|status <id>|run <id>|edit <id> ...|pause <id>|resume <id>|delete <id> - 管理定时任务",
 			"/cmds - 查看 ACP server 支持的 slash commands",
 			"/cmds /command [args] - 透传执行 ACP slash command",
 			"//command [args] - 透传执行 ACP slash command 的简写",

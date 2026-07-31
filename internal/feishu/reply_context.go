@@ -18,6 +18,10 @@ type messageUpdater func(context.Context, string, string) error
 
 type messageUpdaterKey struct{}
 
+type OutboundRenderContext struct {
+	BaseDir string
+}
+
 // LoopStatusCard 表示 /loop 启动后用于展示整体状态的卡片。
 type LoopStatusCard interface {
 	Message() SentMessage
@@ -51,6 +55,7 @@ type StreamCard interface {
 	UpdateStatus(context.Context, string) error
 	UpdateUsageDetail(context.Context, string) error
 	UpdateText(context.Context, string) error
+	SetFinalText(context.Context, string, OutboundRenderContext) error
 	Close(context.Context) error
 }
 

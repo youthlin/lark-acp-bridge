@@ -141,6 +141,187 @@ func TestHandleScheduleCommandAddCronSpec(t *testing.T) {
 	}
 }
 
+func TestHandleScheduleEditCommandUpdatesEnabledTaskAndReregistersJob(t *testing.T) {
+	workspace := t.TempDir()
+	defaultCwd := t.TempDir()
+	explicitCwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:           "bot-a",
+			Workspace:    workspace,
+			OwnerOpenIDs: []string{testOwnerOpenID},
+		}},
+		AgentList: []config.NamedAgentConfig{
+			{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: defaultCwd}},
+			{Name: "claude", AgentConfig: config.AgentConfig{Command: "claude", DefaultCwd: t.TempDir()}},
+		},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:            "bot-a",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		MessageID:        "om_schedule",
+		SenderID:         testOwnerOpenID,
+		Workspace:        workspace,
+		Text:             "@智能助手 /schedule add @every 1h 生成日报",
+		Mentions:         testBotMentions(),
+	}
+	if _, err := handleFeishuMessage(t, svc, context.Background(), msg); err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule add) error = %v", err)
+	}
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	tasks := store.List()
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, want one created task", tasks)
+	}
+	task := tasks[0]
+	createdAt := task.CreatedAt
+	updatedAt := task.UpdatedAt
+	if got := svc.scheduledTaskJobCount(); got != 1 {
+		t.Fatalf("scheduledTaskJobCount() = %d, want created task registered", got)
+	}
+
+	reply := svc.handleScheduleCommand(context.Background(), "/schedule edit "+task.ID+" --cwd "+explicitCwd+" --agent claude 0 9 * * 1 生成周报", msg)
+	for _, want := range []string{
+		"已更新定时任务：" + task.ID,
+		"状态：启用",
+		"spec：0 9 * * 1",
+		"agent：claude",
+		"cwd：" + explicitCwd,
+		"prompt：生成周报",
+		"回传：IM oc_chat / omt_thread",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	edited, ok := store.Get(task.ID)
+	if !ok {
+		t.Fatalf("Get(%s) ok = false", task.ID)
+	}
+	if !edited.Enabled || edited.Spec != "0 9 * * 1" || edited.AgentName != "claude" || edited.Cwd != explicitCwd || edited.Prompt != "生成周报" {
+		t.Fatalf("edited task = %+v, want updated fields", edited)
+	}
+	if edited.CreatorOpenID != testOwnerOpenID || edited.CreatedFromChatID != "oc_chat" || edited.CreatedFromThreadID != "omt_thread" || edited.CreatedFromMessageID != "om_schedule" {
+		t.Fatalf("edited task source = %+v, want preserved source", edited)
+	}
+	if edited.ResultSink != task.ResultSink {
+		t.Fatalf("edited sink = %+v, want preserved %+v", edited.ResultSink, task.ResultSink)
+	}
+	if !edited.CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt = %s, want preserved %s", edited.CreatedAt, createdAt)
+	}
+	if !edited.UpdatedAt.After(updatedAt) && !edited.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("UpdatedAt = %s, want not before %s", edited.UpdatedAt, updatedAt)
+	}
+	if got := svc.scheduledTaskJobCount(); got != 1 {
+		t.Fatalf("scheduledTaskJobCount() = %d, want edited enabled task registered", got)
+	}
+}
+
+func TestHandleScheduleEditCommandKeepsDefaultsAndPausedState(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule add @every 1h 生成日报",
+	}
+	if _, err := handleFeishuMessage(t, svc, context.Background(), msg); err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule add) error = %v", err)
+	}
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	task := store.List()[0]
+	if pause := svc.handleScheduleCommand(context.Background(), "/schedule pause "+task.ID, msg); pause != "已暂停定时任务："+task.ID {
+		t.Fatalf("pause reply = %q", pause)
+	}
+	if got := svc.scheduledTaskJobCount(); got != 0 {
+		t.Fatalf("scheduledTaskJobCount() = %d, want paused task stopped", got)
+	}
+
+	reply := svc.handleScheduleCommand(context.Background(), "/schedule edit "+task.ID+" @every 2h 生成双小时日报", msg)
+	for _, want := range []string{
+		"已更新定时任务：" + task.ID,
+		"状态：暂停",
+		"spec：@every 2h",
+		"agent：traex",
+		"cwd：" + cwd,
+		"prompt：生成双小时日报",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	edited, ok := store.Get(task.ID)
+	if !ok {
+		t.Fatalf("Get(%s) ok = false", task.ID)
+	}
+	if edited.Enabled || edited.Spec != "@every 2h" || edited.AgentName != "traex" || edited.Cwd != cwd || edited.Prompt != "生成双小时日报" {
+		t.Fatalf("edited task = %+v, want updated prompt/spec and preserved defaults", edited)
+	}
+	if got := svc.scheduledTaskJobCount(); got != 0 {
+		t.Fatalf("scheduledTaskJobCount() = %d, want edited paused task not registered", got)
+	}
+}
+
+func TestHandleScheduleEditCommandRejectsMissingTaskAndInvalidArgs(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+	}
+
+	reply := svc.handleScheduleCommand(context.Background(), "/schedule edit missing @every 1h 生成日报", msg)
+	if reply != "定时任务不存在：missing" {
+		t.Fatalf("reply = %q, want missing task rejection", reply)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule add @every 1h 生成日报",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule add) error = %v", err)
+	}
+	task := svc.scheduledTaskStoreForBotID("bot-a").List()[0]
+
+	reply = svc.handleScheduleCommand(context.Background(), "/schedule edit "+task.ID+" --agent missing @every 1h 生成日报", msg)
+	if reply != "未知 agent：missing" {
+		t.Fatalf("reply = %q, want unknown agent rejection", reply)
+	}
+
+	reply = svc.handleScheduleCommand(context.Background(), "/schedule edit "+task.ID+" bad spec", msg)
+	if !strings.Contains(reply, "cron spec 需要 5 段") {
+		t.Fatalf("reply = %q, want invalid spec rejection", reply)
+	}
+}
+
 func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) {
 	workspace := t.TempDir()
 	cwd := t.TempDir()
@@ -163,7 +344,7 @@ func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) 
 		text string
 	}
 	sent := make(chan sentResult, 1)
-	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string) error {
+	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
 		sent <- sentResult{msg: msg, text: text}
 		return nil
 	}

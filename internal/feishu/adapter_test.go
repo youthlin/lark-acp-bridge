@@ -782,10 +782,11 @@ func TestLarkMessageClientHydratesMessageImageLocalPath(t *testing.T) {
 	}
 }
 
-func TestSplitReplyImagesExtractsMarkdownAndLocalPathLines(t *testing.T) {
+func TestParseOutboundMarkdownExtractsMarkdownImages(t *testing.T) {
+	dir := t.TempDir()
 	text := strings.Join([]string{
 		"处理完成。",
-		"![截图](/tmp/result.png)",
+		"![截图](result.png)",
 		"local_path: /tmp/trace.webp",
 		"```",
 		"local_path: /tmp/ignored.png",
@@ -793,38 +794,56 @@ func TestSplitReplyImagesExtractsMarkdownAndLocalPathLines(t *testing.T) {
 		"结论保留。",
 	}, "\n")
 
-	plain, images := splitReplyImages(text)
-	if !strings.Contains(plain, "处理完成。") || !strings.Contains(plain, "结论保留。") {
-		t.Fatalf("plain = %q, want remaining text", plain)
+	blocks := parseOutboundMarkdown(text, outboundRenderContext{BaseDir: dir})
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %+v, want text/image/text", blocks)
 	}
-	if strings.Contains(plain, "/tmp/result.png") || strings.Contains(plain, "/tmp/trace.webp") {
-		t.Fatalf("plain = %q, should remove image references", plain)
+	if blocks[0].Kind != outboundBlockMarkdown || !strings.Contains(blocks[0].Text, "处理完成。") {
+		t.Fatalf("first block = %+v, want markdown text", blocks[0])
 	}
-	if !strings.Contains(plain, "local_path: /tmp/ignored.png") {
-		t.Fatalf("plain = %q, should keep code fence content", plain)
+	if blocks[1].Kind != outboundBlockImage || blocks[1].Alt != "截图" || blocks[1].Path != filepath.Join(dir, "result.png") {
+		t.Fatalf("image block = %+v, want relative image resolved from base dir", blocks[1])
 	}
-	want := []replyImage{
-		{Alt: "截图", LocalPath: "/tmp/result.png"},
-		{LocalPath: "/tmp/trace.webp"},
-	}
-	if !reflect.DeepEqual(images, want) {
-		t.Fatalf("images = %+v, want %+v", images, want)
+	if blocks[2].Kind != outboundBlockMarkdown || !strings.Contains(blocks[2].Text, "local_path: /tmp/trace.webp") || !strings.Contains(blocks[2].Text, "local_path: /tmp/ignored.png") || !strings.Contains(blocks[2].Text, "结论保留。") {
+		t.Fatalf("last block = %+v, want local_path kept as plain markdown text", blocks[2])
 	}
 }
 
-func TestSplitReplyImagesIgnoresRemoteMarkdownImages(t *testing.T) {
+func TestParseOutboundMarkdownIgnoresRemoteMarkdownImages(t *testing.T) {
 	text := "![remote](https://example.com/a.png)\n![local](/tmp/a.png)"
 
-	plain, images := splitReplyImages(text)
-	if !strings.Contains(plain, "https://example.com/a.png") {
-		t.Fatalf("plain = %q, want remote image left as text", plain)
+	blocks := parseOutboundMarkdown(text, outboundRenderContext{})
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %+v, want remote markdown text plus local image", blocks)
 	}
-	if len(images) != 1 || images[0].LocalPath != "/tmp/a.png" {
-		t.Fatalf("images = %+v, want only local image", images)
+	if blocks[0].Kind != outboundBlockMarkdown || !strings.Contains(blocks[0].Text, "https://example.com/a.png") {
+		t.Fatalf("first block = %+v, want remote image left as markdown text", blocks[0])
+	}
+	if blocks[1].Kind != outboundBlockImage || blocks[1].Path != "/tmp/a.png" {
+		t.Fatalf("second block = %+v, want local image", blocks[1])
 	}
 }
 
-func TestSplitReplyImagesKeepsMarkdownImagesInsideCodeFence(t *testing.T) {
+func TestParseOutboundMarkdownPreservesInlineTextAroundImages(t *testing.T) {
+	dir := t.TempDir()
+	text := "before ![local](a.png) after"
+
+	blocks := parseOutboundMarkdown(text, outboundRenderContext{BaseDir: dir})
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %+v, want text/image/text", blocks)
+	}
+	if blocks[0].Kind != outboundBlockMarkdown || blocks[0].Text != "before" {
+		t.Fatalf("first block = %+v, want prefix text", blocks[0])
+	}
+	if blocks[1].Kind != outboundBlockImage || blocks[1].Path != filepath.Join(dir, "a.png") {
+		t.Fatalf("image block = %+v, want relative image", blocks[1])
+	}
+	if blocks[2].Kind != outboundBlockMarkdown || blocks[2].Text != "after" {
+		t.Fatalf("last block = %+v, want suffix text", blocks[2])
+	}
+}
+
+func TestParseOutboundMarkdownKeepsMarkdownImagesInsideCodeFence(t *testing.T) {
 	text := strings.Join([]string{
 		"```markdown",
 		"![example](/tmp/should-stay.png)",
@@ -832,15 +851,83 @@ func TestSplitReplyImagesKeepsMarkdownImagesInsideCodeFence(t *testing.T) {
 		"![local](/tmp/should-upload.png)",
 	}, "\n")
 
-	plain, images := splitReplyImages(text)
-	if !strings.Contains(plain, "![example](/tmp/should-stay.png)") {
-		t.Fatalf("plain = %q, want fenced markdown image preserved", plain)
+	blocks := parseOutboundMarkdown(text, outboundRenderContext{})
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %+v, want fenced text plus image", blocks)
 	}
-	if strings.Contains(plain, "/tmp/should-upload.png") {
-		t.Fatalf("plain = %q, want unfenced markdown image removed", plain)
+	if blocks[0].Kind != outboundBlockMarkdown || !strings.Contains(blocks[0].Text, "![example](/tmp/should-stay.png)") {
+		t.Fatalf("first block = %+v, want fenced markdown image preserved", blocks[0])
 	}
-	if len(images) != 1 || images[0].LocalPath != "/tmp/should-upload.png" {
-		t.Fatalf("images = %+v, want only unfenced local image", images)
+	if blocks[1].Kind != outboundBlockImage || blocks[1].Path != "/tmp/should-upload.png" {
+		t.Fatalf("second block = %+v, want unfenced local image", blocks[1])
+	}
+}
+
+func TestOutboundBlocksRenderPostAndCardImages(t *testing.T) {
+	blocks := []outboundBlock{
+		{Kind: outboundBlockMarkdown, Text: "说明"},
+		{Kind: outboundBlockImage, Alt: "截图", ImageKey: "img_v3_uploaded"},
+	}
+
+	post, err := outboundBlocksPostContent(blocks)
+	if err != nil {
+		t.Fatalf("outboundBlocksPostContent() error = %v", err)
+	}
+	for _, want := range []string{`"tag":"md"`, `"text":"说明"`, `"tag":"img"`, `"image_key":"img_v3_uploaded"`} {
+		if !strings.Contains(post, want) {
+			t.Fatalf("post = %s, want %s", post, want)
+		}
+	}
+
+	var card any
+	data := newStreamCardJSONFromBlocks(blocks, "", "done", "", false, true, false, false)
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatalf("newStreamCardJSONFromBlocks() invalid JSON: %v", err)
+	}
+	for _, want := range []string{"说明", "img_v3_uploaded", "截图"} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("card = %#v, want %q", card, want)
+		}
+	}
+	if !jsonContainsKey(card, "img_key") {
+		t.Fatalf("card = %#v, want card img_key field", card)
+	}
+}
+
+func TestOutboundBlocksStreamCardPreservesTextImageOrder(t *testing.T) {
+	blocks := []outboundBlock{
+		{Kind: outboundBlockMarkdown, Text: "before txt"},
+		{Kind: outboundBlockImage, ImageKey: "img_v3_uploaded"},
+		{Kind: outboundBlockMarkdown, Text: "after txt"},
+	}
+
+	var card map[string]any
+	data := newStreamCardJSONFromBlocks(blocks, "", "", "", false, false, false, false)
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatalf("newStreamCardJSONFromBlocks() invalid JSON: %v", err)
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("card body = %#v, want object", card["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok {
+		t.Fatalf("body elements = %#v, want array", body["elements"])
+	}
+	if len(elements) != 3 {
+		t.Fatalf("elements = %#v, want before/image/after", elements)
+	}
+	first, ok := elements[0].(map[string]any)
+	if !ok || first["tag"] != "markdown" || first["content"] != "before txt" || first["element_id"] != streamCardTextElementID {
+		t.Fatalf("first element = %#v, want anchored before text", elements[0])
+	}
+	second, ok := elements[1].(map[string]any)
+	if !ok || second["tag"] != "img" || second["img_key"] != "img_v3_uploaded" {
+		t.Fatalf("second element = %#v, want image", elements[1])
+	}
+	third, ok := elements[2].(map[string]any)
+	if !ok || third["tag"] != "markdown" || third["content"] != "after txt" {
+		t.Fatalf("third element = %#v, want after text", elements[2])
 	}
 }
 

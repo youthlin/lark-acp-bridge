@@ -85,7 +85,7 @@ func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result a
 	showUsage := s.showUsageDetail
 	s.mu.Unlock()
 	if strings.TrimSpace(text) != "" {
-		s.updateTextWithContext(ctx, text)
+		s.setFinalTextWithContext(ctx, text)
 	}
 	if strings.TrimSpace(processText) != "" {
 		card := s.ensureCardWithContext(ctx)
@@ -138,6 +138,28 @@ func (s *promptCardStream) updateTextWithContext(ctx context.Context, text strin
 	}
 	if err := card.UpdateText(ctx, fullText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片文本失败", "session", s.session.ACPSessionID, "错误", err)
+	}
+}
+
+func (s *promptCardStream) setFinalTextWithContext(ctx context.Context, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.mu.Lock()
+	s.text = normalizeStreamMarkdown(text)
+	fullText := s.text
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
+	card := s.ensureCardWithContext(ctx)
+	if card == nil {
+		return
+	}
+	if err := card.SetFinalText(ctx, fullText, feishu.OutboundRenderContext{BaseDir: s.session.Cwd}); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片最终文本失败", "session", s.session.ACPSessionID, "错误", err)
 	}
 }
 
