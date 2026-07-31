@@ -126,7 +126,7 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 }
 
 func (s *Service) promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
-	return promptTextWithWorkspaceContextOptions(workspace, msg, text, s.cfg.MessageReactionPrompt)
+	return promptTextWithWorkspaceContextOptions(workspace, msg, text, s.cfg.MessageReaction)
 }
 
 func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {

@@ -9,7 +9,7 @@
       "owner_open_ids": []
     }
   ],
-  "message_reaction_prompt": false,
+  "message_reaction": false,
   "agent_list": [
     {
       "name": "traex",

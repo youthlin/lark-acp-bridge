@@ -356,7 +356,7 @@ func TestHandleFeishuMessageIncludesReactionPromptWhenEnabled(t *testing.T) {
 		t.Fatalf("Upsert(session) error = %v", err)
 	}
 	cfg := config.Default()
-	cfg.MessageReactionPrompt = true
+	cfg.MessageReaction = true
 	rt := &fakeRuntime{promptReply: "ACP 回复"}
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)

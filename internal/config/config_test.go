@@ -96,8 +96,8 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
 	}
-	if cfg.MessageReactionPrompt {
-		t.Fatal("config.example.json should keep message_reaction_prompt disabled by default")
+	if cfg.MessageReaction {
+		t.Fatal("config.example.json should keep message_reaction disabled by default")
 	}
 }
 
@@ -150,10 +150,10 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
-func TestLoadMessageReactionPrompt(t *testing.T) {
+func TestLoadMessageReaction(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-  "message_reaction_prompt": true,
+  "message_reaction": true,
   "bots": [
     {
       "id": "default",
@@ -178,8 +178,8 @@ func TestLoadMessageReactionPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !cfg.MessageReactionPrompt {
-		t.Fatal("MessageReactionPrompt = false, want true")
+	if !cfg.MessageReaction {
+		t.Fatal("MessageReaction = false, want true")
 	}
 }
 
