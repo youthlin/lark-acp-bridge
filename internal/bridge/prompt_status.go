@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
@@ -25,6 +26,8 @@ type promptStatusBar struct {
 	state       promptStatusState
 	stopReason  string
 	prefix      string
+	startedAt   time.Time
+	endedAt     time.Time
 	input       int64
 	cachedInput int64
 	output      int64
@@ -55,7 +58,11 @@ func (s *promptStatusBar) applyPromptResult(result acp.PromptResult) {
 }
 
 func (s promptStatusBar) text() string {
-	label := promptStatusStateLabel(s.state, s.stopReason)
+	return s.textAt(time.Now())
+}
+
+func (s promptStatusBar) textAt(now time.Time) string {
+	label := promptStatusStateLabel(s.state, s.stopReason, s.elapsed(now))
 	if prefix := strings.TrimSpace(s.prefix); prefix != "" {
 		label = prefix + " " + label
 	}
@@ -69,6 +76,28 @@ func (s promptStatusBar) text() string {
 	return strings.Join(parts, " | ")
 }
 
+func (s promptStatusBar) elapsed(now time.Time) time.Duration {
+	if s.startedAt.IsZero() {
+		return 0
+	}
+	end := now
+	if !s.endedAt.IsZero() {
+		end = s.endedAt
+	}
+	if end.Before(s.startedAt) {
+		return 0
+	}
+	return end.Sub(s.startedAt)
+}
+
+func (s *promptStatusBar) finish(state promptStatusState, stopReason string, endedAt time.Time) {
+	s.state = state
+	s.stopReason = strings.TrimSpace(stopReason)
+	if s.endedAt.IsZero() {
+		s.endedAt = endedAt
+	}
+}
+
 func promptStatusFromStopReason(stopReason string) promptStatusState {
 	switch strings.TrimSpace(stopReason) {
 	case "", "end_turn":
@@ -80,10 +109,10 @@ func promptStatusFromStopReason(stopReason string) promptStatusState {
 	}
 }
 
-func promptStatusStateLabel(state promptStatusState, stopReason string) string {
+func promptStatusStateLabel(state promptStatusState, stopReason string, elapsed time.Duration) string {
 	switch state {
 	case promptStatusCompleted:
-		return "已完成"
+		return "✅ " + formatPromptElapsedDuration(elapsed)
 	case promptStatusCancelled:
 		return "已取消"
 	case promptStatusFailed:
@@ -94,8 +123,35 @@ func promptStatusStateLabel(state promptStatusState, stopReason string) string {
 		}
 		return "已停止"
 	default:
-		return "执行中"
+		return "⏳ " + formatPromptElapsedDuration(elapsed)
 	}
+}
+
+func formatPromptElapsedDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSeconds := int64(d.Truncate(time.Second) / time.Second)
+	hours := totalSeconds / 3600
+	minutes := totalSeconds % 3600 / 60
+	seconds := totalSeconds % 60
+	if hours > 0 {
+		parts := []string{fmt.Sprintf("%dh", hours)}
+		if minutes > 0 {
+			parts = append(parts, fmt.Sprintf("%dm", minutes))
+		}
+		if seconds > 0 {
+			parts = append(parts, fmt.Sprintf("%ds", seconds))
+		}
+		return strings.Join(parts, "")
+	}
+	if minutes > 0 {
+		if seconds > 0 {
+			return fmt.Sprintf("%dm%ds", minutes, seconds)
+		}
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func formatContextUsage(usage acp.ContextWindowUsage) string {

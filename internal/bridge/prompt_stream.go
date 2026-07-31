@@ -65,7 +65,7 @@ func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message
 		showTools:        !show.HideTools,
 		showStatusBar:    !show.HideStatusBar,
 		showUsageDetail:  !show.HideUsageDetail,
-		status:           promptStatusBar{state: promptStatusRunning, prefix: strings.TrimSpace(statusPrefix)},
+		status:           promptStatusBar{state: promptStatusRunning, prefix: strings.TrimSpace(statusPrefix), startedAt: time.Now()},
 	}
 }
 
@@ -97,8 +97,7 @@ func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result a
 		s.mu.Lock()
 		s.status = status
 		s.status.applyPromptResult(result)
-		s.status.state = promptStatusFromStopReason(stopReason)
-		s.status.stopReason = strings.TrimSpace(stopReason)
+		s.status.finish(promptStatusFromStopReason(stopReason), stopReason, time.Now())
 		statusText := s.status.text()
 		s.mu.Unlock()
 		if card := s.ensureCardWithContext(ctx); card != nil {
@@ -230,8 +229,7 @@ func (s *promptCardStream) finishPromptStatusWithContext(ctx context.Context, st
 		return
 	}
 	s.mu.Lock()
-	s.status.state = promptStatusFromStopReason(stopReason)
-	s.status.stopReason = strings.TrimSpace(stopReason)
+	s.status.finish(promptStatusFromStopReason(stopReason), stopReason, time.Now())
 	statusText := s.status.text()
 	delayed := s.delayed
 	s.mu.Unlock()
@@ -260,7 +258,7 @@ func (s *promptCardStream) failPromptStatusWithContext(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
-	s.status.state = promptStatusFailed
+	s.status.finish(promptStatusFailed, "", time.Now())
 	statusText := s.status.text()
 	s.mu.Unlock()
 	if err := card.UpdateStatus(ctx, statusText); err != nil {

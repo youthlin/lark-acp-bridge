@@ -4619,13 +4619,20 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
 	got := cards[0].statusUpdatesSnapshot()
-	want := []string{
-		"执行中 | 69K/258K",
-		"执行中 | 511.8K(97%), 27.6K | 69K/258K",
-		"已完成 | 511.8K(97%), 27.6K | 69K/258K",
+	if len(got) != 3 {
+		t.Fatalf("statusUpdates = %+v, want three updates", got)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("statusUpdates = %+v, want %+v", got, want)
+	statusWantParts := [][]string{
+		{"⏳ ", " | 69K/258K"},
+		{"⏳ ", " | 511.8K(97%), 27.6K | 69K/258K"},
+		{"✅ ", " | 511.8K(97%), 27.6K | 69K/258K"},
+	}
+	for i, parts := range statusWantParts {
+		for _, part := range parts {
+			if !strings.Contains(got[i], part) {
+				t.Fatalf("statusUpdates[%d] = %q, want part %q", i, got[i], part)
+			}
+		}
 	}
 	usageDetails := cards[0].usageDetailsSnapshot()
 	if len(usageDetails) != 1 {
@@ -7347,10 +7354,10 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
 	statusUpdates := cards[0].statusUpdatesSnapshot()
-	if !containsStringWithAll(statusUpdates, "L1 执行中 | 53K/200K") {
+	if !containsStringWithAll(statusUpdates, "L1 ⏳ ", " | 53K/200K") {
 		t.Fatalf("status updates = %+v, want L1 running status", statusUpdates)
 	}
-	if !containsStringWithAll(statusUpdates, "L1 已完成 | 1.2K | 53K/200K") {
+	if !containsStringWithAll(statusUpdates, "L1 ✅ ", " | 1.2K | 53K/200K") {
 		t.Fatalf("status updates = %+v, want L1 completed status", statusUpdates)
 	}
 	if textUpdates := client.textUpdatesSnapshot(); len(textUpdates) != 0 {

@@ -26,6 +26,7 @@ const (
 	streamCardNormalUpdateAfter       = 9*time.Minute + 30*time.Second
 	streamCardNormalUpdateMinInterval = 5 * time.Second
 	streamCardEmptyContent            = "\u200b"
+	streamCardInitialStatus           = "⏳ 0s"
 )
 
 var streamCardNow = time.Now
@@ -39,7 +40,7 @@ func newStreamCardJSONWithProcessPanel(includeProcessPanel bool) string {
 }
 
 func newStreamCardJSONWithPanels(includeProcessPanel, includeStatusBar bool) string {
-	return newStreamCardJSONFromState("", "", "执行中", "", includeProcessPanel, includeStatusBar, false, true)
+	return newStreamCardJSONFromState("", "", streamCardInitialStatus, "", includeProcessPanel, includeStatusBar, false, true)
 }
 
 func newStreamCardJSONFromState(text, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
@@ -49,7 +50,7 @@ func newStreamCardJSONFromState(text, process, status, usage string, includeProc
 	}
 	if includeStatusBar {
 		if strings.TrimSpace(status) == "" {
-			status = "执行中"
+			status = streamCardInitialStatus
 		}
 		elements = append(elements, streamCardStatusMarkdown(status))
 	}
@@ -177,7 +178,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	}
 	initialStatus := ""
 	if statusBarEnabled {
-		initialStatus = "执行中"
+		initialStatus = streamCardInitialStatus
 	}
 	return &sdkStreamCard{
 		adapter:        a,

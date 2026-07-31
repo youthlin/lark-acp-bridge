@@ -33,7 +33,7 @@ func TestNewStreamCardJSONStartsWithProcessPanel(t *testing.T) {
 	if jsonContainsValue(card, "结果明细") {
 		t.Fatalf("initial stream card should not contain separate result title")
 	}
-	if !jsonContainsValue(card, "执行中") {
+	if !jsonContainsValue(card, streamCardInitialStatus) {
 		t.Fatalf("initial stream card does not contain running status")
 	}
 	if !jsonElementFieldEquals(card, streamCardStatusElementID, "text_align", "left") {
@@ -97,7 +97,7 @@ func TestNewStreamCardJSONCanOmitStatusBar(t *testing.T) {
 	if jsonContainsValue(card, streamCardStatusElementID) {
 		t.Fatalf("stream card should not contain status element %q", streamCardStatusElementID)
 	}
-	if jsonContainsValue(card, "执行中") {
+	if jsonContainsValue(card, streamCardInitialStatus) {
 		t.Fatalf("stream card should not contain running status")
 	}
 }
@@ -393,7 +393,7 @@ func TestSDKStreamCardFullCardJSONCanOmitHiddenStatusBar(t *testing.T) {
 		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
 	}
 
-	if jsonContainsValue(payload, streamCardStatusElementID) || jsonContainsValue(payload, "执行中") {
+	if jsonContainsValue(payload, streamCardStatusElementID) || jsonContainsValue(payload, streamCardInitialStatus) {
 		t.Fatalf("full card snapshot should keep hidden status bar omitted: %#v", payload)
 	}
 	if !jsonContainsValue(payload, streamCardProcessPanelID) {

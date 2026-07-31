@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
@@ -59,7 +60,8 @@ func TestPromptResultHasUsageDetail(t *testing.T) {
 }
 
 func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
-	status := promptStatusBar{state: promptStatusRunning}
+	startedAt := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	status := promptStatusBar{state: promptStatusRunning, startedAt: startedAt}
 	status.Context = acp.ContextWindowUsage{Used: 69200, Size: 258400}
 	status.applyPromptResult(acp.PromptResult{
 		Usage: acp.TokenUsage{
@@ -77,16 +79,19 @@ func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
 		},
 	})
 
-	got := status.text()
-	want := "执行中 | 511.8K(97%), 356 | 69K/258K"
+	got := status.textAt(startedAt.Add(95 * time.Second))
+	want := "⏳ 1m35s | 511.8K(97%), 356 | 69K/258K"
 	if got != want {
 		t.Fatalf("status text = %q, want %q", got, want)
 	}
 }
 
 func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
+	startedAt := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	status := promptStatusBar{
 		state:       promptStatusCompleted,
+		startedAt:   startedAt,
+		endedAt:     startedAt.Add(2*time.Minute + 5*time.Second),
 		input:       2_908_700,
 		cachedInput: 2_763_265,
 		output:      1_200_000,
@@ -94,7 +99,7 @@ func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
 	}
 
 	got := status.text()
-	want := "已完成 | 2.9M(95%), 1.2M | 2M/4M"
+	want := "✅ 2m5s | 2.9M(95%), 1.2M | 2M/4M"
 	if got != want {
 		t.Fatalf("status text = %q, want %q", got, want)
 	}
@@ -109,23 +114,44 @@ func TestPromptStatusBarOmitsMissingTokenUsage(t *testing.T) {
 		{
 			name: "output only",
 			bar:  promptStatusBar{state: promptStatusCompleted, output: 1000},
-			want: "已完成 | 1K",
+			want: "✅ 0s | 1K",
 		},
 		{
 			name: "input only without cache rate",
 			bar:  promptStatusBar{state: promptStatusCompleted, input: 1000},
-			want: "已完成 | 1K",
+			want: "✅ 0s | 1K",
 		},
 		{
 			name: "no usage",
 			bar:  promptStatusBar{state: promptStatusCompleted},
-			want: "已完成",
+			want: "✅ 0s",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.bar.text(); got != tt.want {
 				t.Fatalf("status text = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatPromptElapsedDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{name: "subsecond", in: 999 * time.Millisecond, want: "0s"},
+		{name: "seconds", in: 5 * time.Second, want: "5s"},
+		{name: "minutes seconds", in: 95 * time.Second, want: "1m35s"},
+		{name: "whole minutes", in: 2 * time.Minute, want: "2m"},
+		{name: "hours minutes seconds", in: 2*time.Hour + 3*time.Minute + 4*time.Second + 500*time.Millisecond, want: "2h3m4s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatPromptElapsedDuration(tt.in); got != tt.want {
+				t.Fatalf("formatPromptElapsedDuration(%s) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
