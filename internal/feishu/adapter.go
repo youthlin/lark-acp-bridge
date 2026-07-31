@@ -20,7 +20,6 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
-	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 type Handler interface {
@@ -163,13 +162,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 	}
 
-	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger("lark-sdk"))}
-	if logging.DebugEnabled() {
-		clientOptions = append(clientOptions,
-			lark.WithLogLevel(larkcore.LogLevelDebug),
-			lark.WithLogReqAtDebug(true),
-		)
-	}
+	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger("lark-sdk", slog.LevelInfo))}
 	a.client = lark.NewClient(a.cfg.AppID, a.cfg.AppSecret, clientOptions...)
 	if a.reaction == nil {
 		a.reaction = larkReactionClient{client: a.client}
@@ -195,7 +188,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.cfg.AppID,
 		a.cfg.AppSecret,
 		larkws.WithEventHandler(handler),
-		larkws.WithLogger(NewLogger("lark-ws")),
+		larkws.WithLogger(NewLogger("lark-ws", slog.LevelInfo)),
 	)
 	go func() {
 		if err := a.ws.Start(ctx); err != nil {
@@ -213,7 +206,7 @@ func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
 		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
 		OnP2NoticeCommentAddV1(a.handleDriveCommentAdd).
 		OnP2CardActionTrigger(a.handleCardAction)
-	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler")))
+	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler", slog.LevelInfo)))
 	return handler
 }
 

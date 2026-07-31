@@ -13,11 +13,13 @@ var _ larkcore.Logger = (*logger)(nil)
 
 type logger struct {
 	*slog.Logger
+	minLevel slog.Level
 }
 
-func NewLogger(component string) *logger {
+func NewLogger(component string, minLevel slog.Level) *logger {
 	return &logger{
-		Logger: slog.With("comp", component),
+		Logger:   slog.With("comp", component),
+		minLevel: minLevel,
 	}
 }
 
@@ -44,6 +46,9 @@ func (l *logger) Error(ctx context.Context, args ...any) {
 }
 
 func (l *logger) log(ctx context.Context, level slog.Level, fn func(ctx context.Context, msg string, args ...any), args ...any) {
+	if level < l.minLevel {
+		return
+	}
 	if l.Logger.Enabled(ctx, level) {
 		format := make([]string, len(args))
 		for i := range format {

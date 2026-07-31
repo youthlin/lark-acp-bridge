@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1001,6 +1002,29 @@ func TestMessageDeduperEvictsWhenOverCapacity(t *testing.T) {
 	}
 	if allowed, err := deduper.Allow("bot-a", "om_2"); err != nil || allowed {
 		t.Fatalf("newest duplicate = %v, %v; want false, nil", allowed, err)
+	}
+}
+
+func TestNewLoggerHonorsMinLevelWhenDefaultLoggerIsDebug(t *testing.T) {
+	oldDefault := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(oldDefault)
+	})
+
+	var buf bytes.Buffer
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
+
+	logger := NewLogger("lark-sdk", slog.LevelInfo)
+	logger.Debug(context.Background(), "debug message")
+	if strings.Contains(buf.String(), "debug message") {
+		t.Fatalf("debug log was written despite min level info: %s", buf.String())
+	}
+
+	logger.Info(context.Background(), "info message")
+	if !strings.Contains(buf.String(), "info message") {
+		t.Fatalf("info log was not written: %s", buf.String())
 	}
 }
 
