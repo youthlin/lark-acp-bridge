@@ -1016,7 +1016,7 @@ func TestNewLoggerHonorsMinLevelWhenDefaultLoggerIsDebug(t *testing.T) {
 	level.Set(slog.LevelDebug)
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
 
-	logger := NewLogger("lark-sdk", slog.LevelInfo)
+	logger := NewLogger(slog.LevelInfo, "test", "lark-sdk")
 	logger.Debug(context.Background(), "debug message")
 	if strings.Contains(buf.String(), "debug message") {
 		t.Fatalf("debug log was written despite min level info: %s", buf.String())

@@ -291,6 +291,44 @@ func TestParseMessagePostRichTextElements(t *testing.T) {
 	}
 }
 
+func TestParseMessagePostPrefersContentV2Markdown(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_md_post"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content: ptr(`{
+  "zh_cn": {
+    "title": "新版 Markdown",
+    "content": [[{"tag":"text","text":"降级后的文本"}]],
+    "content_v2": [[{"tag":"md","text":"## 原始 Markdown\n\n- [x] 保留任务列表\n\n![截图](img_v3_markdown)"}]]
+  }
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	wantText := "新版 Markdown\n## 原始 Markdown\n\n- [x] 保留任务列表\n\n![截图](img_v3_markdown)"
+	if msg.Text != wantText {
+		t.Fatalf("Text = %q, want content_v2 markdown %q", msg.Text, wantText)
+	}
+	if strings.Contains(msg.Text, "降级后的文本") {
+		t.Fatalf("Text = %q, should not include downgraded content when content_v2 is readable", msg.Text)
+	}
+	if len(msg.Images) != 1 || msg.ImageKey != "img_v3_markdown" {
+		t.Fatalf("Images = %+v ImageKey=%q, want markdown image key", msg.Images, msg.ImageKey)
+	}
+	if got := msg.PromptText(); !strings.Contains(got, "image_key: img_v3_markdown") {
+		t.Fatalf("PromptText() = %q, want markdown image key", got)
+	}
+}
+
 func TestParseMessagePostPrefersChineseLocale(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
@@ -310,6 +348,59 @@ func TestParseMessagePostPrefersChineseLocale(t *testing.T) {
 	}
 	if msg.Text != "中文\n你好" {
 		t.Fatalf("Text = %q, want Chinese locale text", msg.Text)
+	}
+}
+
+func TestParseMessageStructuredInboundTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		msgType string
+		content string
+		want    []string
+	}{
+		{
+			name:    "file",
+			msgType: "file",
+			content: `{"file_key":"file_v2_doc","file_name":"需求文档.txt"}`,
+			want:    []string{"[文件消息]", "file_name: 需求文档.txt", "file_key: file_v2_doc"},
+		},
+		{
+			name:    "location",
+			msgType: "location",
+			content: `{"name":"浙江省杭州市","longitude":"120.1","latitude":"30.2"}`,
+			want:    []string{"[位置消息]", "name: 浙江省杭州市", "longitude: 120.1", "latitude: 30.2"},
+		},
+		{
+			name:    "todo",
+			msgType: "todo",
+			content: `{"task_id":"task_1","summary":{"title":"","content":[[{"tag":"text","text":"多吃水果"}]]},"due_time":"1623124318000"}`,
+			want:    []string{"[任务消息]", "summary: 多吃水果", "task_id: task_1", "due_time: 1623124318000"},
+		},
+		{
+			name:    "vote",
+			msgType: "vote",
+			content: `{"topic":"午餐投票","options":["米饭","面条"]}`,
+			want:    []string{"[投票消息]", "topic: 午餐投票", "options: 米饭, 面条"},
+		},
+		{
+			name:    "system divider",
+			msgType: "system",
+			content: `{"template":"{divider_text}","divider_text":{"text":"新会话","i18n_text":{"zh_cn":"新话题","en_us":"New Session"}}}`,
+			want:    []string{"[系统消息]", "新会话"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMessageContent(tt.msgType, tt.content)
+			if err != nil {
+				t.Fatalf("parseMessageContent() error = %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("parseMessageContent() = %q, want %q", got, want)
+				}
+			}
+		})
 	}
 }
 

@@ -16,9 +16,9 @@ type logger struct {
 	minLevel slog.Level
 }
 
-func NewLogger(component string, minLevel slog.Level) *logger {
+func NewLogger(minLevel slog.Level, botID, component string) *logger {
 	return &logger{
-		Logger:   slog.With("comp", component),
+		Logger:   slog.With("botID", botID, "comp", component),
 		minLevel: minLevel,
 	}
 }

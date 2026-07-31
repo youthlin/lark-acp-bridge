@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -117,19 +118,11 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 	if len(msg.Images) > 0 {
 		msg.ImageKey = msg.Images[0].ImageKey
 	}
-	if strings.EqualFold(msg.MsgType, "image") {
-		msg.Text = ""
-	} else if strings.EqualFold(msg.MsgType, "text") {
-		text, err := parseTextContent(content)
-		if err != nil {
-			return Message{}, err
-		}
-		msg.Text = text
-	} else if strings.EqualFold(msg.MsgType, "post") {
-		msg.Text = parsePostContent(content)
-	} else {
-		msg.Text = parseMessageTextContent(content)
+	text, err := parseMessageContent(msg.MsgType, content)
+	if err != nil {
+		return Message{}, err
 	}
+	msg.Text = text
 	for _, mention := range raw.Mentions {
 		if mention == nil {
 			continue
@@ -202,12 +195,73 @@ func parseTextContent(content string) (string, error) {
 	return payload.Text, nil
 }
 
+func parseMessageContent(msgType string, content string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(msgType)) {
+	case "image":
+		return "", nil
+	case "text":
+		return parseTextContent(content)
+	case "post":
+		return parsePostContent(content), nil
+	default:
+		return parseStructuredMessageContent(msgType, content), nil
+	}
+}
+
 func parseMessageTextContent(content string) string {
 	text, err := parseTextContent(content)
 	if err != nil || strings.TrimSpace(text) == "" {
 		return extractReadableMessageText(content)
 	}
 	return strings.TrimSpace(text)
+}
+
+func parseStructuredMessageContent(msgType string, content string) string {
+	msgType = strings.ToLower(strings.TrimSpace(msgType))
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return parseMessageTextContent(content)
+	}
+	switch msgType {
+	case "file":
+		return labeledMessageText("文件消息", messageFields(payload, "file_name", "file_key")...)
+	case "folder":
+		return labeledMessageText("文件夹消息", messageFields(payload, "file_name", "file_key")...)
+	case "audio":
+		return labeledMessageText("音频消息", messageFields(payload, "file_key", "duration")...)
+	case "media":
+		return labeledMessageText("视频消息", messageFields(payload, "file_name", "file_key", "image_key", "duration")...)
+	case "sticker":
+		return labeledMessageText("表情包消息", messageFields(payload, "file_key")...)
+	case "share_chat":
+		return labeledMessageText("群名片", messageFields(payload, "chat_id")...)
+	case "share_user":
+		return labeledMessageText("个人名片", messageFields(payload, "user_id")...)
+	case "share_calendar_event", "calendar", "general_calendar":
+		return labeledMessageText("日程消息", messageFields(payload, "summary", "start_time", "end_time")...)
+	case "location":
+		return labeledMessageText("位置消息", messageFields(payload, "name", "longitude", "latitude")...)
+	case "video_chat":
+		return labeledMessageText("视频通话消息", messageFields(payload, "topic", "start_time")...)
+	case "todo":
+		fields := messageFields(payload, "task_id", "due_time")
+		if summary := postFieldText(payload, "summary"); summary != "" {
+			fields = append([]string{"summary: " + summary}, fields...)
+		}
+		return labeledMessageText("任务消息", fields...)
+	case "vote":
+		return labeledMessageText("投票消息", messageFields(payload, "topic", "options")...)
+	case "system":
+		if text := systemMessageText(payload); text != "" {
+			return text
+		}
+	case "hongbao", "merge_forward":
+		return parseMessageTextContent(content)
+	}
+	return extractReadableMessageText(content)
 }
 
 func parsePostContent(content string) string {
@@ -257,7 +311,8 @@ func collectPostObjectText(value map[string]any, parts []string) []string {
 		return appendPostText(parts, postElementText(tag, value))
 	}
 	parts = appendPostText(parts, firstString(value, "title"))
-	for _, key := range []string{"content", "content_v2", "elements", "children", "items"} {
+	parts = collectPreferredPostChildText(value, parts, "content_v2", "content")
+	for _, key := range []string{"elements", "children", "items"} {
 		child, ok := value[key]
 		if !ok {
 			continue
@@ -266,6 +321,21 @@ func collectPostObjectText(value map[string]any, parts []string) []string {
 	}
 	if len(parts) == 0 {
 		parts = collectReadableText(value, parts)
+	}
+	return parts
+}
+
+func collectPreferredPostChildText(value map[string]any, parts []string, keys ...string) []string {
+	for _, key := range keys {
+		child, ok := value[key]
+		if !ok {
+			continue
+		}
+		before := len(parts)
+		parts = collectPostBlockText(child, parts)
+		if len(parts) > before {
+			return parts
+		}
 	}
 	return parts
 }
@@ -354,7 +424,13 @@ func postElementText(tag string, elem map[string]any) string {
 	case "media", "file":
 		name := firstString(elem, "file_name", "name", "text")
 		if name == "" {
+			if strings.EqualFold(tag, "media") {
+				return "[视频]"
+			}
 			return "[文件]"
+		}
+		if strings.EqualFold(tag, "media") {
+			return "[视频: " + name + "]"
 		}
 		return "[文件: " + name + "]"
 	case "hr":
@@ -455,6 +531,9 @@ func collectImageKeys(value any, keys []string) []string {
 				keys = appendImageKey(keys, key)
 			}
 		}
+		if tag := strings.ToLower(strings.TrimSpace(firstString(v, "tag"))); tag == "md" || tag == "markdown" || tag == "lark_md" {
+			keys = appendMarkdownImageKeys(keys, firstRawString(v, "text", "content"))
+		}
 		visited := make(map[string]struct{}, len(v))
 		for _, childKey := range []string{"body", "header", "title", "text", "content", "content_v2", "elements", "fields", "columns", "children", "items", "zh_cn", "en_us"} {
 			if child, ok := v[childKey]; ok {
@@ -504,6 +583,18 @@ func appendImageKey(keys []string, key string) []string {
 	return append(keys, key)
 }
 
+var markdownImagePattern = regexp.MustCompile(`!\[[^\]]*]\(([^)\s]+)\)`)
+
+func appendMarkdownImageKeys(keys []string, text string) []string {
+	for _, group := range markdownImagePattern.FindAllStringSubmatch(text, -1) {
+		if len(group) < 2 {
+			continue
+		}
+		keys = appendImageKey(keys, group[1])
+	}
+	return keys
+}
+
 func extractReadableMessageText(content string) string {
 	var value any
 	if err := json.Unmarshal([]byte(content), &value); err != nil {
@@ -547,6 +638,144 @@ func appendReadableText(parts []string, text string) []string {
 		return parts
 	}
 	return append(parts, text)
+}
+
+func labeledMessageText(label string, fields ...string) string {
+	label = strings.TrimSpace(label)
+	fields = nonEmptyStrings(fields)
+	if label == "" {
+		return strings.Join(fields, "\n")
+	}
+	if len(fields) == 0 {
+		return "[" + label + "]"
+	}
+	return "[" + label + "]\n" + strings.Join(fields, "\n")
+}
+
+func messageFields(payload map[string]any, keys ...string) []string {
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if text := messageFieldString(payload[key]); text != "" {
+			fields = append(fields, key+": "+text)
+		}
+	}
+	return fields
+}
+
+func messageFieldString(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := messageFieldString(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		if text := firstString(v, "text", "title", "name", "content"); text != "" {
+			return text
+		}
+		if post := postObjectText(v); post != "" {
+			return post
+		}
+	}
+	return ""
+}
+
+func postFieldText(payload map[string]any, key string) string {
+	child, ok := payload[key]
+	if !ok {
+		return ""
+	}
+	switch v := child.(type) {
+	case map[string]any:
+		return postObjectText(v)
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return messageFieldString(v)
+	}
+}
+
+func postObjectText(value map[string]any) string {
+	parts := collectPostText(value, nil)
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func systemMessageText(payload map[string]any) string {
+	if text := messageFieldString(payload["text"]); text != "" {
+		return text
+	}
+	if divider, ok := payload["divider_text"].(map[string]any); ok {
+		if text := localizedText(divider); text != "" {
+			return "[系统消息]\n" + text
+		}
+	}
+	if params, ok := payload["params"].(map[string]any); ok {
+		if divider, ok := params["divider_text"].(map[string]any); ok {
+			if text := localizedText(divider); text != "" {
+				return "[系统消息]\n" + text
+			}
+		}
+	}
+	if template := messageFieldString(payload["template"]); template != "" {
+		return labeledMessageText("系统消息", systemTemplateFields(template, payload)...)
+	}
+	return ""
+}
+
+func localizedText(value map[string]any) string {
+	if text := firstString(value, "text"); text != "" {
+		return text
+	}
+	if texts, ok := value["i18n_text"].(map[string]any); ok {
+		for _, key := range []string{"zh_cn", "zh_CN", "en_us", "en_US"} {
+			if text := messageFieldString(texts[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func systemTemplateFields(template string, payload map[string]any) []string {
+	fields := []string{"template: " + template}
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		if key == "template" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		if text := messageFieldString(payload[key]); text != "" {
+			fields = append(fields, key+": "+text)
+		}
+	}
+	return fields
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func replaceMentionKeys(text string, mentions []Mention) string {

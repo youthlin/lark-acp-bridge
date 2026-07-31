@@ -162,7 +162,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 	}
 
-	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger("lark-sdk", slog.LevelInfo))}
+	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-sdk"))}
 	a.client = lark.NewClient(a.cfg.AppID, a.cfg.AppSecret, clientOptions...)
 	if a.reaction == nil {
 		a.reaction = larkReactionClient{client: a.client}
@@ -188,7 +188,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.cfg.AppID,
 		a.cfg.AppSecret,
 		larkws.WithEventHandler(handler),
-		larkws.WithLogger(NewLogger("lark-ws", slog.LevelInfo)),
+		larkws.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-ws")),
 	)
 	go func() {
 		if err := a.ws.Start(ctx); err != nil {
@@ -206,7 +206,7 @@ func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
 		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
 		OnP2NoticeCommentAddV1(a.handleDriveCommentAdd).
 		OnP2CardActionTrigger(a.handleCardAction)
-	handler.InitConfig(larkevent.WithLogger(NewLogger("lark-handler", slog.LevelInfo)))
+	handler.InitConfig(larkevent.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-handler")))
 	return handler
 }
 
