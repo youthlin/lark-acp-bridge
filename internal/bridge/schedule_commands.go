@@ -36,6 +36,11 @@ func (s *Service) handleScheduleCommand(ctx context.Context, text string, msg fe
 			return "请使用 /schedule status <id>。"
 		}
 		return s.handleScheduleStatusCommand(msg, fields[2])
+	case "run":
+		if len(fields) < 3 {
+			return "请使用 /schedule run <id>。"
+		}
+		return s.handleScheduleRunCommand(ctx, msg, fields[2])
 	case "pause":
 		if len(fields) < 3 {
 			return "请使用 /schedule pause <id>。"
@@ -63,6 +68,7 @@ func scheduleCommandUsage() string {
 		"/schedule how <自然语言需求>",
 		"/schedule list",
 		"/schedule status <id>",
+		"/schedule run <id>",
 		"/schedule pause <id>",
 		"/schedule resume <id>",
 		"/schedule delete <id>",
@@ -315,6 +321,39 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) handleScheduleRunCommand(ctx context.Context, msg feishu.Message, id string) string {
+	store := s.scheduledTaskStoreForBotID(msg.BotID)
+	if store == nil {
+		return "当前 bot workspace 未初始化，无法执行定时任务。"
+	}
+	task, ok := store.Get(id)
+	if !ok {
+		return "定时任务不存在：" + strings.TrimSpace(id)
+	}
+	workspace := strings.TrimSpace(s.botWorkspace(task.BotID))
+	if workspace == "" {
+		workspace = strings.TrimSpace(msg.Workspace)
+	}
+	if workspace == "" {
+		return "定时任务 workspace 为空，无法执行：" + task.ID
+	}
+	triggeredAt := time.Now()
+	runID := scheduledTaskRunID(task, triggeredAt)
+	runKey := scheduledTaskRunKey(task, runID)
+	s.markScheduleRunPending(task, runID, runKey, triggeredAt)
+	runCtx := context.WithoutCancel(ctx)
+	go func() {
+		if _, err := s.runScheduledTaskOnce(runCtx, task, runID, triggeredAt, workspace, nil); err != nil {
+			slog.ErrorContext(runCtx, "立即执行定时任务失败", "task_id", task.ID, "run_id", runID, "错误", err)
+		}
+	}()
+	return strings.Join([]string{
+		"已开始立即执行定时任务：" + task.ID,
+		"run：" + runID,
+		"执行结果会发送到该任务配置的回传目标。",
+	}, "\n")
 }
 
 func (s *Service) setScheduledTaskEnabled(ctx context.Context, msg feishu.Message, id string, enabled bool) string {

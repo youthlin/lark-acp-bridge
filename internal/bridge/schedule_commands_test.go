@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
@@ -136,6 +138,112 @@ func TestHandleScheduleCommandAddCronSpec(t *testing.T) {
 	tasks := svc.scheduledTaskStoreForBotID("bot-a").List()
 	if len(tasks) != 1 || tasks[0].Spec != "0 9 * * 1" || tasks[0].Prompt != "生成周报" {
 		t.Fatalf("tasks = %+v, want cron task", tasks)
+	}
+}
+
+func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:           "bot-a",
+			Workspace:    workspace,
+			OwnerOpenIDs: []string{testOwnerOpenID},
+		}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-run-now"},
+		promptReply:    "立即执行完成",
+	}
+	svc.setRuntime(rt)
+	type sentResult struct {
+		msg  feishu.Message
+		text string
+	}
+	sent := make(chan sentResult, 1)
+	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string) error {
+		sent <- sentResult{msg: msg, text: text}
+		return nil
+	}
+	msg := feishu.Message{
+		BotID:            "bot-a",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		MessageID:        "om_schedule",
+		SenderID:         testOwnerOpenID,
+		Workspace:        workspace,
+		Text:             "@智能助手 /schedule add @every 1h 生成日报",
+		Mentions:         testBotMentions(),
+	}
+	addReply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule add) error = %v", err)
+	}
+	if !strings.Contains(addReply, "已创建定时任务：task-") {
+		t.Fatalf("add reply = %q, want created task", addReply)
+	}
+	tasks := svc.scheduledTaskStoreForBotID("bot-a").List()
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, want one task", tasks)
+	}
+
+	runReply := svc.handleScheduleCommand(context.Background(), "/schedule run "+tasks[0].ID, msg)
+	if !strings.Contains(runReply, "已开始立即执行定时任务："+tasks[0].ID) || !strings.Contains(runReply, "run："+tasks[0].ID+"-") {
+		t.Fatalf("run reply = %q, want immediate run ack", runReply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	var gotSent sentResult
+	select {
+	case gotSent = <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for immediate run result sink")
+	}
+	if gotSent.text != "立即执行完成" {
+		t.Fatalf("sent text = %q, want immediate run result", gotSent.text)
+	}
+	if gotSent.msg.BotID != "bot-a" || gotSent.msg.ChatID != "oc_chat" || gotSent.msg.ThreadID != "omt_thread" || gotSent.msg.MessageID != "om_schedule" || !gotSent.msg.ForceReplyInThread {
+		t.Fatalf("sent message = %+v, want persisted result sink target", gotSent.msg)
+	}
+	rt.mu.Lock()
+	promptCalls := append([]fakePromptCall(nil), rt.promptCalls...)
+	newCalls := append([]fakeNewCall(nil), rt.newCalls...)
+	rt.mu.Unlock()
+	if len(promptCalls) != 1 || !strings.Contains(promptCalls[0].Text, "生成日报") || !strings.Contains(promptCalls[0].Text, `"source": "schedule"`) {
+		t.Fatalf("promptCalls = %+v, want schedule prompt", promptCalls)
+	}
+	if len(newCalls) != 1 || newCalls[0].Key.Source != sessionSourceSchedule || newCalls[0].Key.MainID != "task:"+tasks[0].ID || newCalls[0].Workspace != workspace {
+		t.Fatalf("newCalls = %+v, want immediate schedule session in bot workspace", newCalls)
+	}
+	last, ok := svc.lastScheduleRunStatus(tasks[0].ID)
+	if !ok || last.State != scheduleRunCompleted {
+		t.Fatalf("last status = %+v ok=%v, want completed immediate run", last, ok)
+	}
+}
+
+func TestHandleScheduleRunCommandRejectsMissingTask(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: t.TempDir()}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+	}
+
+	reply := svc.handleScheduleCommand(context.Background(), "/schedule run missing", msg)
+	if reply != "定时任务不存在：missing" {
+		t.Fatalf("reply = %q, want missing task rejection", reply)
 	}
 }
 

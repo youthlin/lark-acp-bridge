@@ -94,8 +94,11 @@ type scheduledTaskActiveRun struct {
 	cancel context.CancelFunc
 }
 
+type scheduledTaskIMSender func(context.Context, feishu.Message, string) error
+
 type scheduledTaskIMSink struct {
 	message feishu.Message
+	sender  scheduledTaskIMSender
 }
 
 type ScheduledTaskStore struct {
@@ -238,7 +241,7 @@ func (s *Service) runScheduledTaskOnce(ctx context.Context, task ScheduledTask, 
 		triggeredAt = time.Now()
 	}
 	if sink == nil {
-		sink = scheduledTaskSink(task)
+		sink = s.scheduledTaskSink(task)
 	}
 	req, err := scheduledTaskTriggerRequest(task, runID, triggeredAt, workspace, sink)
 	if err != nil {
@@ -489,7 +492,7 @@ func (s *Service) botWorkspace(botID string) string {
 	return ""
 }
 
-func scheduledTaskSink(task ScheduledTask) TriggerSink {
+func (s *Service) scheduledTaskSink(task ScheduledTask) TriggerSink {
 	task = normalizeScheduledTask(task)
 	if !strings.EqualFold(task.ResultSink.Type, "im") || strings.TrimSpace(task.ResultSink.ChatID) == "" {
 		return nil
@@ -500,7 +503,18 @@ func scheduledTaskSink(task ScheduledTask) TriggerSink {
 		ChatID:             task.ResultSink.ChatID,
 		ThreadID:           task.ResultSink.ThreadID,
 		ForceReplyInThread: strings.TrimSpace(task.ResultSink.ThreadID) != "",
-	}}
+	}, sender: s.scheduleIMSender(task.BotID)}
+}
+
+func (s *Service) scheduleIMSender(botID string) scheduledTaskIMSender {
+	if s == nil {
+		return nil
+	}
+	botID = strings.TrimSpace(botID)
+	if sender := s.scheduleSenders[botID]; sender != nil {
+		return sender
+	}
+	return s.scheduleSenders[""]
 }
 
 func (s scheduledTaskIMSink) OnUpdate(context.Context, TriggerResult) error {
@@ -528,9 +542,13 @@ func (s scheduledTaskIMSink) send(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	if !ok {
-		slog.WarnContext(ctx, "缺少定时任务 IM result sink 发送器", "chat_id", s.message.ChatID, "thread_id", s.message.ThreadID)
+	if ok {
+		return nil
 	}
+	if s.sender != nil {
+		return s.sender(ctx, s.message, text)
+	}
+	slog.WarnContext(ctx, "缺少定时任务 IM result sink 发送器", "chat_id", s.message.ChatID, "thread_id", s.message.ThreadID)
 	return nil
 }
 

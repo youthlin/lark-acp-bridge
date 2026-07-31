@@ -797,6 +797,52 @@ func TestRunScheduledTaskOnceSendsResultToIMSink(t *testing.T) {
 	}
 }
 
+func TestRunScheduledTaskOnceSendsResultToServiceIMSender(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-run-1"},
+		promptReply:    "schedule done",
+	}
+	svc.setRuntime(rt)
+	task := ScheduledTask{
+		ID:        "daily",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "0 9 * * *",
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "generate report",
+		ResultSink: ScheduledTaskResultSink{
+			Type:      "im",
+			ChatID:    "oc_chat",
+			ThreadID:  "omt_thread",
+			MessageID: "om_source",
+		},
+	}
+	var sent []string
+	var sentMsgs []feishu.Message
+	ctx := context.Background()
+	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string) error {
+		sent = append(sent, text)
+		sentMsgs = append(sentMsgs, msg)
+		return nil
+	}
+
+	_, err := svc.runScheduledTaskOnce(ctx, task, "run-1", time.Now(), t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("runScheduledTaskOnce() error = %v", err)
+	}
+	if len(sent) != 1 || sent[0] != "schedule done" {
+		t.Fatalf("sent = %+v, want schedule result through service sender", sent)
+	}
+	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "omt_thread" || sentMsgs[0].MessageID != "om_source" || !sentMsgs[0].ForceReplyInThread {
+		t.Fatalf("sent messages = %+v, want configured IM sink target", sentMsgs)
+	}
+}
+
 func TestRunScheduledTaskOnceSendsErrorToIMSink(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := NewService(config.Config{

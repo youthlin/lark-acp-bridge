@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -70,6 +71,7 @@ type reactionClient interface {
 type messageClient interface {
 	GetMessage(ctx context.Context, messageID string, workspace string) (*Message, error)
 	DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error)
+	UploadImage(ctx context.Context, path string) (string, error)
 }
 
 type chatInfoClient interface {
@@ -569,8 +571,18 @@ func (a *Adapter) Shutdown(ctx context.Context) error {
 }
 
 func (a *Adapter) SendText(ctx context.Context, msg Message, text string) error {
-	_, err := a.SendTextMessage(ctx, msg, text)
-	return err
+	plainText, images := splitReplyImages(text)
+	if strings.TrimSpace(plainText) != "" || len(images) == 0 {
+		if _, err := a.SendTextMessage(ctx, msg, plainText); err != nil {
+			return err
+		}
+	}
+	for _, image := range images {
+		if _, err := a.SendImageMessage(ctx, msg, image.LocalPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) SendTextMessage(ctx context.Context, msg Message, text string) (SentMessage, error) {
@@ -652,6 +664,99 @@ func (a *Adapter) ReplyTextMessage(ctx context.Context, msg Message, text string
 		return SentMessage{}, fmt.Errorf("飞书回复接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return sentMessageFromReplyResp(resp, msg), nil
+}
+
+func (a *Adapter) SendImageMessage(ctx context.Context, msg Message, path string) (SentMessage, error) {
+	if strings.TrimSpace(msg.MessageID) != "" {
+		return a.ReplyImageMessage(ctx, msg, path)
+	}
+	if msg.IsPrivateChat() {
+		return a.SendChatImageMessage(ctx, msg.ChatID, msg.ChatType, path)
+	}
+	return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
+}
+
+func (a *Adapter) SendChatImageMessage(ctx context.Context, chatID string, chatType string, path string) (SentMessage, error) {
+	if a.client == nil {
+		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	if chatID == "" {
+		return SentMessage{}, fmt.Errorf("飞书 chat_id 为空")
+	}
+	imageKey, err := a.uploadReplyImage(ctx, path)
+	if err != nil {
+		return SentMessage{}, err
+	}
+	content, err := json.Marshal(map[string]string{"image_key": imageKey})
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("编码飞书图片消息内容: %w", err)
+	}
+	resp, err := a.client.Im.V1.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType("image").
+			Content(string(content)).
+			Build()).
+		Build())
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("调用飞书发图片消息接口: %w", err)
+	}
+	if !resp.Success() {
+		return SentMessage{}, fmt.Errorf("飞书发图片消息接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return sentMessageFromCreateResp(resp, chatID, chatType), nil
+}
+
+func (a *Adapter) ReplyImageMessage(ctx context.Context, msg Message, path string) (SentMessage, error) {
+	if a.client == nil {
+		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	if msg.MessageID == "" {
+		return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
+	}
+	imageKey, err := a.uploadReplyImage(ctx, path)
+	if err != nil {
+		return SentMessage{}, err
+	}
+	content, err := json.Marshal(map[string]string{"image_key": imageKey})
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("编码飞书图片回复内容: %w", err)
+	}
+	replyInThread := replyInThreadForMessage(msg)
+	resp, err := a.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(msg.MessageID).
+		Body(&larkim.ReplyMessageReqBody{
+			Content:       larkcore.StringPtr(string(content)),
+			MsgType:       larkcore.StringPtr("image"),
+			ReplyInThread: &replyInThread,
+		}).
+		Build())
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("调用飞书回复图片接口: %w", err)
+	}
+	if !resp.Success() {
+		return SentMessage{}, fmt.Errorf("飞书回复图片接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return sentMessageFromReplyResp(resp, msg), nil
+}
+
+func (a *Adapter) uploadReplyImage(ctx context.Context, path string) (string, error) {
+	path, err := normalizeReplyImagePath(path)
+	if err != nil {
+		return "", err
+	}
+	if a.messages == nil {
+		if a.client == nil {
+			return "", fmt.Errorf("飞书客户端未初始化")
+		}
+		a.messages = larkMessageClient{client: a.client}
+	}
+	imageKey, err := a.messages.UploadImage(ctx, path)
+	if err != nil {
+		return "", fmt.Errorf("上传飞书图片: %w", err)
+	}
+	return imageKey, nil
 }
 
 func replyInThreadForMessage(msg Message) bool {
@@ -797,6 +902,8 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 		setMessagePrimaryImage(msg)
 		if strings.EqualFold(msg.MsgType, "image") {
 			msg.Text = ""
+		} else if strings.EqualFold(msg.MsgType, "post") {
+			msg.Text = parsePostContent(content)
 		} else {
 			msg.Text = parseMessageTextContent(content)
 		}
@@ -862,6 +969,36 @@ func (c larkMessageClient) DownloadImage(ctx context.Context, messageID string, 
 	return path, nil
 }
 
+func (c larkMessageClient) UploadImage(ctx context.Context, path string) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("飞书客户端未初始化")
+	}
+	path, err := normalizeReplyImagePath(path)
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("打开图片文件: %w", err)
+	}
+	defer file.Close()
+	body := larkim.NewCreateImageReqBodyBuilder().
+		ImageType(larkim.CreateImageImageTypeMessage).
+		Image(file).
+		Build()
+	resp, err := c.client.Im.V1.Image.Create(ctx, larkim.NewCreateImageReqBuilder().Body(body).Build())
+	if err != nil {
+		return "", fmt.Errorf("调用飞书上传图片接口: %w", err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("飞书上传图片接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || strings.TrimSpace(value(resp.Data.ImageKey)) == "" {
+		return "", fmt.Errorf("飞书上传图片接口未返回 image_key")
+	}
+	return value(resp.Data.ImageKey), nil
+}
+
 func hydrateMessageImages(ctx context.Context, client messageClient, messageID string, workspace string, images []MessageImage) []MessageImage {
 	if client == nil || len(images) == 0 {
 		return images
@@ -909,6 +1046,132 @@ func safeImageCacheName(imageKey string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
 	return replacer.Replace(imageKey)
+}
+
+type replyImage struct {
+	Alt       string
+	LocalPath string
+}
+
+var markdownReplyImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+
+func splitReplyImages(text string) (string, []replyImage) {
+	var images []replyImage
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			out = append(out, line)
+			continue
+		}
+		if !inFence {
+			line = markdownReplyImagePattern.ReplaceAllStringFunc(line, func(match string) string {
+				groups := markdownReplyImagePattern.FindStringSubmatch(match)
+				if len(groups) != 3 {
+					return match
+				}
+				path := strings.TrimSpace(groups[2])
+				if !looksLikeLocalImagePath(path) {
+					return match
+				}
+				images = append(images, replyImage{Alt: strings.TrimSpace(groups[1]), LocalPath: trimReplyImagePath(path)})
+				return ""
+			})
+			trimmed = strings.TrimSpace(line)
+			if path, ok := replyImagePathLine(trimmed); ok {
+				images = append(images, replyImage{LocalPath: path})
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n")), images
+}
+
+func replyImagePathLine(line string) (string, bool) {
+	for _, prefix := range []string{"local_path:", "image_path:", "图片路径：", "图片路径:", "图片：", "图片:"} {
+		if strings.HasPrefix(strings.ToLower(line), prefix) {
+			path := strings.TrimSpace(line[len(prefix):])
+			if looksLikeLocalImagePath(path) {
+				return trimReplyImagePath(path), true
+			}
+		}
+	}
+	return "", false
+}
+
+func normalizeReplyImagePath(path string) (string, error) {
+	path = trimReplyImagePath(path)
+	if path == "" {
+		return "", fmt.Errorf("图片路径为空")
+	}
+	if strings.Contains(path, "://") && !strings.HasPrefix(strings.ToLower(path), "file://") {
+		return "", fmt.Errorf("只支持本地图片路径: %s", path)
+	}
+	if strings.HasPrefix(strings.ToLower(path), "file://") {
+		path = strings.TrimPrefix(path, "file://")
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("查找用户主目录: %w", err)
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("图片路径必须是绝对路径: %s", path)
+	}
+	path = filepath.Clean(path)
+	if !hasSupportedImageExtension(path) {
+		return "", fmt.Errorf("不支持的图片类型: %s", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("检查图片文件: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("图片路径是目录: %s", path)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("图片文件为空: %s", path)
+	}
+	if info.Size() > 10*1024*1024 {
+		return "", fmt.Errorf("图片文件超过 10MB: %s", path)
+	}
+	return path, nil
+}
+
+func looksLikeLocalImagePath(path string) bool {
+	path = trimReplyImagePath(path)
+	if path == "" {
+		return false
+	}
+	lower := strings.ToLower(path)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	if strings.HasPrefix(lower, "file://") {
+		path = strings.TrimPrefix(path, "file://")
+	}
+	return filepath.IsAbs(path) || strings.HasPrefix(path, "~/")
+}
+
+func trimReplyImagePath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.Trim(path, "\"'")
+	return strings.TrimSpace(path)
+}
+
+func hasSupportedImageExtension(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp", ".ico":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c larkReactionClient) AddReaction(ctx context.Context, messageID string) (string, error) {

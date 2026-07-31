@@ -4638,6 +4638,85 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageRecordsTokenUsageAndReports(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-session-1",
+			ConfigOptions: []acp.SessionConfigOption{
+				{ID: "model", Name: "Model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+			},
+		},
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+			Usage: acp.TokenUsage{
+				InputTokens:      1200,
+				OutputTokens:     345,
+				CachedReadTokens: 100,
+			},
+		},
+	}
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "完成。" {
+		t.Fatalf("reply = %q, want 完成。", reply)
+	}
+
+	usagePath := filepath.Join(workspace, "token_usage.json")
+	data, err := os.ReadFile(usagePath)
+	if err != nil {
+		t.Fatalf("ReadFile(token_usage.json) error = %v", err)
+	}
+	var file tokenUsageFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("Unmarshal(token_usage.json) error = %v", err)
+	}
+	if len(file.Records) != 1 {
+		t.Fatalf("records = %+v, want one record", file.Records)
+	}
+	record := file.Records[0]
+	if record.AgentName != "traex" || record.Model != "gpt-5.5" || record.Usage.TotalTokens != 1545 || record.Usage.CachedReadTokens != 100 {
+		t.Fatalf("record = %+v, want traex/gpt-5.5 usage", record)
+	}
+
+	report, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_usage",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "/usage day",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/usage) error = %v", err)
+	}
+	for _, want := range []string{"Token 用量报告（今日）", "总计：1 次，1.5K tokens", "traex / gpt-5.5", "缓存读 100"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report = %q, want %q", report, want)
+		}
+	}
+}
+
 func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)

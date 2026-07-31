@@ -348,7 +348,9 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	if text != "" && strings.TrimSpace(out.result.Text) == "" {
 		out.result.Text = text
 	}
-	return newTriggerResult(req, session, out.result, text, out.sentProgress, err), err
+	result := newTriggerResult(req, session, out.result, text, out.sentProgress, err)
+	s.recordPromptTokenUsage(ctx, req.BotID, session, result.ACPResult)
+	return result, err
 }
 
 func defaultTriggerPermissionOutcome(ctx context.Context, session Session, req acp.PermissionRequest) acp.PermissionOutcome {

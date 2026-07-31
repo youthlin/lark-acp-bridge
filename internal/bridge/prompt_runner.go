@@ -91,6 +91,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		result, sentProgress, err = s.runUserPrompt(ctx, msg, session, agent, text)
 	}
 	reply := result.Text
+	s.recordPromptTokenUsage(ctx, msg.BotID, session, result)
 	if !opts.SkipPostPromptWork && err == nil {
 		s.scheduleWikiAfterUserPrompt(session, agent)
 	}
@@ -195,9 +196,13 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
-	out, err := runPromptTask(s, ctx, session, agent, runningTaskOptions{
+	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, runningTaskOptions{
 		drainPendingAtAuto: s.chatAtMode(msg) == atModeAuto && messageMentionsBot(msg),
-	}, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+	})
+}
+
+func (s *Service) runUserPromptWithOptions(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) (acp.PromptResult, bool, error) {
+	out, err := runPromptTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
 		return s.promptRuntimeWithProgress(taskCtx, msg, session, agent, text)
 	})
 	if errors.Is(err, context.Canceled) {

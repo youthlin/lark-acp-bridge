@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -318,32 +319,67 @@ func (c Config) MissingBotConfig() bool {
 }
 
 func (c Config) ValidateAgentCommands() error {
+	_, err := c.FilterAvailableAgentCommands(io.Discard)
+	return err
+}
+
+func (c Config) FilterAvailableAgentCommands(stderr io.Writer) (Config, error) {
 	agentList, err := normalizeAgentList(c.AgentList)
 	if err != nil {
-		return err
+		return Config{}, err
 	}
 	if len(agentList) == 0 {
-		return fmt.Errorf("未配置 ACP agent")
+		return Config{}, fmt.Errorf("未配置 ACP agent")
 	}
+	filtered := make([]NamedAgentConfig, 0, len(agentList))
 	for _, named := range agentList {
 		name := named.Name
 		agent := named.AgentConfig
 		label := fmt.Sprintf("agent %q 启动命令", name)
 		if err := validateExecutableCommand(label, agent.Command); err != nil {
-			return err
+			if commandNotFound(err) {
+				if stderr != nil {
+					fmt.Fprintf(stderr, "跳过不可用的 ACP agent %q: %v\n", name, err)
+				}
+				continue
+			}
+			return Config{}, err
 		}
 		if strings.TrimSpace(agent.DefaultCwd) != "" {
 			if err := validateDirectory(fmt.Sprintf("agent %q 默认工作目录", name), agent.DefaultCwd); err != nil {
-				return err
+				return Config{}, err
 			}
 		}
+		filtered = append(filtered, named)
+	}
+	if len(filtered) == 0 {
+		return Config{}, fmt.Errorf("没有可用的 ACP agent")
 	}
 	if len(c.RestartCommand) > 0 {
 		if err := validateExecutableCommand("restart_command 启动命令", c.RestartCommand[0]); err != nil {
-			return err
+			return Config{}, err
 		}
 	}
-	return nil
+	c.AgentList = filtered
+	return c, nil
+}
+
+type commandNotFoundError struct {
+	message string
+	err     error
+}
+
+func (e commandNotFoundError) Error() string {
+	return e.message
+}
+
+func (e commandNotFoundError) Unwrap() error {
+	return e.err
+}
+
+func commandNotFound(err error) bool {
+	var target commandNotFoundError
+	return errors.As(err, &target)
 }
 
 func validateExecutableCommand(label, command string) error {
@@ -358,6 +394,12 @@ func validateExecutableCommand(label, command string) error {
 		}
 		info, err := os.Stat(expanded)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return commandNotFoundError{
+					message: fmt.Sprintf("%s不可访问: %s: %v", label, expanded, err),
+					err:     err,
+				}
+			}
 			return fmt.Errorf("%s不可访问: %s: %w", label, expanded, err)
 		}
 		if info.IsDir() {
@@ -369,7 +411,10 @@ func validateExecutableCommand(label, command string) error {
 		return nil
 	}
 	if _, err := exec.LookPath(command); err != nil {
-		return fmt.Errorf("%s不存在: %s: %w", label, command, err)
+		return commandNotFoundError{
+			message: fmt.Sprintf("%s不存在: %s: %v", label, command, err),
+			err:     err,
+		}
 	}
 	return nil
 }

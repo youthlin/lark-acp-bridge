@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
+
+var errSessionTaskBusy = errors.New("session task busy")
 
 type taskKind string
 
@@ -30,6 +33,7 @@ type runningTask struct {
 
 type runningTaskOptions struct {
 	drainPendingAtAuto bool
+	queuedContinuation bool
 }
 
 type promptTaskRunResult struct {
@@ -38,10 +42,11 @@ type promptTaskRunResult struct {
 }
 
 func (s *Service) startTask(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind) (context.Context, func()) {
-	return s.startTaskWithOptions(ctx, session, agent, kind, runningTaskOptions{})
+	ctx, finish, _ := s.startTaskWithOptions(ctx, session, agent, kind, runningTaskOptions{})
+	return ctx, finish
 }
 
-func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func()) {
+func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func(), error) {
 	session.Key = normalizeSessionKey(session.Key)
 	s.cancelWikiTimer(session.Key)
 	ctx, cancel := context.WithCancel(ctx)
@@ -57,9 +62,14 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 	var previous *runningTask
 	s.taskMu.Lock()
 	previous = s.tasks[session.Key]
+	if previous != nil && opts.queuedContinuation {
+		s.taskMu.Unlock()
+		cancel()
+		return ctx, func() {}, errSessionTaskBusy
+	}
 	s.tasks[session.Key] = task
 	s.taskMu.Unlock()
-	if previous != nil {
+	if previous != nil && !opts.queuedContinuation {
 		reason := replacementCancelReason(previous)
 		previous.cancel()
 		s.markCanceledTask(previous, reason)
@@ -70,17 +80,26 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 	}
 
 	return ctx, func() {
+		shouldDrainQueue := false
 		s.taskMu.Lock()
 		if s.tasks[session.Key] == task {
 			delete(s.tasks, session.Key)
+			shouldDrainQueue = kind == taskKindUser && !opts.queuedContinuation
 		}
 		s.taskMu.Unlock()
 		cancel()
-	}
+		if shouldDrainQueue {
+			s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
+		}
+	}, nil
 }
 
 func runUserTask[T any](s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (T, error)) (T, error) {
-	ctx, finish := s.startTaskWithOptions(ctx, session, agent, taskKindUser, opts)
+	ctx, finish, err := s.startTaskWithOptions(ctx, session, agent, taskKindUser, opts)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
 	defer finish()
 	return run(ctx)
 }

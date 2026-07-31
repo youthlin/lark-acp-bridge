@@ -59,10 +59,12 @@ func run() error {
 		fmt.Fprintln(os.Stderr, msg)
 		return errors.New(msg)
 	}
-	if err := loaded.Config.ValidateAgentCommands(); err != nil {
+	filteredConfig, err := loaded.Config.FilterAvailableAgentCommands(os.Stderr)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "无法识别的acp命令失败, err=%v\n", err)
 		return err
 	}
+	loaded.Config = filteredConfig
 
 	if !isDaemonChild() && mode != modeRun {
 		return runDaemon(mode, loaded.Path)

@@ -565,13 +565,42 @@ func TestValidateAgentCommandsAcceptsPathLookupCommand(t *testing.T) {
 	}
 }
 
-func TestValidateAgentCommandsRejectsMissingCommand(t *testing.T) {
+func TestFilterAvailableAgentCommandsSkipsMissingCommand(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-acp")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", dir)
+	cfg := Config{AgentList: []NamedAgentConfig{
+		{Name: "missing", AgentConfig: AgentConfig{Command: "missing-acp-server"}},
+		{Name: "fake", AgentConfig: AgentConfig{Command: "fake-acp"}},
+	}}
+
+	var stderr strings.Builder
+	filtered, err := cfg.FilterAvailableAgentCommands(&stderr)
+	if err != nil {
+		t.Fatalf("FilterAvailableAgentCommands() error = %v", err)
+	}
+	if got := configAgentListNames(filtered.AgentList); !slices.Equal(got, []string{"fake"}) {
+		t.Fatalf("filtered agents = %#v, want only fake", got)
+	}
+	if !strings.Contains(stderr.String(), `跳过不可用的 ACP agent "missing"`) || !strings.Contains(stderr.String(), `missing-acp-server`) {
+		t.Fatalf("stderr = %q, want skipped missing command", stderr.String())
+	}
+}
+
+func TestFilterAvailableAgentCommandsRejectsWhenAllCommandsMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	cfg := testConfigWithAgent("missing", AgentConfig{Command: "missing-acp-server"})
 
-	err := cfg.ValidateAgentCommands()
-	if err == nil || !strings.Contains(err.Error(), `agent "missing" 启动命令不存在`) {
-		t.Fatalf("ValidateAgentCommands() error = %v, want missing command", err)
+	var stderr strings.Builder
+	_, err := cfg.FilterAvailableAgentCommands(&stderr)
+	if err == nil || !strings.Contains(err.Error(), "没有可用的 ACP agent") {
+		t.Fatalf("FilterAvailableAgentCommands() error = %v, want no available agent", err)
+	}
+	if !strings.Contains(stderr.String(), `跳过不可用的 ACP agent "missing"`) {
+		t.Fatalf("stderr = %q, want skipped missing command", stderr.String())
 	}
 }
 

@@ -240,6 +240,79 @@ func TestParseMessagePostWithTopLevelContentAndImage(t *testing.T) {
 	}
 }
 
+func TestParseMessagePostRichTextElements(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_rich_post"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content: ptr(`{
+  "zh_cn": {
+    "title": "富文本标题",
+    "content": [
+      [
+        {"tag":"text","text":"请看 "},
+        {"tag":"a","text":"文档","href":"https://example.com/doc"},
+        {"tag":"text","text":" 并询问 "},
+        {"tag":"at","user_name":"张三","user_id":"ou_zhangsan"},
+        {"tag":"emotion","emoji_type":"SMILE"}
+      ],
+      [
+        {"tag":"code_block","language":"go","text":"fmt.Println(\"hi\")"}
+      ],
+      [
+        {"tag":"img","image_key":"img_rich_post"}
+      ]
+    ]
+  }
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	wantText := "富文本标题\n请看 [文档](https://example.com/doc) 并询问 @张三[表情: SMILE]\n```go\nfmt.Println(\"hi\")\n```"
+	if msg.Text != wantText {
+		t.Fatalf("Text = %q, want %q", msg.Text, wantText)
+	}
+	if len(msg.Images) != 1 || msg.Images[0].ImageKey != "img_rich_post" {
+		t.Fatalf("Images = %+v, want rich post image", msg.Images)
+	}
+	prompt := msg.PromptText()
+	for _, want := range []string{wantText, "[图片消息]", "image_key: img_rich_post"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PromptText() = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestParseMessagePostPrefersChineseLocale(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_i18n_post"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content:     ptr(`{"en_us":{"title":"English","content":[[{"tag":"text","text":"hello"}]]},"zh_cn":{"title":"中文","content":[[{"tag":"text","text":"你好"}]]}}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.Text != "中文\n你好" {
+		t.Fatalf("Text = %q, want Chinese locale text", msg.Text)
+	}
+}
+
 func TestParseMessageImagesUsesStableStructuralOrder(t *testing.T) {
 	images := parseMessageImages(`{
   "z_extra": {"image_key": "img_extra"},

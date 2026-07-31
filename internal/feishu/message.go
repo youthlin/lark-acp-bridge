@@ -125,6 +125,8 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 			return Message{}, err
 		}
 		msg.Text = text
+	} else if strings.EqualFold(msg.MsgType, "post") {
+		msg.Text = parsePostContent(content)
 	} else {
 		msg.Text = parseMessageTextContent(content)
 	}
@@ -206,6 +208,201 @@ func parseMessageTextContent(content string) string {
 		return extractReadableMessageText(content)
 	}
 	return strings.TrimSpace(text)
+}
+
+func parsePostContent(content string) string {
+	var value any
+	if err := json.Unmarshal([]byte(content), &value); err != nil {
+		return ""
+	}
+	parts := collectPostText(value, nil)
+	if len(parts) == 0 {
+		return extractReadableMessageText(content)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func collectPostText(value any, parts []string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		if localized := collectLocalizedPostText(v, parts); len(localized) > len(parts) {
+			return localized
+		}
+		return collectPostObjectText(v, parts)
+	case []any:
+		for _, item := range v {
+			parts = collectPostBlockText(item, parts)
+		}
+	}
+	return parts
+}
+
+func collectLocalizedPostText(value map[string]any, parts []string) []string {
+	for _, key := range []string{"zh_cn", "en_us"} {
+		child, ok := value[key]
+		if !ok {
+			continue
+		}
+		before := len(parts)
+		parts = collectPostText(child, parts)
+		if len(parts) > before {
+			return parts
+		}
+	}
+	return parts
+}
+
+func collectPostObjectText(value map[string]any, parts []string) []string {
+	if tag := strings.TrimSpace(firstString(value, "tag")); tag != "" {
+		return appendPostText(parts, postElementText(tag, value))
+	}
+	parts = appendPostText(parts, firstString(value, "title"))
+	for _, key := range []string{"content", "content_v2", "elements", "children", "items"} {
+		child, ok := value[key]
+		if !ok {
+			continue
+		}
+		parts = collectPostBlockText(child, parts)
+	}
+	if len(parts) == 0 {
+		parts = collectReadableText(value, parts)
+	}
+	return parts
+}
+
+func collectPostBlockText(value any, parts []string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		return collectPostObjectText(v, parts)
+	case []any:
+		if line, ok := postInlineLine(v); ok {
+			return appendPostText(parts, line)
+		}
+		for _, item := range v {
+			parts = collectPostBlockText(item, parts)
+		}
+	case string:
+		parts = appendPostText(parts, v)
+	}
+	return parts
+}
+
+func postInlineLine(items []any) (string, bool) {
+	var builder strings.Builder
+	foundElement := false
+	for _, item := range items {
+		elem, ok := item.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		tag := strings.TrimSpace(firstString(elem, "tag"))
+		if tag == "" {
+			return "", false
+		}
+		foundElement = true
+		text := postElementText(tag, elem)
+		if text == "" {
+			continue
+		}
+		builder.WriteString(text)
+	}
+	return strings.TrimSpace(builder.String()), foundElement
+}
+
+func postElementText(tag string, elem map[string]any) string {
+	switch strings.ToLower(strings.TrimSpace(tag)) {
+	case "text", "plain_text", "md", "markdown", "lark_md":
+		return firstRawString(elem, "text", "content")
+	case "a", "link":
+		text := firstString(elem, "text", "content", "title")
+		href := firstString(elem, "href", "url")
+		switch {
+		case text != "" && href != "":
+			return "[" + text + "](" + href + ")"
+		case href != "":
+			return href
+		default:
+			return text
+		}
+	case "at", "mention":
+		name := firstString(elem, "user_name", "name", "text")
+		if name == "" {
+			name = firstString(elem, "user_id", "open_id", "id")
+		}
+		if name == "" {
+			return ""
+		}
+		if strings.HasPrefix(name, "@") {
+			return name
+		}
+		return "@" + name
+	case "emotion", "emoji":
+		name := firstString(elem, "emoji_type", "text", "name", "key")
+		if name == "" {
+			return "[表情]"
+		}
+		return "[表情: " + name + "]"
+	case "code_block", "code":
+		text := firstString(elem, "text", "content")
+		if text == "" {
+			return ""
+		}
+		language := firstString(elem, "language")
+		return "```" + language + "\n" + text + "\n```"
+	case "img", "image":
+		return ""
+	case "media", "file":
+		name := firstString(elem, "file_name", "name", "text")
+		if name == "" {
+			return "[文件]"
+		}
+		return "[文件: " + name + "]"
+	case "hr":
+		return "---"
+	case "br":
+		return "\n"
+	default:
+		return firstString(elem, "text", "content", "name", "value", "alt", "title")
+	}
+}
+
+func firstString(value map[string]any, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := value[key]
+		if !ok {
+			continue
+		}
+		if text, ok := raw.(string); ok {
+			if text = strings.TrimSpace(text); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func firstRawString(value map[string]any, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := value[key]
+		if !ok {
+			continue
+		}
+		if text, ok := raw.(string); ok && strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func appendPostText(parts []string, text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return parts
+	}
+	if len(parts) > 0 && parts[len(parts)-1] == text {
+		return parts
+	}
+	return append(parts, text)
 }
 
 func messageTextWithImages(text string, images []MessageImage) string {

@@ -32,6 +32,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀",
 			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
 			"/loop add <补充消息>|status|stop - 补充下一轮 loop prompt、查看或停止当前会话的循环任务",
+			"/queue <prompt> - 暂存提示词，当前任务结束后按顺序执行",
 			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
 			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
 			"/schedule list|status <id>|pause <id>|resume <id>|delete <id> - 管理定时任务",
@@ -45,6 +46,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/model <model> - 设置当前会话模型",
 			"/mode - 打开模式选择卡片",
 			"/mode <mode> - 设置当前会话模式",
+			"/usage [day|week|month|year] - 查看按 agent 和模型聚合的 token 用量",
 			"/show step|plan|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
 			"/at - /at on: 必须at才响应; /at off auto|every: 无需at, auto=由agent自行判断是否响应, every=每次响应",
 			"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志",
@@ -63,6 +65,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleWikiCommand(ctx, text, msg)
 	case "/loop":
 		return s.handleLoopCommand(ctx, text, msg)
+	case "/queue":
+		return s.handleQueueCommand(ctx, text, msg)
 	case "/schedule":
 		return s.handleScheduleCommand(ctx, text, msg)
 	case "/cmds":
@@ -73,6 +77,8 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 		return s.handleModelCommand(ctx, text, msg)
 	case "/mode":
 		return s.handleModeCommand(ctx, text, msg)
+	case "/usage":
+		return s.handleUsageCommand(text, msg)
 	case "/show":
 		return s.handleShowCommand(ctx, msg, text)
 	case "/at":

@@ -75,8 +75,11 @@ type fakeMessageClient struct {
 	messages      map[string]*Message
 	calls         []string
 	downloadCalls []fakeImageDownloadCall
+	uploadCalls   []string
+	imageKey      string
 	err           error
 	downloadErr   error
+	uploadErr     error
 }
 
 type fakeImageDownloadCall struct {
@@ -99,6 +102,17 @@ func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string,
 		return "", f.downloadErr
 	}
 	return filepath.Join(workspace, "cache", imageKey+".png"), nil
+}
+
+func (f *fakeMessageClient) UploadImage(ctx context.Context, path string) (string, error) {
+	f.uploadCalls = append(f.uploadCalls, path)
+	if f.uploadErr != nil {
+		return "", f.uploadErr
+	}
+	if f.imageKey != "" {
+		return f.imageKey, nil
+	}
+	return "img_uploaded", nil
 }
 
 type fakeChatInfoClient struct {
@@ -764,6 +778,96 @@ func TestLarkMessageClientHydratesMessageImageLocalPath(t *testing.T) {
 	wantPath := filepath.Join(workspace, "cache", "img_v3_reply.png")
 	if got.LocalPath != wantPath || !strings.Contains(got.PromptText(), "local_path: "+wantPath) {
 		t.Fatalf("message = %+v prompt=%q, want hydrated local path %q", got, got.PromptText(), wantPath)
+	}
+}
+
+func TestSplitReplyImagesExtractsMarkdownAndLocalPathLines(t *testing.T) {
+	text := strings.Join([]string{
+		"处理完成。",
+		"![截图](/tmp/result.png)",
+		"local_path: /tmp/trace.webp",
+		"```",
+		"local_path: /tmp/ignored.png",
+		"```",
+		"结论保留。",
+	}, "\n")
+
+	plain, images := splitReplyImages(text)
+	if !strings.Contains(plain, "处理完成。") || !strings.Contains(plain, "结论保留。") {
+		t.Fatalf("plain = %q, want remaining text", plain)
+	}
+	if strings.Contains(plain, "/tmp/result.png") || strings.Contains(plain, "/tmp/trace.webp") {
+		t.Fatalf("plain = %q, should remove image references", plain)
+	}
+	if !strings.Contains(plain, "local_path: /tmp/ignored.png") {
+		t.Fatalf("plain = %q, should keep code fence content", plain)
+	}
+	want := []replyImage{
+		{Alt: "截图", LocalPath: "/tmp/result.png"},
+		{LocalPath: "/tmp/trace.webp"},
+	}
+	if !reflect.DeepEqual(images, want) {
+		t.Fatalf("images = %+v, want %+v", images, want)
+	}
+}
+
+func TestSplitReplyImagesIgnoresRemoteMarkdownImages(t *testing.T) {
+	text := "![remote](https://example.com/a.png)\n![local](/tmp/a.png)"
+
+	plain, images := splitReplyImages(text)
+	if !strings.Contains(plain, "https://example.com/a.png") {
+		t.Fatalf("plain = %q, want remote image left as text", plain)
+	}
+	if len(images) != 1 || images[0].LocalPath != "/tmp/a.png" {
+		t.Fatalf("images = %+v, want only local image", images)
+	}
+}
+
+func TestSplitReplyImagesKeepsMarkdownImagesInsideCodeFence(t *testing.T) {
+	text := strings.Join([]string{
+		"```markdown",
+		"![example](/tmp/should-stay.png)",
+		"```",
+		"![local](/tmp/should-upload.png)",
+	}, "\n")
+
+	plain, images := splitReplyImages(text)
+	if !strings.Contains(plain, "![example](/tmp/should-stay.png)") {
+		t.Fatalf("plain = %q, want fenced markdown image preserved", plain)
+	}
+	if strings.Contains(plain, "/tmp/should-upload.png") {
+		t.Fatalf("plain = %q, want unfenced markdown image removed", plain)
+	}
+	if len(images) != 1 || images[0].LocalPath != "/tmp/should-upload.png" {
+		t.Fatalf("images = %+v, want only unfenced local image", images)
+	}
+}
+
+func TestNormalizeReplyImagePathValidatesLocalImage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "result.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got, err := normalizeReplyImagePath(path)
+	if err != nil {
+		t.Fatalf("normalizeReplyImagePath() error = %v", err)
+	}
+	if got != path {
+		t.Fatalf("normalizeReplyImagePath() = %q, want %q", got, path)
+	}
+}
+
+func TestNormalizeReplyImagePathRejectsUnsupportedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "result.txt")
+	if err := os.WriteFile(path, []byte("text"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := normalizeReplyImagePath(path); err == nil || !strings.Contains(err.Error(), "不支持的图片类型") {
+		t.Fatalf("normalizeReplyImagePath() error = %v, want unsupported image type", err)
 	}
 }
 

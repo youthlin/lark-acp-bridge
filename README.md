@@ -27,10 +27,10 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 
 1. 接收飞书文本消息。
 2. 按飞书会话创建或恢复桥接 session。
-3. 通过 stdio 启动 `traex acp serve`。
+3. 通过 stdio 启动 `traex acp serve` 或其他 ACP server。
 4. 执行 ACP `initialize`、`session/new` 和 `session/prompt`。
 5. 将 ACP agent 文本、工具调用状态和最终回复转发到飞书。
-6. 向本机 TraeX 子进程提供 session `cwd` 和 bot workspace 上下文，由 TraeX 使用自身本地工具维护长期记忆、知识和技能文件；bridge 默认不声明 ACP client-side `fs` / `terminal` 能力。
+6. 向本机 ACP agent 子进程提供 session `cwd` 和 bot workspace 上下文，由 agent 使用自身本地工具维护长期记忆、知识和技能文件；bridge 默认不声明 ACP client-side `fs` / `terminal` 能力。
 7. 后续再补更完整的工具调用展示和远程/虚拟 workspace 场景。
 
 ## 配置
@@ -118,7 +118,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 
 首次生成 workspace 时，bridge 会额外创建 `Bootstrap.md`，其中写明一次性初始化引导提示词。每条普通 prompt 都会拼接当前 workspace 的引导、长期记忆、知识入口和技能入口；只要 `Bootstrap.md` 还存在，它就会作为普通 workspace 文件被注入给 ACP agent，让 agent 先向用户提问并完成初始化。
 
-用户回答后，由 ACP agent 使用 TraeX 可用的本地文件工具写入 L0/L1/L2 相关文件，然后删除 `Bootstrap.md`。`Bootstrap.md` 不存在后，后续 prompt 自然只会注入根目录记忆、`knowledge/` 入口、wiki skill 和记忆策略。若已经手动写好了文件，也可以在本地直接删除 `Bootstrap.md`。
+用户回答后，由 ACP agent 使用自身可用的本地文件工具写入 L0/L1/L2 相关文件，然后删除 `Bootstrap.md`。`Bootstrap.md` 不存在后，后续 prompt 自然只会注入根目录记忆、`knowledge/` 入口、wiki skill 和记忆策略。若已经手动写好了文件，也可以在本地直接删除 `Bootstrap.md`。
 
 每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。
 
@@ -152,7 +152,7 @@ $BOT_WORKSPACE/restart_ack.json
 }
 ```
 
-`agent_list` 是有序数组；全新 chat 没有保存 `/agent` 配置和历史 session 时，默认使用列表第一个 agent。启动服务前会校验每个 `agent_list[].command` 是否可执行：普通命令通过 `PATH` 查找，带 `/` 或 `\` 的路径命令会检查文件存在且有执行权限。命令配置错误时会直接退出，避免到用户发送 `/new` 时才发现 ACP server 启动失败。
+默认配置内置 `traex` agent。`agent_list` 是有序数组；全新 chat 没有保存 `/agent` 配置和历史 session 时，默认使用列表第一个可用 agent。可以在飞书侧用 `/agent <name>` 切换当前聊天默认 agent。启动服务前会校验每个 `agent_list[].command` 是否可执行：普通命令通过 `PATH` 查找，带 `/` 或 `\` 的路径命令会检查文件存在且有执行权限。命令不存在时会打印 stderr 并跳过该 agent；其他配置错误仍会直接退出，避免到用户发送 `/new` 时才发现 ACP server 配置不可用。
 
 ## 开发
 
@@ -210,6 +210,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；普通群和私聊恢复到当前 chat，话题群恢复到当前话题。
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
+- `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。
 - `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
@@ -220,6 +221,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/model <model>`：通过 ACP `session/set_config_option` 设置当前会话模型。
 - `/mode`：打开飞书模式选择卡片，通过下拉列表设置当前会话模式。
 - `/mode <mode>`：通过 ACP `session/set_config_option` 设置当前会话模式。
+- `/usage [day|week|month|year]`：查看当前 bot workspace 内的 token 用量报告，按 agent 和模型维度聚合；不指定周期时默认查看今日。统计数据保存到 workspace 下的 `token_usage.json`，覆盖普通 IM、定时任务和文档评论等 prompt 入口。
 - `/show step|plan|thought|tool|status|used on|off`：设置当前聊天流式卡片展示项。默认展示 `step`、`plan`、`tool`、`status` 和 `used`，`thought` 默认关闭，需显式开启；`step` 控制 `💬` 过程消息，`plan` 控制 `📌` 计划消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出，`status` 控制底部状态栏，`used` 控制用量明细。`step`、`plan`、`thought`、`tool` 都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
 - `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
 - `/restart`：仅 bot owner 可用。旧进程会先回复“准备重启”并写入 `$BOT_WORKSPACE/restart_ack.json`，然后执行 `restart_command`；内置后台 daemon 子进程也可在未配置 `restart_command` 时使用内置后台 restart。新进程启动后会向原消息回复“已重启”并删除回执文件。
