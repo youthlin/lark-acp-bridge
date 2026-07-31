@@ -792,8 +792,8 @@ func TestRunScheduledTaskOnceSendsResultToIMSink(t *testing.T) {
 	if len(sent) != 1 || sent[0] != "schedule done" {
 		t.Fatalf("sent = %+v, want schedule result", sent)
 	}
-	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "omt_thread" || sentMsgs[0].MessageID != "om_source" || !sentMsgs[0].ForceReplyInThread {
-		t.Fatalf("sent messages = %+v, want configured IM sink target", sentMsgs)
+	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "" || sentMsgs[0].MessageID != "" || sentMsgs[0].ForceReplyInThread {
+		t.Fatalf("sent messages = %+v, want new root result message target", sentMsgs)
 	}
 }
 
@@ -840,11 +840,133 @@ func TestRunScheduledTaskOnceSendsResultToServiceIMSender(t *testing.T) {
 	if len(sent) != 1 || sent[0] != "schedule done" {
 		t.Fatalf("sent = %+v, want schedule result through service sender", sent)
 	}
-	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "omt_thread" || sentMsgs[0].MessageID != "om_source" || !sentMsgs[0].ForceReplyInThread {
-		t.Fatalf("sent messages = %+v, want configured IM sink target", sentMsgs)
+	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "" || sentMsgs[0].MessageID != "" || sentMsgs[0].ForceReplyInThread {
+		t.Fatalf("sent messages = %+v, want new root result message target", sentMsgs)
 	}
 	if len(sentRender) != 1 || sentRender[0].BaseDir != task.Cwd {
 		t.Fatalf("sent render contexts = %+v, want task cwd", sentRender)
+	}
+}
+
+func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-run-1"},
+		promptReply:    "schedule done",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-run-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "schedule"},
+				},
+			},
+			{
+				SessionID: "acp-run-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: " done"},
+				},
+			},
+		},
+	}
+	svc.setRuntime(rt)
+	task := ScheduledTask{
+		ID:        "daily",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "0 9 * * *",
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "generate report",
+		ResultSink: ScheduledTaskResultSink{
+			Type:      "im",
+			ChatID:    "oc_chat",
+			ThreadID:  "omt_thread",
+			MessageID: "om_source",
+		},
+	}
+	var streamTargets []feishu.Message
+	var streamMetas []feishu.StreamCardMeta
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		streamTargets = append(streamTargets, msg)
+		streamMetas = append(streamMetas, feishu.StreamCardMetaFromContext(ctx))
+		return &fakeStreamCard{message: feishu.SentMessage{
+			MessageID: "om_schedule_result",
+			ChatID:    msg.ChatID,
+			ChatType:  msg.ChatType,
+			ThreadID:  msg.ThreadID,
+			RootID:    "om_schedule_result",
+		}}, nil
+	}
+	chatSession := Session{
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
+		AgentName:    "traex",
+		ACPSessionID: "acp-chat",
+		Cwd:          task.Cwd,
+	}
+	if err := store.Upsert(chatSession); err != nil {
+		t.Fatalf("Upsert(chatSession) error = %v", err)
+	}
+
+	runResult, err := svc.runScheduledTaskOnce(context.Background(), task, "run-1", time.Now(), t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("runScheduledTaskOnce() error = %v", err)
+	}
+	if len(streamTargets) != 1 {
+		t.Fatalf("streamTargets = %+v, want one stream card", streamTargets)
+	}
+	if streamTargets[0].ChatID != "oc_chat" || streamTargets[0].ThreadID != "" || streamTargets[0].MessageID != "" || streamTargets[0].ForceReplyInThread {
+		t.Fatalf("stream target = %+v, want new root result card target", streamTargets[0])
+	}
+	if len(streamMetas) != 1 || streamMetas[0].Title != "定时任务执行结果" || streamMetas[0].Subtitle != "task-id: daily" || streamMetas[0].Footer != "本消息的回复链将在本次执行会话中处理。" {
+		t.Fatalf("stream metas = %+v, want schedule result card metadata", streamMetas)
+	}
+	runSession := runResult.TriggerResult.Session
+	if runSession.Key.Source != sessionSourceSchedule || runSession.Key.MainID != "task:daily" || runSession.Key.SubID != "run:run-1" {
+		t.Fatalf("run session key = %+v, want schedule run key", runSession.Key)
+	}
+	boundSession, binding, ok := store.SessionForMessage("bot-a", "oc_chat", "om_schedule_result")
+	if !ok {
+		t.Fatalf("SessionForMessage() ok=false binding=%+v", binding)
+	}
+	if boundSession.ACPSessionID != "acp-run-1" || boundSession.Key != runSession.Key {
+		t.Fatalf("bound session = %+v, want run session %+v", boundSession, runSession)
+	}
+	replySession, ok := svc.findSession(feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		MessageID: "om_reply",
+		RootID:    "om_schedule_result",
+		ParentID:  "om_schedule_result",
+	})
+	if !ok {
+		t.Fatal("findSession(root reply) ok=false")
+	}
+	if replySession.Key != runSession.Key || replySession.ACPSessionID != "acp-run-1" {
+		t.Fatalf("reply session = %+v, want schedule run session %+v", replySession, runSession)
+	}
+
+	refreshedRunSession := runSession
+	refreshedRunSession.ACPSessionID = "acp-run-2"
+	if err := store.Upsert(refreshedRunSession); err != nil {
+		t.Fatalf("Upsert(refreshedRunSession) error = %v", err)
+	}
+	replySession, ok = svc.findSession(feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		MessageID: "om_reply_after_refresh",
+		RootID:    "om_schedule_result",
+		ParentID:  "om_schedule_result",
+	})
+	if !ok {
+		t.Fatal("findSession(root reply after ACP refresh) ok=false")
+	}
+	if replySession.Key != runSession.Key || replySession.ACPSessionID != "acp-run-2" {
+		t.Fatalf("reply session after ACP refresh = %+v, want refreshed schedule run session %+v", replySession, refreshedRunSession)
 	}
 }
 

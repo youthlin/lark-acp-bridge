@@ -20,6 +20,7 @@ const (
 	streamCardUsageDetailID    = "md_usage_detail"
 	streamCardStatusElementID  = "md_status"
 	streamCardTextElementID    = "md_stream"
+	streamCardFooterElementID  = "md_footer"
 )
 
 const (
@@ -40,14 +41,14 @@ func newStreamCardJSONWithProcessPanel(includeProcessPanel bool) string {
 }
 
 func newStreamCardJSONWithPanels(includeProcessPanel, includeStatusBar bool) string {
-	return newStreamCardJSONFromState("", "", streamCardInitialStatus, "", includeProcessPanel, includeStatusBar, false, true)
+	return newStreamCardJSONFromState("", "", streamCardInitialStatus, "", includeProcessPanel, includeStatusBar, false, true, StreamCardMeta{})
 }
 
-func newStreamCardJSONFromState(text, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
-	return newStreamCardJSONFromBlocks([]outboundBlock{{Kind: outboundBlockMarkdown, Text: text}}, process, status, usage, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode)
+func newStreamCardJSONFromState(text, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool, meta StreamCardMeta) string {
+	return newStreamCardJSONFromBlocks([]outboundBlock{{Kind: outboundBlockMarkdown, Text: text}}, process, status, usage, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode, meta)
 }
 
-func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool) string {
+func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool, meta StreamCardMeta) string {
 	elements := outboundBlocksStreamCardElements(blocks)
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanelWithContent(process))
@@ -60,6 +61,10 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 	}
 	if includeUsagePanel {
 		elements = append(elements, streamCardUsagePanel(usage))
+	}
+	meta = normalizeStreamCardMeta(meta)
+	if meta.Footer != "" {
+		elements = append(elements, streamCardFooter(meta.Footer))
 	}
 	config := cardJSON{
 		"streaming_mode":   streamingMode,
@@ -74,13 +79,17 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 			"print_strategy":     "fast",
 		}
 	}
-	data, _ := json.Marshal(cardJSON{
+	card := cardJSON{
 		"schema": "2.0",
 		"config": config,
 		"body": cardJSON{
 			"elements": elements,
 		},
-	})
+	}
+	if header := streamCardHeader(meta); header != nil {
+		card["header"] = header
+	}
+	data, _ := json.Marshal(card)
 	return string(data)
 }
 
@@ -133,6 +142,19 @@ func streamCardStatusMarkdown(status string) cardJSON {
 	}
 }
 
+func streamCardFooter(content string) cardJSON {
+	return cardJSON{
+		"tag":              "markdown",
+		"content":          content,
+		"element_id":       streamCardFooterElementID,
+		"text_size":        "notation",
+		"text_align":       "left",
+		"text_color":       "grey",
+		"margin":           "8px 0 0 0",
+		"vertical_spacing": "4px",
+	}
+}
+
 func streamCardUsagePanel(content string) cardJSON {
 	return cardJSON{
 		"tag":              "collapsible_panel",
@@ -151,9 +173,35 @@ func streamCardUsagePanel(content string) cardJSON {
 	}
 }
 
+func normalizeStreamCardMeta(meta StreamCardMeta) StreamCardMeta {
+	meta.Title = strings.TrimSpace(meta.Title)
+	meta.Subtitle = strings.TrimSpace(meta.Subtitle)
+	meta.Footer = strings.TrimSpace(meta.Footer)
+	return meta
+}
+
+func streamCardHeader(meta StreamCardMeta) cardJSON {
+	meta = normalizeStreamCardMeta(meta)
+	if meta.Title == "" && meta.Subtitle == "" {
+		return nil
+	}
+	header := cardJSON{
+		"template": "blue",
+		"icon":     cardJSON{"tag": "standard_icon", "token": "time_colorful"},
+	}
+	if meta.Title != "" {
+		header["title"] = cardJSON{"tag": "plain_text", "content": meta.Title}
+	}
+	if meta.Subtitle != "" {
+		header["subtitle"] = cardJSON{"tag": "plain_text", "content": meta.Subtitle}
+	}
+	return header
+}
+
 type sdkStreamCard struct {
 	adapter *Adapter
 	cardID  string
+	message SentMessage
 	created time.Time
 
 	mu               sync.Mutex
@@ -170,6 +218,7 @@ type sdkStreamCard struct {
 	process          string
 	status           string
 	usageDetail      string
+	meta             StreamCardMeta
 }
 
 func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard, error) {
@@ -178,11 +227,13 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	}
 	processPanelEnabled := StreamCardProcessPanelEnabled(ctx)
 	statusBarEnabled := StreamCardStatusBarEnabled(ctx)
-	cardID, err := a.createCardJSON(ctx, newStreamCardJSONWithPanels(processPanelEnabled, statusBarEnabled), "流式")
+	meta := normalizeStreamCardMeta(StreamCardMetaFromContext(ctx))
+	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromState("", "", streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta), "流式")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := a.sendInteractiveCard(ctx, msg, cardID, "流式"); err != nil {
+	sent, err := a.sendInteractiveCard(ctx, msg, cardID, "流式")
+	if err != nil {
 		return nil, err
 	}
 	initialStatus := ""
@@ -192,12 +243,21 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	return &sdkStreamCard{
 		adapter:        a,
 		cardID:         cardID,
+		message:        sent,
 		created:        streamCardNow(),
+		meta:           meta,
 		processCreated: processPanelEnabled,
 		statusCreated:  statusBarEnabled,
 		status:         initialStatus,
 		usageTargetID:  streamCardUsageTargetID(processPanelEnabled, statusBarEnabled),
 	}, nil
+}
+
+func (c *sdkStreamCard) Message() SentMessage {
+	if c == nil {
+		return SentMessage{}
+	}
+	return c.message
 }
 
 func streamCardUsageTargetID(processPanelEnabled, statusBarEnabled bool) string {
@@ -385,7 +445,7 @@ func (c *sdkStreamCard) fullCardJSONLocked() string {
 	if len(blocks) == 0 {
 		blocks = []outboundBlock{{Kind: outboundBlockMarkdown, Text: c.text}}
 	}
-	return newStreamCardJSONFromBlocks(blocks, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false)
+	return newStreamCardJSONFromBlocks(blocks, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false, c.meta)
 }
 
 func (c *sdkStreamCard) nextSequenceLocked() int {

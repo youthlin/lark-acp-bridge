@@ -22,6 +22,12 @@ type OutboundRenderContext struct {
 	BaseDir string
 }
 
+type StreamCardMeta struct {
+	Title    string
+	Subtitle string
+	Footer   string
+}
+
 // LoopStatusCard 表示 /loop 启动后用于展示整体状态的卡片。
 type LoopStatusCard interface {
 	Message() SentMessage
@@ -51,6 +57,7 @@ type loopStatusCardSenderKey struct{}
 
 // StreamCard 表示一张可流式更新的飞书卡片。
 type StreamCard interface {
+	Message() SentMessage
 	UpdateProcess(context.Context, string) error
 	UpdateStatus(context.Context, string) error
 	UpdateUsageDetail(context.Context, string) error
@@ -66,6 +73,8 @@ type streamCardStarterKey struct{}
 type streamCardProcessPanelKey struct{}
 
 type streamCardStatusBarKey struct{}
+
+type streamCardMetaKey struct{}
 
 type permissionRequester func(context.Context, Message, acp.PermissionRequest) (acp.PermissionOutcome, error)
 
@@ -252,6 +261,15 @@ func StreamCardStatusBarEnabled(ctx context.Context) bool {
 		return true
 	}
 	return enabled
+}
+
+func WithStreamCardMeta(ctx context.Context, meta StreamCardMeta) context.Context {
+	return context.WithValue(ctx, streamCardMetaKey{}, meta)
+}
+
+func StreamCardMetaFromContext(ctx context.Context) StreamCardMeta {
+	meta, _ := ctx.Value(streamCardMetaKey{}).(StreamCardMeta)
+	return meta
 }
 
 func StartStreamCard(ctx context.Context, msg Message) (StreamCard, bool, error) {

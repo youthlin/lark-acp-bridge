@@ -98,6 +98,15 @@ type ChatConfig struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type MessageSessionBinding struct {
+	BotID      string     `json:"bot_id"`
+	ChatID     string     `json:"chat_id"`
+	MessageID  string     `json:"message_id"`
+	SessionKey SessionKey `json:"session_key"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
 type Session struct {
 	Key               SessionKey                `json:"key"`
 	Title             string                    `json:"title,omitempty"`

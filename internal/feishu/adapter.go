@@ -584,7 +584,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, msg Message, text string)
 	if strings.TrimSpace(msg.MessageID) != "" {
 		return a.ReplyTextMessage(ctx, msg, text)
 	}
-	if msg.IsPrivateChat() {
+	if strings.TrimSpace(msg.ChatID) != "" {
 		return a.SendChatTextMessage(ctx, msg.ChatID, msg.ChatType, text)
 	}
 	return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
@@ -629,7 +629,7 @@ func (a *Adapter) SendPostMessage(ctx context.Context, msg Message, blocks []out
 	if strings.TrimSpace(msg.MessageID) != "" {
 		return a.ReplyPostMessage(ctx, msg, blocks)
 	}
-	if msg.IsPrivateChat() {
+	if strings.TrimSpace(msg.ChatID) != "" {
 		return a.SendChatPostMessage(ctx, msg.ChatID, msg.ChatType, blocks)
 	}
 	return SentMessage{}, fmt.Errorf("飞书 message_id 为空")
@@ -732,7 +732,7 @@ func (a *Adapter) SendImageMessage(ctx context.Context, msg Message, path string
 	if strings.TrimSpace(msg.MessageID) != "" {
 		return a.ReplyImageMessage(ctx, msg, path)
 	}
-	if msg.IsPrivateChat() {
+	if strings.TrimSpace(msg.ChatID) != "" {
 		return a.SendChatImageMessage(ctx, msg.ChatID, msg.ChatType, path)
 	}
 	return SentMessage{}, fmt.Errorf("飞书 message_id 为空")

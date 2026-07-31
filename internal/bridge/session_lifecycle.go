@@ -418,12 +418,42 @@ func (s *Service) findSession(msg feishu.Message) (Session, bool) {
 	if store == nil {
 		return Session{}, false
 	}
+	for _, messageID := range messageSessionBindingLookupIDs(msg) {
+		if session, _, ok := store.SessionForMessage(msg.BotID, msg.ChatID, messageID); ok {
+			return session, true
+		}
+	}
 	for _, key := range sessionKeysFromMessage(msg) {
 		if session, ok := store.Get(key); ok {
 			return session, true
 		}
 	}
 	return Session{}, false
+}
+
+func messageSessionBindingLookupIDs(msg feishu.Message) []string {
+	candidates := []string{
+		msg.RootID,
+		msg.ParentID,
+	}
+	if msg.Reply != nil {
+		candidates = append(candidates, msg.Reply.MessageID)
+	}
+	candidates = append(candidates, msg.MessageID)
+	out := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, id := range candidates {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func sessionKeysFromMessage(msg feishu.Message) []SessionKey {

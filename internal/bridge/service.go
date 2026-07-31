@@ -14,17 +14,19 @@ import (
 
 // Service 本项目核心服务
 type Service struct {
-	cfg             config.Config            // 配置文件
-	configPath      string                   // 配置文件路径，用于内置后台重启
-	registry        *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
-	runtime         acpRuntime               // acp client 运行时
-	feishu          []*feishu.Adapter        // Bots 实例
-	stores          map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
-	scheduleStores  map[string]*ScheduledTaskStore
-	scheduleSenders map[string]scheduledTaskIMSender
-	usageStores     map[string]*TokenUsageStore
-	restartCommand  func(context.Context) error
-	builtinRestart  bool // 是否允许使用内置后台 restart
+	cfg                    config.Config            // 配置文件
+	configPath             string                   // 配置文件路径，用于内置后台重启
+	registry               *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
+	runtime                acpRuntime               // acp client 运行时
+	feishu                 []*feishu.Adapter        // Bots 实例
+	stores                 map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
+	scheduleStores         map[string]*ScheduledTaskStore
+	scheduleSenders        map[string]scheduledTaskIMSender
+	scheduleMessageSenders map[string]scheduledTaskMessageSender
+	scheduleStreams        map[string]scheduledTaskStreamStarter
+	usageStores            map[string]*TokenUsageStore
+	restartCommand         func(context.Context) error
+	builtinRestart         bool // 是否允许使用内置后台 restart
 
 	taskMu          sync.Mutex
 	tasks           map[SessionKey]*runningTask
@@ -49,31 +51,35 @@ type Service struct {
 //	@param store 会话储存, 实际使用传nil即可, 单元测试可传 [NewSessionStore] 实例进来避免污染真实会话
 func NewService(cfg config.Config, store *SessionStore) *Service {
 	s := &Service{
-		cfg:             cfg,
-		registry:        acp.NewRegistry(cfg),
-		stores:          make(map[string]*SessionStore),
-		scheduleStores:  make(map[string]*ScheduledTaskStore),
-		scheduleSenders: make(map[string]scheduledTaskIMSender),
-		usageStores:     make(map[string]*TokenUsageStore),
-		runtime:         newRuntimeManager(),
-		tasks:           make(map[SessionKey]*runningTask),
-		wikiTasks:       make(map[runtimeKey]*runningTask),
-		wikiTimers:      make(map[SessionKey]*pendingWikiRun),
-		wikiGenerations: make(map[SessionKey]int64),
-		wikiStatuses:    make(map[SessionKey]wikiRunStatus),
-		loopStatuses:    make(map[SessionKey]loopRunStatus),
-		scheduleRuns:    make(map[string]scheduleRunStatus),
-		scheduleJobs:    make(map[string]*scheduledTaskJob),
-		pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
-		pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
-		promptQueues:    make(map[SessionKey]*promptQueue),
-		acpUpdateUnsub:  make(map[SessionKey]func()),
+		cfg:                    cfg,
+		registry:               acp.NewRegistry(cfg),
+		stores:                 make(map[string]*SessionStore),
+		scheduleStores:         make(map[string]*ScheduledTaskStore),
+		scheduleSenders:        make(map[string]scheduledTaskIMSender),
+		scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
+		scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
+		usageStores:            make(map[string]*TokenUsageStore),
+		runtime:                newRuntimeManager(),
+		tasks:                  make(map[SessionKey]*runningTask),
+		wikiTasks:              make(map[runtimeKey]*runningTask),
+		wikiTimers:             make(map[SessionKey]*pendingWikiRun),
+		wikiGenerations:        make(map[SessionKey]int64),
+		wikiStatuses:           make(map[SessionKey]wikiRunStatus),
+		loopStatuses:           make(map[SessionKey]loopRunStatus),
+		scheduleRuns:           make(map[string]scheduleRunStatus),
+		scheduleJobs:           make(map[string]*scheduledTaskJob),
+		pendingAtTexts:         make(map[ChatKey][]pendingAtMessage),
+		pendingAtAuto:          make(map[SessionKey][]pendingAtMessage),
+		promptQueues:           make(map[SessionKey]*promptQueue),
+		acpUpdateUnsub:         make(map[SessionKey]func()),
 	}
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
 		adapter := feishu.NewAdapter(bot, s)
 		s.feishu = append(s.feishu, adapter)
 		s.scheduleSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextWithRenderContext
+		s.scheduleMessageSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextMessage
+		s.scheduleStreams[strings.TrimSpace(bot.ID)] = adapter.StartStreamCard
 		if store != nil {
 			s.stores[bot.ID] = store
 		} else if strings.TrimSpace(bot.Workspace) != "" {

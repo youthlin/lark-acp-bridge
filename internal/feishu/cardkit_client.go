@@ -75,7 +75,7 @@ func (a *Adapter) sendInteractiveCard(ctx context.Context, msg Message, cardID s
 	if err != nil {
 		return SentMessage{}, fmt.Errorf("编码飞书%s卡片消息内容: %w", displayName, err)
 	}
-	if msg.IsPrivateChat() && strings.TrimSpace(msg.MessageID) == "" {
+	if strings.TrimSpace(msg.MessageID) == "" {
 		if msg.ChatID == "" {
 			return SentMessage{}, fmt.Errorf("发送飞书%s卡片消息: 飞书 chat_id 为空", displayName)
 		}

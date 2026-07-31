@@ -8540,6 +8540,7 @@ func (f *fakeRuntime) cancelCallCount() int {
 
 type fakeStreamCard struct {
 	mu                    sync.Mutex
+	message               feishu.SentMessage
 	textUpdates           []string
 	finalTextUpdates      []string
 	finalRenderContexts   []feishu.OutboundRenderContext
@@ -8548,6 +8549,13 @@ type fakeStreamCard struct {
 	usageDetails          []string
 	closed                bool
 	failOnCanceledContext bool
+}
+
+func (f *fakeStreamCard) Message() feishu.SentMessage {
+	if f == nil {
+		return feishu.SentMessage{}
+	}
+	return f.message
 }
 
 func (f *fakeStreamCard) UpdateText(ctx context.Context, text string) error {

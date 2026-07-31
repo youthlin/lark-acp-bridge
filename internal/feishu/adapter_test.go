@@ -880,7 +880,7 @@ func TestOutboundBlocksRenderPostAndCardImages(t *testing.T) {
 	}
 
 	var card any
-	data := newStreamCardJSONFromBlocks(blocks, "", "done", "", false, true, false, false)
+	data := newStreamCardJSONFromBlocks(blocks, "", "done", "", false, true, false, false, StreamCardMeta{})
 	if err := json.Unmarshal([]byte(data), &card); err != nil {
 		t.Fatalf("newStreamCardJSONFromBlocks() invalid JSON: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestOutboundBlocksStreamCardPreservesTextImageOrder(t *testing.T) {
 	}
 
 	var card map[string]any
-	data := newStreamCardJSONFromBlocks(blocks, "", "", "", false, false, false, false)
+	data := newStreamCardJSONFromBlocks(blocks, "", "", "", false, false, false, false, StreamCardMeta{})
 	if err := json.Unmarshal([]byte(data), &card); err != nil {
 		t.Fatalf("newStreamCardJSONFromBlocks() invalid JSON: %v", err)
 	}

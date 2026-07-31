@@ -123,10 +123,8 @@ func (s *Service) handleScheduleAddCommand(ctx context.Context, text string, msg
 		CreatedFromThreadID:  msg.ThreadID,
 		CreatedFromMessageID: msg.MessageID,
 		ResultSink: ScheduledTaskResultSink{
-			Type:      "im",
-			ChatID:    msg.ChatID,
-			ThreadID:  msg.ThreadID,
-			MessageID: msg.MessageID,
+			Type:   "im",
+			ChatID: msg.ChatID,
 		},
 		OverlapPolicy: scheduleOverlapSkipIfRunning,
 	})

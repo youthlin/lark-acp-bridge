@@ -102,6 +102,24 @@ func TestNewStreamCardJSONCanOmitStatusBar(t *testing.T) {
 	}
 }
 
+func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
+	var card any
+	data := newStreamCardJSONFromState("", "", streamCardInitialStatus, "", true, true, false, true, StreamCardMeta{
+		Title:    "定时任务执行结果",
+		Subtitle: "task-id: daily",
+		Footer:   "本消息的回复链将在本次执行会话中处理。",
+	})
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"定时任务执行结果", "task-id: daily", "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("stream card meta JSON does not contain %q: %#v", want, card)
+		}
+	}
+}
+
 func TestNewStreamCardUsagePanelJSONContainsUsageDetail(t *testing.T) {
 	var elements any
 	if err := json.Unmarshal([]byte(newStreamCardUsagePanelJSON("```json\n{}\n```")), &elements); err != nil {
@@ -188,6 +206,7 @@ func TestNewStreamCardJSONFromStateRendersNormalFinalSnapshot(t *testing.T) {
 		true,
 		true,
 		false,
+		StreamCardMeta{},
 	)), &card); err != nil {
 		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
 	}

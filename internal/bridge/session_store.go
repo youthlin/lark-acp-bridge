@@ -22,12 +22,14 @@ type SessionStore struct {
 	sessions map[SessionKey]Session
 	history  []Session
 	chats    map[ChatKey]ChatConfig
+	messages map[messageBindingKey]MessageSessionBinding
 }
 
 type sessionStoreSnapshot struct {
 	sessions map[SessionKey]Session
 	history  []Session
 	chats    map[ChatKey]ChatConfig
+	messages map[messageBindingKey]MessageSessionBinding
 }
 
 // NewSessionStore 创建会话存储
@@ -36,6 +38,7 @@ func NewSessionStore(path string) *SessionStore {
 		path:     path,
 		sessions: make(map[SessionKey]Session),
 		chats:    make(map[ChatKey]ChatConfig),
+		messages: make(map[messageBindingKey]MessageSessionBinding),
 	}
 }
 
@@ -49,6 +52,7 @@ func (s *SessionStore) Load() error {
 		if errors.Is(err, os.ErrNotExist) {
 			s.sessions = make(map[SessionKey]Session)
 			s.chats = make(map[ChatKey]ChatConfig)
+			s.messages = make(map[messageBindingKey]MessageSessionBinding)
 			s.history = nil
 			return nil
 		}
@@ -60,6 +64,7 @@ func (s *SessionStore) Load() error {
 	}
 	s.sessions = make(map[SessionKey]Session, len(file.Sessions))
 	s.chats = make(map[ChatKey]ChatConfig, len(file.Chats))
+	s.messages = make(map[messageBindingKey]MessageSessionBinding, len(file.Messages))
 	for _, session := range file.Sessions {
 		session = normalizeSessionForStore(session)
 		if !session.Key.Valid() {
@@ -73,6 +78,13 @@ func (s *SessionStore) Load() error {
 			continue
 		}
 		s.chats[chat.Key] = chat
+	}
+	for _, binding := range file.Messages {
+		binding = normalizeMessageBinding(binding)
+		if !validMessageBinding(binding) {
+			continue
+		}
+		s.messages[messageBindingKeyFromBinding(binding)] = binding
 	}
 	s.history = s.history[:0]
 	for _, session := range file.History {
@@ -242,6 +254,50 @@ func (s *SessionStore) UpdateCurrentSession(key SessionKey, acpSessionID string,
 	snapshot := s.snapshotLocked()
 	s.upsertSessionLocked(session, time.Now())
 	return s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) BindMessageToSession(binding MessageSessionBinding) (MessageSessionBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	binding = normalizeMessageBinding(binding)
+	if !validMessageBinding(binding) {
+		return MessageSessionBinding{}, fmt.Errorf("消息会话绑定字段不完整")
+	}
+	snapshot := s.snapshotLocked()
+	now := time.Now()
+	if existing, ok := s.messages[messageBindingKeyFromBinding(binding)]; ok && !existing.CreatedAt.IsZero() {
+		binding.CreatedAt = existing.CreatedAt
+	}
+	if binding.CreatedAt.IsZero() {
+		binding.CreatedAt = now
+	}
+	binding.UpdatedAt = now
+	s.messages[messageBindingKeyFromBinding(binding)] = binding
+	return binding, s.writeOrRestoreLocked(snapshot)
+}
+
+func (s *SessionStore) SessionForMessage(botID, chatID, messageID string) (Session, MessageSessionBinding, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := messageBindingKey{
+		BotID:     strings.TrimSpace(botID),
+		ChatID:    strings.TrimSpace(chatID),
+		MessageID: strings.TrimSpace(messageID),
+	}
+	if key.BotID == "" && key.ChatID == "" && key.MessageID == "" {
+		return Session{}, MessageSessionBinding{}, false
+	}
+	binding, ok := s.messages[key]
+	if !ok {
+		return Session{}, MessageSessionBinding{}, false
+	}
+	session, ok := s.sessions[normalizeSessionKey(binding.SessionKey)]
+	if !ok {
+		return Session{}, binding, false
+	}
+	return cloneSession(session), binding, true
 }
 
 func (s *SessionStore) ResumeSession(key SessionKey, acpSessionID string) (Session, bool, error) {
@@ -469,6 +525,7 @@ func (s *SessionStore) snapshotLocked() sessionStoreSnapshot {
 		sessions: make(map[SessionKey]Session, len(s.sessions)),
 		history:  make([]Session, len(s.history)),
 		chats:    make(map[ChatKey]ChatConfig, len(s.chats)),
+		messages: make(map[messageBindingKey]MessageSessionBinding, len(s.messages)),
 	}
 	for key, session := range s.sessions {
 		snapshot.sessions[key] = cloneSession(session)
@@ -479,6 +536,9 @@ func (s *SessionStore) snapshotLocked() sessionStoreSnapshot {
 	for key, chat := range s.chats {
 		snapshot.chats[key] = chat
 	}
+	for key, binding := range s.messages {
+		snapshot.messages[key] = binding
+	}
 	return snapshot
 }
 
@@ -487,6 +547,7 @@ func (s *SessionStore) writeOrRestoreLocked(snapshot sessionStoreSnapshot) error
 		s.sessions = snapshot.sessions
 		s.history = snapshot.history
 		s.chats = snapshot.chats
+		s.messages = snapshot.messages
 		return err
 	}
 	return nil
@@ -498,6 +559,7 @@ func (s *SessionStore) writeLocked() error {
 		Sessions: make([]Session, 0, len(s.sessions)),
 		History:  make([]Session, 0, len(s.history)),
 		Chats:    make([]ChatConfig, 0, len(s.chats)),
+		Messages: make([]MessageSessionBinding, 0, len(s.messages)),
 	}
 	for _, session := range s.sessions {
 		file.Sessions = append(file.Sessions, persistedSession(session))
@@ -511,8 +573,14 @@ func (s *SessionStore) writeLocked() error {
 	for _, chat := range s.chats {
 		file.Chats = append(file.Chats, chat)
 	}
+	for _, binding := range s.messages {
+		file.Messages = append(file.Messages, binding)
+	}
 	sort.Slice(file.Chats, func(i, j int) bool {
 		return chatKeyLess(file.Chats[i].Key, file.Chats[j].Key)
+	})
+	sort.Slice(file.Messages, func(i, j int) bool {
+		return messageBindingLess(file.Messages[i], file.Messages[j])
 	})
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
@@ -611,6 +679,18 @@ func chatKeyLess(a, b ChatKey) bool {
 	return a.ChatID < b.ChatID
 }
 
+func messageBindingLess(a, b MessageSessionBinding) bool {
+	a = normalizeMessageBinding(a)
+	b = normalizeMessageBinding(b)
+	if a.BotID != b.BotID {
+		return a.BotID < b.BotID
+	}
+	if a.ChatID != b.ChatID {
+		return a.ChatID < b.ChatID
+	}
+	return a.MessageID < b.MessageID
+}
+
 func normalizeSessionForStore(session Session) Session {
 	session.Key = normalizeSessionKey(session.Key)
 	session.AgentName = strings.TrimSpace(session.AgentName)
@@ -692,6 +772,37 @@ func normalizeChatForStore(chat ChatConfig) ChatConfig {
 	return chat
 }
 
+type messageBindingKey struct {
+	BotID     string
+	ChatID    string
+	MessageID string
+}
+
+func normalizeMessageBinding(binding MessageSessionBinding) MessageSessionBinding {
+	binding.BotID = strings.TrimSpace(binding.BotID)
+	binding.ChatID = strings.TrimSpace(binding.ChatID)
+	binding.MessageID = strings.TrimSpace(binding.MessageID)
+	binding.SessionKey = normalizeSessionKey(binding.SessionKey)
+	if binding.SessionKey.BotID == "" {
+		binding.SessionKey.BotID = binding.BotID
+	}
+	return binding
+}
+
+func validMessageBinding(binding MessageSessionBinding) bool {
+	binding = normalizeMessageBinding(binding)
+	return binding.BotID != "" && binding.ChatID != "" && binding.MessageID != "" && binding.SessionKey.Valid()
+}
+
+func messageBindingKeyFromBinding(binding MessageSessionBinding) messageBindingKey {
+	binding = normalizeMessageBinding(binding)
+	return messageBindingKey{
+		BotID:     binding.BotID,
+		ChatID:    binding.ChatID,
+		MessageID: binding.MessageID,
+	}
+}
+
 func normalizeSessionKey(key SessionKey) SessionKey {
 	normalized := SessionKey{
 		BotID:  strings.TrimSpace(key.BotID),
@@ -768,8 +879,9 @@ func chatKeyFromSessionKey(key SessionKey) ChatKey {
 }
 
 type sessionFile struct {
-	Version  int          `json:"version"`
-	Sessions []Session    `json:"sessions"`
-	History  []Session    `json:"history,omitempty"`
-	Chats    []ChatConfig `json:"chats,omitempty"`
+	Version  int                     `json:"version"`
+	Sessions []Session               `json:"sessions"`
+	History  []Session               `json:"history,omitempty"`
+	Chats    []ChatConfig            `json:"chats,omitempty"`
+	Messages []MessageSessionBinding `json:"messages,omitempty"`
 }

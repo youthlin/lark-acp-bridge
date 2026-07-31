@@ -269,6 +269,64 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	}
 }
 
+func TestSessionStoreBindMessageToSessionPersistsAndTracksLogicalSession(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	store := NewSessionStore(storePath)
+	key := SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"}
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-run-1",
+		Cwd:          "/repo",
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	binding, err := store.BindMessageToSession(MessageSessionBinding{
+		BotID:      " bot-a ",
+		ChatID:     " oc_chat ",
+		MessageID:  " om_result ",
+		SessionKey: key,
+	})
+	if err != nil {
+		t.Fatalf("BindMessageToSession() error = %v", err)
+	}
+	if binding.BotID != "bot-a" || binding.ChatID != "oc_chat" || binding.MessageID != "om_result" || binding.SessionKey != key {
+		t.Fatalf("binding = %+v, want normalized binding", binding)
+	}
+	got, gotBinding, ok := store.SessionForMessage("bot-a", "oc_chat", "om_result")
+	if !ok {
+		t.Fatalf("SessionForMessage() ok=false binding=%+v", gotBinding)
+	}
+	if got.ACPSessionID != "acp-run-1" || got.Key != key {
+		t.Fatalf("session = %+v, want %+v", got, session)
+	}
+
+	reloaded := NewSessionStore(storePath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got, gotBinding, ok = reloaded.SessionForMessage("bot-a", "oc_chat", "om_result")
+	if !ok {
+		t.Fatalf("reloaded SessionForMessage() ok=false binding=%+v", gotBinding)
+	}
+	if got.ACPSessionID != "acp-run-1" || got.Key != key {
+		t.Fatalf("reloaded session = %+v, want %+v", got, session)
+	}
+	replacement := session
+	replacement.ACPSessionID = "acp-run-2"
+	if err := reloaded.Upsert(replacement); err != nil {
+		t.Fatalf("Upsert(replacement) error = %v", err)
+	}
+	got, gotBinding, ok = reloaded.SessionForMessage("bot-a", "oc_chat", "om_result")
+	if !ok {
+		t.Fatalf("SessionForMessage() after ACP refresh ok=false binding=%+v", gotBinding)
+	}
+	if got.ACPSessionID != "acp-run-2" || got.Key != key {
+		t.Fatalf("session after ACP refresh = %+v, want refreshed logical session %+v", got, replacement)
+	}
+}
+
 func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
@@ -719,6 +777,15 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 			t.Fatalf("UpsertChat(%+v) error = %v", chat.Key, err)
 		}
 	}
+	for _, binding := range []MessageSessionBinding{
+		{BotID: "bot-b", ChatID: "oc_1", MessageID: "om_b", SessionKey: sessions[0].Key},
+		{BotID: "bot-a", ChatID: "oc_2", MessageID: "om_c", SessionKey: sessions[1].Key},
+		{BotID: "bot-a", ChatID: "oc_1", MessageID: "om_a", SessionKey: sessions[2].Key},
+	} {
+		if _, err := store.BindMessageToSession(binding); err != nil {
+			t.Fatalf("BindMessageToSession(%+v) error = %v", binding, err)
+		}
+	}
 
 	data, err := os.ReadFile(storePath)
 	if err != nil {
@@ -755,6 +822,18 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 	if !chatKeysEqual(gotChats, wantChats) {
 		t.Fatalf("chat order = %+v, want %+v", gotChats, wantChats)
 	}
+	gotMessages := make([]messageBindingKey, 0, len(file.Messages))
+	for _, binding := range file.Messages {
+		gotMessages = append(gotMessages, messageBindingKeyFromBinding(binding))
+	}
+	wantMessages := []messageBindingKey{
+		{BotID: "bot-a", ChatID: "oc_1", MessageID: "om_a"},
+		{BotID: "bot-a", ChatID: "oc_2", MessageID: "om_c"},
+		{BotID: "bot-b", ChatID: "oc_1", MessageID: "om_b"},
+	}
+	if !messageBindingKeysEqual(gotMessages, wantMessages) {
+		t.Fatalf("message binding order = %+v, want %+v", gotMessages, wantMessages)
+	}
 }
 
 func sessionListContains(items []Session, acpSessionID string) bool {
@@ -779,6 +858,18 @@ func sessionKeysEqual(got, want []SessionKey) bool {
 }
 
 func chatKeysEqual(got, want []ChatKey) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func messageBindingKeysEqual(got, want []messageBindingKey) bool {
 	if len(got) != len(want) {
 		return false
 	}

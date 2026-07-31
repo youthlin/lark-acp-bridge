@@ -58,8 +58,8 @@ func TestHandleScheduleCommandAddListStatusPauseResumeDelete(t *testing.T) {
 	if task.CreatorOpenID != testOwnerOpenID || task.CreatedFromChatID != "oc_chat" || task.CreatedFromThreadID != "omt_thread" || task.CreatedFromMessageID != "om_schedule" {
 		t.Fatalf("task source = %+v, want IM origin", task)
 	}
-	if task.ResultSink.Type != "im" || task.ResultSink.ChatID != "oc_chat" || task.ResultSink.ThreadID != "omt_thread" || task.ResultSink.MessageID != "om_schedule" {
-		t.Fatalf("task sink = %+v, want IM result sink", task.ResultSink)
+	if task.ResultSink.Type != "im" || task.ResultSink.ChatID != "oc_chat" || task.ResultSink.ThreadID != "" || task.ResultSink.MessageID != "" {
+		t.Fatalf("task sink = %+v, want IM chat root result sink", task.ResultSink)
 	}
 	if got := svc.scheduledTaskJobCount(); got != 1 {
 		t.Fatalf("scheduledTaskJobCount() = %d, want created task registered", got)
@@ -70,7 +70,7 @@ func TestHandleScheduleCommandAddListStatusPauseResumeDelete(t *testing.T) {
 		t.Fatalf("list reply = %q, want created task", list)
 	}
 	status := svc.handleScheduleCommand(context.Background(), "/schedule status "+task.ID, msg)
-	if !strings.Contains(status, "定时任务："+task.ID) || !strings.Contains(status, "状态：启用") || !strings.Contains(status, "回传：IM oc_chat / omt_thread") {
+	if !strings.Contains(status, "定时任务："+task.ID) || !strings.Contains(status, "状态：启用") || !strings.Contains(status, "回传：IM oc_chat") || strings.Contains(status, "回传：IM oc_chat /") {
 		t.Fatalf("status reply = %q, want task details", status)
 	}
 
@@ -192,11 +192,14 @@ func TestHandleScheduleEditCommandUpdatesEnabledTaskAndReregistersJob(t *testing
 		"agent：claude",
 		"cwd：" + explicitCwd,
 		"prompt：生成周报",
-		"回传：IM oc_chat / omt_thread",
+		"回传：IM oc_chat",
 	} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
+	}
+	if strings.Contains(reply, "回传：IM oc_chat /") {
+		t.Fatalf("reply = %q, want chat root result sink without thread", reply)
 	}
 	edited, ok := store.Get(task.ID)
 	if !ok {
@@ -387,8 +390,8 @@ func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) 
 	if gotSent.text != "立即执行完成" {
 		t.Fatalf("sent text = %q, want immediate run result", gotSent.text)
 	}
-	if gotSent.msg.BotID != "bot-a" || gotSent.msg.ChatID != "oc_chat" || gotSent.msg.ThreadID != "omt_thread" || gotSent.msg.MessageID != "om_schedule" || !gotSent.msg.ForceReplyInThread {
-		t.Fatalf("sent message = %+v, want persisted result sink target", gotSent.msg)
+	if gotSent.msg.BotID != "bot-a" || gotSent.msg.ChatID != "oc_chat" || gotSent.msg.ThreadID != "" || gotSent.msg.MessageID != "" || gotSent.msg.ForceReplyInThread {
+		t.Fatalf("sent message = %+v, want new root result message target", gotSent.msg)
 	}
 	rt.mu.Lock()
 	promptCalls := append([]fakePromptCall(nil), rt.promptCalls...)
