@@ -412,6 +412,7 @@ func (c larkDriveCommentClient) GetComment(ctx context.Context, fileToken, fileT
 		Body(body).
 		Build()
 	resp, err := c.client.Drive.V1.FileComment.BatchQuery(ctx, req)
+	_ = c.client.Drive.V1.FileComment.Get // 这个Get是只能获取指定的「全文评论」 不是侧边栏局部评论
 	if err != nil {
 		return DriveCommentDetail{}, fmt.Errorf("调用飞书获取云文档评论接口: %w", err)
 	}

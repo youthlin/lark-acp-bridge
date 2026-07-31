@@ -172,7 +172,8 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 		}
 	}
 	if a.driveComments != nil {
-		detail, err := a.getDriveCommentDetail(ctx, comment)
+		// [larkDriveCommentClient.GetComment]
+		detail, err := a.driveComments.GetComment(ctx, comment.FileToken, comment.FileType, comment.CommentID)
 		if err != nil {
 			slog.WarnContext(ctx, "读取云文档评论详情失败", "错误", err)
 		} else {
@@ -192,13 +193,6 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 		slog.ErrorContext(ctx, "处理云文档评论事件失败", "错误", err)
 	}
 	return nil
-}
-
-func (a *Adapter) getDriveCommentDetail(ctx context.Context, comment DriveComment) (DriveCommentDetail, error) {
-	if a.driveComments == nil {
-		return DriveCommentDetail{}, fmt.Errorf("缺少云文档评论 client")
-	}
-	return a.driveComments.GetComment(ctx, comment.FileToken, comment.FileType, comment.CommentID)
 }
 
 func (a *Adapter) ReplyDriveComment(ctx context.Context, comment DriveComment, text string) error {
@@ -241,30 +235,6 @@ func (c DriveComment) withDetail(detail DriveCommentDetail) DriveComment {
 		}
 	}
 	return c
-}
-
-func driveCommentDetailFromGetResp(data *larkdrive.GetFileCommentRespData) DriveCommentDetail {
-	if data == nil {
-		return DriveCommentDetail{}
-	}
-	detail := DriveCommentDetail{
-		CommentID:       value(data.CommentId),
-		UserID:          value(data.UserId),
-		Quote:           value(data.Quote),
-		CreateTime:      valueInt(data.CreateTime),
-		UpdateTime:      valueInt(data.UpdateTime),
-		IsSolved:        valueBool(data.IsSolved),
-		IsWhole:         valueBool(data.IsWhole),
-		HasMore:         valueBool(data.HasMore),
-		PageToken:       value(data.PageToken),
-		RepliesComplete: !valueBool(data.HasMore),
-	}
-	if data.ReplyList != nil {
-		for _, reply := range data.ReplyList.Replies {
-			detail.Replies = appendDriveCommentReply(detail.Replies, reply)
-		}
-	}
-	return detail
 }
 
 func driveCommentDetailFromFileComment(comment *larkdrive.FileComment) DriveCommentDetail {

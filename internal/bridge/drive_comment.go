@@ -12,7 +12,7 @@ import (
 
 const sessionSourceDriveComment = "drive_comment"
 
-const driveCommentMissingBodyReply = "我这边没有读取到这条评论的正文，暂时无法判断需要处理的内容。请补充具体问题或重新评论 @ 我。"
+const driveCommentMissingBodyReply = "处理失败：未获取到评论内容。"
 
 // HandleDriveComment 处理飞书云文档评论事件。
 func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveComment) error {
@@ -115,7 +115,8 @@ func driveCommentSessionKey(comment feishu.DriveComment) SessionKey {
 		BotID:  comment.BotID,
 		Source: sessionSourceDriveComment,
 		MainID: comment.FileType + ":" + comment.FileToken,
-		SubID:  comment.CommentID,
+		// 暂时决定按评论隔离 而不是按全文隔离会话, 因为多个段落的评论通常是并行互不影响的
+		SubID: comment.CommentID,
 	}
 }
 
