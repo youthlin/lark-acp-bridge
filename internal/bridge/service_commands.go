@@ -48,7 +48,7 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 			"/mode <mode> - 设置当前会话模式",
 			"/usage [day|week|month|year] - 查看按 agent 和模型聚合的 token 用量",
 			"/show step|plan|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
-			"/at - /at on: 必须at才响应; /at off auto|every: 无需at, auto=由agent自行判断是否响应, every=每次响应",
+			"/at - /at on: 必须at才响应; /at off auto|auto-reaction|every: 无需at, auto=自动判断且不加处理中表情, auto-reaction=自动判断并加处理中表情, every=每次响应",
 			"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志",
 			"/restart - 重启 bridge 服务，重启完成后自动回复确认",
 			"/status - 查看服务状态",

@@ -11,6 +11,7 @@ import (
 
 const (
 	atModeAuto             = "auto"
+	atModeAutoReaction     = "auto-reaction"
 	atModeEvery            = "every"
 	maxPendingAtMessages   = 100
 	maxPendingAtAuto       = 100
@@ -329,7 +330,7 @@ func formatPendingAtSender(senderID string) string {
 }
 
 func (s *Service) promptTextWithAtAuto(msg feishu.Message, promptText string) string {
-	if s.chatAtMode(msg) != atModeAuto || messageMentionsBot(msg) {
+	if !s.shouldHandleAtAutoMessage(msg) {
 		return promptText
 	}
 	promptText = strings.TrimSpace(promptText)
@@ -347,7 +348,7 @@ func (s *Service) promptTextWithAtAuto(msg feishu.Message, promptText string) st
 }
 
 func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {
-	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg)
+	return s.shouldHandleAtAutoMessage(msg)
 }
 
 func (s *Service) queueAtAutoMessageIfBusy(msg feishu.Message) bool {
@@ -398,11 +399,28 @@ func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
 }
 
 func (s *Service) shouldSuppressAtAutoReply(msg feishu.Message, reply string) bool {
-	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg) && strings.EqualFold(strings.TrimSpace(reply), "SILENT")
+	return s.shouldHandleAtAutoMessage(msg) && strings.EqualFold(strings.TrimSpace(reply), "SILENT")
 }
 
 func (s *Service) shouldDelayAtAutoProgress(msg feishu.Message) bool {
-	return s.chatAtMode(msg) == atModeAuto && !messageMentionsBot(msg)
+	return s.shouldHandleAtAutoMessage(msg)
+}
+
+func (s *Service) shouldHandleAtAutoMessage(msg feishu.Message) bool {
+	return isAtAutoMode(s.chatAtMode(msg)) && !messageMentionsBot(msg)
+}
+
+func (s *Service) shouldStartProcessingReaction(msg feishu.Message) bool {
+	return !s.shouldHandleAtAutoMessage(msg) || s.chatAtMode(msg) == atModeAutoReaction
+}
+
+func isAtAutoMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case atModeAuto, atModeAutoReaction:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) chatRequiresMention(msg feishu.Message) bool {
@@ -531,7 +549,7 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 			mode = atModeEvery
 		}
 		switch mode {
-		case atModeAuto, atModeEvery:
+		case atModeAuto, atModeAutoReaction, atModeEvery:
 			atMode = mode
 			mentionOptional = true
 		default:
@@ -549,8 +567,11 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 		return "保存群聊 at 配置失败：" + err.Error()
 	}
 	if chat.MentionOptional {
-		if chat.AtMode == atModeAuto {
+		switch chat.AtMode {
+		case atModeAuto:
 			return "已设置当前群聊：无需 at 也会进入自动判断。"
+		case atModeAutoReaction:
+			return "已设置当前群聊：无需 at 也会进入自动判断，并为未 at 消息添加处理中表情。"
 		}
 		return "已设置当前群聊：每条消息都会响应，无需 at。"
 	}
@@ -558,7 +579,7 @@ func (s *Service) handleAtCommand(ctx context.Context, msg feishu.Message, text 
 }
 
 func atCommandUsage() string {
-	return "请使用 /at status、/at on、/at off auto 或 /at off every。"
+	return "请使用 /at status、/at on、/at off auto、/at off auto-reaction 或 /at off every。"
 }
 
 func (s *Service) formatAtStatus(msg feishu.Message) string {
@@ -568,11 +589,14 @@ func (s *Service) formatAtStatus(msg feishu.Message) string {
 	if !messageIsGroupChat(msg) {
 		return "当前会话类型不支持 /at 配置。"
 	}
-	if s.chatAtMode(msg) == atModeAuto {
-		return "当前群聊：无需 at 也会进入自动判断。\n使用 /at off every 可改为每条消息都响应；使用 /at on 可恢复为需要 at。"
+	switch s.chatAtMode(msg) {
+	case atModeAuto:
+		return "当前群聊：无需 at 也会进入自动判断，未 at 消息不添加处理中表情。\n使用 /at off auto-reaction 可为自动判断添加处理中表情；使用 /at off every 可改为每条消息都响应；使用 /at on 可恢复为需要 at。"
+	case atModeAutoReaction:
+		return "当前群聊：无需 at 也会进入自动判断，未 at 消息会添加处理中表情。\n使用 /at off auto 可关闭处理中表情；使用 /at off every 可改为每条消息都响应；使用 /at on 可恢复为需要 at。"
 	}
 	if s.chatRequiresMention(msg) {
-		return "当前群聊：需要 at 才响应。\n使用 /at off auto 可改为自动判断；使用 /at off every 可改为每条消息都响应。"
+		return "当前群聊：需要 at 才响应。\n使用 /at off auto 可改为自动判断；使用 /at off auto-reaction 可改为自动判断并添加处理中表情；使用 /at off every 可改为每条消息都响应。"
 	}
 	return "当前群聊：每条消息都会响应，无需 at。\n使用 /at on 可恢复为需要 at。"
 }

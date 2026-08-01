@@ -109,7 +109,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。
 
-普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at，私聊始终响应且不支持 `/at` 配置。用户只 at 当前 bot 且不带正文时，会按“用户提及你，但本次无消息内容，请按历史消息，引用上下文回复”作为普通 prompt 发送给 ACP agent。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
+普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at 且每条消息都响应，也可用 `@Bot /at off auto` 改成免 at 后自动判断是否响应，私聊始终响应且不支持 `/at` 配置。用户只 at 当前 bot 且不带正文时，会按“用户提及你，但本次无消息内容，请按历史消息，引用上下文回复”作为普通 prompt 发送给 ACP agent。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 
 初始化说明会要求 ACP agent 一次性询问用户：
 
@@ -225,7 +225,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/mode <mode>`：通过 ACP `session/set_config_option` 设置当前会话模式。
 - `/usage [day|week|month|year]`：查看当前 bot workspace 内的 token 用量报告，按 agent 和模型维度聚合；不指定周期时默认查看今日。统计数据保存到 workspace 下的 `token_usage.json`，覆盖普通 IM、定时任务和文档评论等 prompt 入口。
 - `/show step|plan|thought|tool|status|used on|off`：设置当前聊天流式卡片展示项。默认展示 `step`、`plan`、`tool`、`status` 和 `used`，`thought` 默认关闭，需显式开启；`step` 控制 `💬` 过程消息，`plan` 控制 `📌` 计划消息，`thought` 控制 `🧠` 思考消息，`tool` 控制 `⏳/✅/❌` 工具调用和工具输出，`status` 控制底部状态栏，`used` 控制用量明细。`step`、`plan`、`thought`、`tool` 都关闭时，流式卡片只展示正文，不展示“执行过程”折叠区域。
-- `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
+- `/at status|on|off`：查看或设置当前群聊是否需要 at bot 才响应。群聊默认需要 at，因此默认状态下需使用 `@Bot /at off` 改为免 at；这里的 `@Bot` 必须提及当前 bot 的 open_id，随便 at 其他用户或其他 bot 不会触发。`/at off` 等同于 `/at off every`，每条消息都响应；`/at off auto` 会先让 agent 自动判断是否需要响应，不为未 at 消息添加处理中表情；`/at off auto-reaction` 同样自动判断，但会添加处理中表情；免 at 后可用 `/at on` 或 `@Bot /at on` 恢复为需要 at。私聊不支持该命令，at 或不 at 都会响应。
 - `/restart`：仅 bot owner 可用。旧进程会先回复“准备重启”并写入 `$BOT_WORKSPACE/restart_ack.json`，然后执行 `restart_command`；内置后台 daemon 子进程也可在未配置 `restart_command` 时使用内置后台 restart。新进程启动后会向原消息回复“已重启”并删除回执文件。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开当前聊天默认 agent 的 ACP 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问目录，支持绝对路径、`~/path`、`./path` 和 `../path`；相对路径优先基于当前会话已有 `cwd` 解析，首次创建则基于当前聊天默认 agent 配置里的 `default_cwd` 解析。不传 `cwd` 时优先沿用当前会话已有的 `cwd`，首次创建则使用当前聊天默认 agent 配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。如果旧会话有尚未触发的 wiki 反思轮次，`/new` 会将其放到独立 wiki runtime key 后台执行，不等待反思完成；该后台反思不会被新会话后续普通消息取消。如果新 ACP session 创建或持久化失败，原 pending wiki 定时器会恢复。
 - 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用当前聊天默认 agent 的 `default_cwd` 创建；如果当前会话 agent 和当前聊天默认 agent 不一致，会自动基于当前 `cwd` 创建新 agent 的 ACP session。会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。

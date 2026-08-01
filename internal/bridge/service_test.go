@@ -430,8 +430,8 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	if !strings.Contains(reply, "/debug status|on|off") {
 		t.Fatalf("reply = %q, want debug help", reply)
 	}
-	if !strings.Contains(reply, "/at - /at on: 必须at才响应; /at off auto|every") {
-		t.Fatalf("reply = %q, want at auto/every help", reply)
+	if !strings.Contains(reply, "/at - /at on: 必须at才响应; /at off auto|auto-reaction|every") {
+		t.Fatalf("reply = %q, want at auto/auto-reaction/every help", reply)
 	}
 	if !strings.Contains(reply, "/loop add <补充消息>|status|stop") {
 		t.Fatalf("reply = %q, want loop add help", reply)
@@ -2694,6 +2694,53 @@ func TestHandleFeishuGroupChatStartsReactionOnlyWhenMessageIsProcessed(t *testin
 	if started != 1 || cleaned != 1 {
 		t.Fatalf("reaction lifecycle = started %d cleaned %d, want one processed message", started, cleaned)
 	}
+
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat(auto) error = %v", err)
+	}
+	rt.mu.Lock()
+	rt.promptResults = []acp.PromptResult{{Text: "SILENT"}}
+	rt.mu.Unlock()
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_plain",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "auto 判断但不需要表情",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group auto no mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want SILENT suppressed", reply)
+	}
+	if started != 1 || cleaned != 1 {
+		t.Fatalf("reaction lifecycle = started %d cleaned %d, want no processing reaction for plain auto", started, cleaned)
+	}
+
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAutoReaction}); err != nil {
+		t.Fatalf("UpsertChat(auto-reaction) error = %v", err)
+	}
+	rt.mu.Lock()
+	rt.promptResults = []acp.PromptResult{{Text: "SILENT"}}
+	rt.mu.Unlock()
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_reaction",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "auto 判断并显示表情",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group auto-reaction no mention) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want SILENT suppressed", reply)
+	}
+	if started != 2 || cleaned != 2 {
+		t.Fatalf("reaction lifecycle = started %d cleaned %d, want one processing reaction for auto-reaction", started, cleaned)
+	}
 }
 
 func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T) {
@@ -2733,8 +2780,8 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if !strings.Contains(reply, "需要 at 才响应") {
 		t.Fatalf("reply = %q, want default mention-required status", reply)
 	}
-	if !strings.Contains(reply, "/at off auto") || !strings.Contains(reply, "/at off every") {
-		t.Fatalf("reply = %q, want status to advertise auto and every modes", reply)
+	if !strings.Contains(reply, "/at off auto") || !strings.Contains(reply, "/at off auto-reaction") || !strings.Contains(reply, "/at off every") {
+		t.Fatalf("reply = %q, want status to advertise auto, auto-reaction, and every modes", reply)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -2865,8 +2912,8 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/at status auto) error = %v", err)
 	}
-	if !strings.Contains(reply, "自动判断") || !strings.Contains(reply, "/at off every") {
-		t.Fatalf("reply = %q, want auto mode status with every switch hint", reply)
+	if !strings.Contains(reply, "自动判断") || !strings.Contains(reply, "/at off auto-reaction") || !strings.Contains(reply, "/at off every") {
+		t.Fatalf("reply = %q, want auto mode status with auto-reaction and every switch hints", reply)
 	}
 
 	rt.mu.Lock()
@@ -2940,6 +2987,38 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	}
 	if got := cards[0].processUpdatesSnapshot(); len(got) != 0 {
 		t.Fatalf("processUpdates = %+v, want no process rows when auto reply has no tool boundary", got)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto_reaction_mode",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at off auto-reaction",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at off auto-reaction) error = %v", err)
+	}
+	if !strings.Contains(reply, "自动判断") || !strings.Contains(reply, "处理中表情") {
+		t.Fatalf("reply = %q, want auto-reaction mode confirmation", reply)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_group"})
+	if !ok || !chat.MentionOptional || chat.AtMode != atModeAutoReaction || chat.WikiIntervalSec != 30 || !chat.HideUsageDetail {
+		t.Fatalf("chat config = %+v, %v; want auto-reaction mode without clearing other chat options", chat, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto_reaction_status",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "/at status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/at status auto-reaction) error = %v", err)
+	}
+	if !strings.Contains(reply, "自动判断") || !strings.Contains(reply, "处理中表情") || !strings.Contains(reply, "/at off auto") {
+		t.Fatalf("reply = %q, want auto-reaction mode status with auto switch hint", reply)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{

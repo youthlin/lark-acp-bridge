@@ -151,8 +151,10 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
 		return "", nil
 	}
-	if cleanup, ok := feishu.StartProcessingReaction(ctx, msg); ok {
-		defer cleanup()
+	if s.shouldStartProcessingReaction(msg) {
+		if cleanup, ok := feishu.StartProcessingReaction(ctx, msg); ok {
+			defer cleanup()
+		}
 	}
 
 	_, err := ensureWorkspace(msg.Workspace, msg.BotID)

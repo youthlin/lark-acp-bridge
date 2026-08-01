@@ -130,7 +130,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 }
 
 func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) {
-	if s.chatAtMode(msg) != atModeAuto || !messageMentionsBot(msg) {
+	if !isAtAutoMode(s.chatAtMode(msg)) || !messageMentionsBot(msg) {
 		return
 	}
 	pending := s.takePendingAtAutoMessages(session.Key)
@@ -197,7 +197,7 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
 	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, runningTaskOptions{
-		drainPendingAtAuto: s.chatAtMode(msg) == atModeAuto && messageMentionsBot(msg),
+		drainPendingAtAuto: isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg),
 	})
 }
 
