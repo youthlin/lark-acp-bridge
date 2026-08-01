@@ -351,6 +351,76 @@ func TestParseMessagePostPrefersChineseLocale(t *testing.T) {
 	}
 }
 
+func TestParseMessageInteractivePrefersUserDSL(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_interactive"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("group"),
+				MessageType: ptr("interactive"),
+				Content: ptr(`{
+  "title": null,
+  "elements": [
+    [
+      {"tag":"img","image_key":"img_v3_fallback"},
+      {"tag":"text","text":"请升级至最新版本客户端，以查看内容"}
+    ]
+  ],
+  "user_dsl": "{\"schema\":\"2.0\",\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"QA Review\"}},\"body\":{\"elements\":[{\"tag\":\"markdown\",\"content\":\"**Review 结论**\\n- 需要补测试\"},{\"tag\":\"img\",\"img_key\":\"img_v3_card\"},{\"tag\":\"button\",\"text\":{\"tag\":\"plain_text\",\"content\":\"查看详情\"}},{\"tag\":\"collapsible_panel\",\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"执行过程\"}},\"elements\":[{\"tag\":\"markdown\",\"content\":\"工具调用完成\"}]}]}}"
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	for _, want := range []string{"QA Review", "Review 结论", "需要补测试", "查看详情", "执行过程", "工具调用完成"} {
+		if !strings.Contains(msg.Text, want) {
+			t.Fatalf("Text = %q, want %q", msg.Text, want)
+		}
+	}
+	if strings.Contains(msg.Text, "请升级至最新版本客户端") {
+		t.Fatalf("Text = %q, should prefer user_dsl over downgraded fallback text", msg.Text)
+	}
+	if len(msg.Images) != 2 || msg.Images[0].ImageKey != "img_v3_card" || msg.Images[1].ImageKey != "img_v3_fallback" || msg.ImageKey != "img_v3_card" {
+		t.Fatalf("Images = %+v ImageKey=%q, want card image before fallback image", msg.Images, msg.ImageKey)
+	}
+}
+
+func TestParseMessageInteractiveDefaultContent(t *testing.T) {
+	got, err := parseMessageContent("interactive", `{
+  "title": "卡片标题",
+  "elements": [
+    [
+      {"tag":"button","text":"主按钮","type":"primary"},
+      {"tag":"button","text":"次按钮","type":"default"}
+    ],
+    [
+      {"tag":"a","href":"https://www.feishu.cn","text":"飞书"},
+      {"tag":"text","text":"更高效、更愉悦。"},
+      {"tag":"at","user_id":"@_user_1","user_name":"张三"}
+    ],
+    [
+      {"tag":"note","elements":[
+        {"tag":"img","image_key":"img_v3_note"},
+        {"tag":"text","text":"备注信息"}
+      ]}
+    ]
+  ]
+}`)
+	if err != nil {
+		t.Fatalf("parseMessageContent() error = %v", err)
+	}
+	for _, want := range []string{"卡片标题", "主按钮", "次按钮", "[飞书](https://www.feishu.cn)", "更高效、更愉悦。", "@张三", "备注信息"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("parseMessageContent() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestParseMessageStructuredInboundTypes(t *testing.T) {
 	tests := []struct {
 		name    string

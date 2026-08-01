@@ -708,6 +708,33 @@ func TestReplyContextFromLarkInteractiveMessage(t *testing.T) {
 	}
 }
 
+func TestReplyContextFromLarkInteractiveMessagePrefersUserDSL(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("interactive").
+		Sender(larkim.NewSenderBuilder().
+			Id("cli_other_bot").
+			SenderType("app").
+			Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"title":null,"elements":[[{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]],"user_dsl":"{\"schema\":\"2.0\",\"body\":{\"elements\":[{\"tag\":\"markdown\",\"content\":\"真实卡片正文\"},{\"tag\":\"button\",\"text\":{\"tag\":\"plain_text\",\"content\":\"查看详情\"}}]},\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"真实标题\"}}}"}`).
+			Build()).
+		Build()
+
+	msg := messageFromLarkMessage(item)
+	if msg == nil || msg.SenderType != "app" {
+		t.Fatalf("message = %+v, want app interactive text", msg)
+	}
+	for _, want := range []string{"真实标题", "真实卡片正文", "查看详情"} {
+		if !strings.Contains(msg.Text, want) {
+			t.Fatalf("message text = %q, want %q", msg.Text, want)
+		}
+	}
+	if strings.Contains(msg.Text, "请升级至最新版本客户端") {
+		t.Fatalf("message text = %q, should prefer user_dsl over downgraded fallback text", msg.Text)
+	}
+}
+
 func TestReplyContextFromLarkImageMessage(t *testing.T) {
 	item := larkim.NewMessageBuilder().
 		MessageId("om_parent").

@@ -964,10 +964,13 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 		setMessagePrimaryImage(msg)
 		if strings.EqualFold(msg.MsgType, "image") {
 			msg.Text = ""
-		} else if strings.EqualFold(msg.MsgType, "post") {
-			msg.Text = parsePostContent(content)
 		} else {
-			msg.Text = parseMessageTextContent(content)
+			text, err := parseMessageContent(msg.MsgType, content)
+			if err != nil {
+				msg.Text = parseMessageTextContent(content)
+			} else {
+				msg.Text = text
+			}
 		}
 	}
 	for _, mention := range item.Mentions {

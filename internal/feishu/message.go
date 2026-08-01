@@ -203,6 +203,8 @@ func parseMessageContent(msgType string, content string) (string, error) {
 		return parseTextContent(content)
 	case "post":
 		return parsePostContent(content), nil
+	case "interactive":
+		return parseInteractiveContent(content), nil
 	default:
 		return parseStructuredMessageContent(msgType, content), nil
 	}
@@ -262,6 +264,171 @@ func parseStructuredMessageContent(msgType string, content string) string {
 		return parseMessageTextContent(content)
 	}
 	return extractReadableMessageText(content)
+}
+
+func parseInteractiveContent(content string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return ""
+	}
+	if userDSL := firstString(payload, "user_dsl"); userDSL != "" {
+		if text := parseInteractiveCardDSL(userDSL); text != "" {
+			return text
+		}
+	}
+	if text := interactiveCardText(payload); text != "" {
+		return text
+	}
+	return extractReadableMessageText(content)
+}
+
+func parseInteractiveCardDSL(raw string) string {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return ""
+	}
+	return interactiveCardText(value)
+}
+
+func interactiveCardText(value any) string {
+	parts := collectInteractiveCardText(value, nil)
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func collectInteractiveCardText(value any, parts []string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		return collectInteractiveCardObjectText(v, parts)
+	case []any:
+		if line, ok := interactiveInlineLine(v); ok {
+			return appendReadableText(parts, line)
+		}
+		for _, item := range v {
+			parts = collectInteractiveCardText(item, parts)
+		}
+	case string:
+		parts = appendReadableText(parts, v)
+	}
+	return parts
+}
+
+func collectInteractiveCardObjectText(value map[string]any, parts []string) []string {
+	if text := interactiveCardElementText(value); text != "" {
+		parts = appendReadableText(parts, text)
+	}
+	for _, key := range []string{"header", "title", "subtitle", "text", "body", "elements", "columns", "items", "children", "fields", "options", "placeholder"} {
+		child, ok := value[key]
+		if !ok {
+			continue
+		}
+		if _, isString := child.(string); isString {
+			continue
+		}
+		parts = collectInteractiveCardText(child, parts)
+	}
+	return parts
+}
+
+func interactiveInlineLine(items []any) (string, bool) {
+	var builder strings.Builder
+	foundElement := false
+	for _, item := range items {
+		elem, ok := item.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		tag := strings.TrimSpace(firstString(elem, "tag"))
+		if tag == "" {
+			return "", false
+		}
+		if !isInteractiveInlineTag(tag) {
+			return "", false
+		}
+		foundElement = true
+		text := interactiveCardElementText(elem)
+		if text == "" {
+			continue
+		}
+		builder.WriteString(text)
+	}
+	return strings.TrimSpace(builder.String()), foundElement
+}
+
+func isInteractiveInlineTag(tag string) bool {
+	switch strings.ToLower(strings.TrimSpace(tag)) {
+	case "text", "plain_text", "a", "link", "at", "mention", "img", "image", "hr", "divider", "br", "button":
+		return true
+	default:
+		return false
+	}
+}
+
+func interactiveCardElementText(elem map[string]any) string {
+	tag := strings.ToLower(strings.TrimSpace(firstString(elem, "tag")))
+	switch tag {
+	case "markdown", "md", "lark_md":
+		return firstRawString(elem, "content", "text")
+	case "plain_text", "text":
+		return firstRawString(elem, "content", "text")
+	case "a", "link":
+		text := interactiveTextValue(firstAny(elem, "text", "content", "title"))
+		href := firstString(elem, "href", "url")
+		switch {
+		case text != "" && href != "":
+			return "[" + text + "](" + href + ")"
+		case href != "":
+			return href
+		default:
+			return text
+		}
+	case "at", "mention":
+		name := firstString(elem, "user_name", "name", "text")
+		if name == "" {
+			name = firstString(elem, "user_id", "open_id", "id")
+		}
+		if name == "" {
+			return ""
+		}
+		if strings.HasPrefix(name, "@") {
+			return name
+		}
+		return "@" + name
+	case "img", "image":
+		return ""
+	case "hr", "divider":
+		return "---"
+	case "br":
+		return "\n"
+	}
+	if text := interactiveTextValue(firstAny(elem, "title", "subtitle", "text", "content", "name", "value", "alt", "placeholder")); text != "" {
+		return text
+	}
+	return ""
+}
+
+func interactiveTextValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if text := firstRawString(v, "content", "text"); strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+		return interactiveCardText(v)
+	case []any:
+		return interactiveCardText(v)
+	default:
+		return messageFieldString(v)
+	}
+}
+
+func firstAny(value map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if raw, ok := value[key]; ok {
+			return raw
+		}
+	}
+	return nil
 }
 
 func parsePostContent(content string) string {
@@ -526,9 +693,15 @@ func parseMessageImages(content string) []MessageImage {
 func collectImageKeys(value any, keys []string) []string {
 	switch v := value.(type) {
 	case map[string]any:
-		for _, keyName := range []string{"image_key", "imageKey"} {
+		for _, keyName := range []string{"image_key", "imageKey", "img_key", "imgKey"} {
 			if key, ok := v[keyName].(string); ok {
 				keys = appendImageKey(keys, key)
+			}
+		}
+		if userDSL := firstString(v, "user_dsl"); userDSL != "" {
+			var child any
+			if err := json.Unmarshal([]byte(userDSL), &child); err == nil {
+				keys = collectImageKeys(child, keys)
 			}
 		}
 		if tag := strings.ToLower(strings.TrimSpace(firstString(v, "tag"))); tag == "md" || tag == "markdown" || tag == "lark_md" {
@@ -546,7 +719,7 @@ func collectImageKeys(value any, keys []string) []string {
 			if _, ok := visited[childKey]; ok {
 				continue
 			}
-			if childKey == "image_key" || childKey == "imageKey" {
+			if childKey == "image_key" || childKey == "imageKey" || childKey == "img_key" || childKey == "imgKey" || childKey == "user_dsl" {
 				continue
 			}
 			remaining = append(remaining, childKey)
