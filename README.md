@@ -47,13 +47,15 @@ $EDITOR ~/.lark-acp-bridge/config.json
 ~/.lark-acp-bridge/config.json
 ```
 
-启动时会读取该文件；如果文件不存在，会自动创建一份默认配置并提示填写 `bots[].app_id`、`bots[].app_secret` 和 `bots[].workspace`。推荐使用一键创建流程注册飞书智能体并自动写入本地配置：
+启动时会读取该文件；如果文件不存在，会自动创建一份默认配置。首次启动时，如果没有可用 bot 配置，bridge 会先进入一键创建流程：终端输出飞书 / Lark 验证链接，用户打开链接并确认创建应用后，bridge 会直接拿到 App ID 和 App Secret，并自动写入 `default` bot 配置。
+
+也可以提前手动执行一键创建流程：
 
 ```bash
 lark-acp-bridge bots register default
 ```
 
-该命令会在终端输出一个飞书 / Lark 验证链接。用飞书或 Lark 打开链接并确认创建应用后，bridge 会直接在 Go 进程中拿到 App ID 和 App Secret，并把 App ID 写入 `config.json`、把 App Secret 加密写入本地 secret 文件。命令不会打印 App Secret。
+`bots register` 会把 App ID 写入 `config.json`、把 App Secret 加密写入本地 secret 文件。命令和首次启动注册流程都不会打印 App Secret。
 
 `bots` 是数组，一个配置项对应一个飞书智能体：
 

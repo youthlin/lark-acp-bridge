@@ -23,6 +23,20 @@ import (
 var version string
 var registerApp = registration.RegisterApp
 
+type botRegisterOptions struct {
+	ID           string
+	Workspace    string
+	SecretFile   string
+	BotOpenID    string
+	OwnerOpenIDs []string
+	Timeout      time.Duration
+	AppName      string
+	AppDesc      string
+	CreateOnly   bool
+	Domain       string
+	LarkDomain   string
+}
+
 func main() {
 	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logging.ProgramLevel(),
@@ -63,10 +77,15 @@ func run() error {
 	if !isDaemonChild() && mode == modeStop {
 		return runDaemon(mode, loaded.Path)
 	}
+	loaded.Config, err = ensureInitialBotRegistered(loaded.Path, loaded.Config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "注册 default bot 失败, err=%v\n", err)
+		return err
+	}
 	if loaded.Config.MissingBotConfig() {
 		msg := fmt.Sprintf(`
-未配置 app_id/app_secret, 请编辑配置文件: %s
-可访问 https://open.larkoffice.com/page/launcher 创建飞书智能体`, loaded.Path)
+未配置可用的 app_id/app_secret, 请编辑配置文件: %s
+可运行 lark-acp-bridge bots register default 创建并写入默认 bot`, loaded.Path)
 		fmt.Fprintln(os.Stderr, msg)
 		return errors.New(msg)
 	}
@@ -216,19 +235,98 @@ func runBotsRegister(configPath string, args []string) error {
 	if id == "" {
 		return fmt.Errorf("bot id 不能为空")
 	}
-	if *timeout <= 0 {
+	if err := registerAndAddBot(configPath, botRegisterOptions{
+		ID:           id,
+		Workspace:    *workspace,
+		SecretFile:   *secretFile,
+		BotOpenID:    *botOpenID,
+		OwnerOpenIDs: splitCSV(*ownerOpenIDs),
+		Timeout:      *timeout,
+		AppName:      *appName,
+		AppDesc:      *appDesc,
+		CreateOnly:   *createOnly,
+		Domain:       *domain,
+		LarkDomain:   *larkDomain,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("已注册并添加 bot %s，配置: %s\n", id, configPath)
+	return nil
+}
+
+func ensureInitialBotRegistered(configPath string, cfg config.Config) (config.Config, error) {
+	if !shouldRegisterDefaultBotOnStartup(cfg) {
+		return cfg, nil
+	}
+	fmt.Fprintln(os.Stdout, "当前未配置可用 bot，将先注册 default bot。")
+	if err := registerAndAddBot(configPath, botRegisterOptions{
+		ID:         "default",
+		Timeout:    10 * time.Minute,
+		CreateOnly: true,
+	}); err != nil {
+		return config.Config{}, err
+	}
+	updated, err := config.Load(configPath)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("重新读取配置: %w", err)
+	}
+	return updated, nil
+}
+
+func shouldRegisterDefaultBotOnStartup(cfg config.Config) bool {
+	if len(cfg.Bots) == 0 {
+		return true
+	}
+	if len(cfg.Bots) != 1 {
+		return false
+	}
+	bot := cfg.Bots[0]
+	if strings.TrimSpace(bot.ID) != "" && strings.TrimSpace(bot.ID) != "default" {
+		return false
+	}
+	if strings.TrimSpace(bot.AppID) != "" {
+		return false
+	}
+	if strings.TrimSpace(bot.BotOpenID) != "" || len(bot.OwnerOpenIDs) > 0 {
+		return false
+	}
+	if !defaultBotWorkspace(bot.Workspace) {
+		return false
+	}
+	secret := bot.AppSecret
+	secretPath := strings.TrimSpace(secret.Path)
+	return !secret.IsConfigured() ||
+		(strings.TrimSpace(secret.Source) == "file" && (secretPath == "" || secretPath == config.DefaultBotSecretPath("default")))
+}
+
+func defaultBotWorkspace(workspace string) bool {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || workspace == config.DefaultBotWorkspace("default") {
+		return true
+	}
+	expanded, err := config.ExpandPath(config.DefaultBotWorkspace("default"))
+	return err == nil && workspace == expanded
+}
+
+func registerAndAddBot(configPath string, options botRegisterOptions) error {
+	id := strings.TrimSpace(options.ID)
+	if id == "" {
+		return fmt.Errorf("bot id 不能为空")
+	}
+	timeout := options.Timeout
+	if timeout <= 0 {
 		return fmt.Errorf("--timeout 必须大于 0")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var lastStatus string
 	opts := &registration.Options{
 		Source:     "lark-acp-bridge",
-		Domain:     strings.TrimSpace(*domain),
-		LarkDomain: strings.TrimSpace(*larkDomain),
-		CreateOnly: *createOnly,
+		Domain:     strings.TrimSpace(options.Domain),
+		LarkDomain: strings.TrimSpace(options.LarkDomain),
+		CreateOnly: options.CreateOnly,
 		OnQRCode: func(info *registration.QRCodeInfo) {
 			fmt.Fprintln(os.Stdout, "请在飞书或 Lark 中打开以下链接完成应用创建：")
 			fmt.Fprintln(os.Stdout, strings.TrimSpace(info.URL))
@@ -249,10 +347,10 @@ func runBotsRegister(configPath string, args []string) error {
 			fmt.Fprintln(os.Stdout, statusLine)
 		},
 	}
-	if strings.TrimSpace(*appName) != "" || strings.TrimSpace(*appDesc) != "" {
+	if strings.TrimSpace(options.AppName) != "" || strings.TrimSpace(options.AppDesc) != "" {
 		opts.AppPreset = &registration.AppPreset{
-			Name: strings.TrimSpace(*appName),
-			Desc: strings.TrimSpace(*appDesc),
+			Name: strings.TrimSpace(options.AppName),
+			Desc: strings.TrimSpace(options.AppDesc),
 		}
 	}
 
@@ -271,7 +369,7 @@ func runBotsRegister(configPath string, args []string) error {
 		return fmt.Errorf("一键创建应用未返回 app_secret")
 	}
 
-	owners := splitCSV(*ownerOpenIDs)
+	owners := append([]string(nil), options.OwnerOpenIDs...)
 	if len(owners) == 0 && result.UserInfo != nil {
 		if openID := strings.TrimSpace(result.UserInfo.OpenID); openID != "" {
 			owners = []string{openID}
@@ -280,18 +378,17 @@ func runBotsRegister(configPath string, args []string) error {
 	bot := config.BotConfig{
 		ID:           id,
 		AppID:        result.ClientID,
-		Workspace:    *workspace,
-		AppSecret:    config.FileSecret(*secretFile),
-		BotOpenID:    *botOpenID,
+		Workspace:    options.Workspace,
+		AppSecret:    config.FileSecret(options.SecretFile),
+		BotOpenID:    options.BotOpenID,
 		OwnerOpenIDs: owners,
 	}
-	if strings.TrimSpace(*secretFile) == "" {
+	if strings.TrimSpace(options.SecretFile) == "" {
 		bot.AppSecret = config.FileSecret(config.DefaultBotSecretPath(id))
 	}
 	if err := config.AddBot(configPath, bot, result.ClientSecret); err != nil {
 		return err
 	}
-	fmt.Printf("已注册并添加 bot %s，配置: %s\n", id, configPath)
 	return nil
 }
 

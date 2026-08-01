@@ -203,6 +203,160 @@ func TestRunBotsRegisterStoresReturnedSecret(t *testing.T) {
 	}
 }
 
+func TestEnsureInitialBotRegisteredRegistersDefaultPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	loaded, err := config.LoadOrCreate(configPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreate() error = %v", err)
+	}
+
+	oldRegisterApp := registerApp
+	var gotOpts *registration.Options
+	registerApp = func(ctx context.Context, opts *registration.Options) (*registration.RegisterAppResult, error) {
+		gotOpts = opts
+		opts.OnQRCode(&registration.QRCodeInfo{URL: "https://example.test/startup-register", ExpireIn: 600})
+		return &registration.RegisterAppResult{
+			ClientID:     "cli_startup",
+			ClientSecret: "startup-secret",
+			UserInfo:     &registration.UserInfo{OpenID: "ou_startup_owner"},
+		}, nil
+	}
+	t.Cleanup(func() {
+		registerApp = oldRegisterApp
+	})
+
+	out := captureStdout(t, func() {
+		updated, err := ensureInitialBotRegistered(configPath, loaded.Config)
+		if err != nil {
+			t.Fatalf("ensureInitialBotRegistered() error = %v", err)
+		}
+		if updated.MissingBotConfig() {
+			t.Fatalf("updated config still missing bot config: %+v", updated.Bots)
+		}
+	})
+	if !strings.Contains(out, "当前未配置可用 bot") || !strings.Contains(out, "https://example.test/startup-register") {
+		t.Fatalf("stdout = %q, want startup register notice and URL", out)
+	}
+	if gotOpts == nil || !gotOpts.CreateOnly {
+		t.Fatalf("opts = %+v, want create-only registration", gotOpts)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(config) error = %v", err)
+	}
+	if len(cfg.Bots) != 1 {
+		t.Fatalf("bots = %+v, want one default bot", cfg.Bots)
+	}
+	bot := cfg.Bots[0]
+	if bot.ID != "default" || bot.AppID != "cli_startup" || len(bot.OwnerOpenIDs) != 1 || bot.OwnerOpenIDs[0] != "ou_startup_owner" {
+		t.Fatalf("bot = %+v, want registered default bot with startup owner", bot)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	if strings.Contains(string(raw), "startup-secret") {
+		t.Fatalf("config leaked startup secret:\n%s", raw)
+	}
+	secretPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.appsecret")
+	secret, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("ReadFile(secret) error = %v", err)
+	}
+	if strings.Contains(string(secret), "startup-secret") {
+		t.Fatalf("secret file leaked plaintext: %q", secret)
+	}
+}
+
+func TestShouldRegisterDefaultBotOnStartup(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{
+			name: "empty bots",
+			cfg:  config.Config{},
+			want: true,
+		},
+		{
+			name: "default placeholder",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:        "default",
+				Workspace: config.DefaultBotWorkspace("default"),
+				AppSecret: config.FileSecret(config.DefaultBotSecretPath("default")),
+			}}},
+			want: true,
+		},
+		{
+			name: "configured default",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:        "default",
+				AppID:     "cli_xxx",
+				Workspace: config.DefaultBotWorkspace("default"),
+				AppSecret: config.FileSecret(config.DefaultBotSecretPath("default")),
+			}}},
+			want: false,
+		},
+		{
+			name: "custom partial bot",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:        "custom",
+				Workspace: config.DefaultBotWorkspace("custom"),
+				AppSecret: config.FileSecret(config.DefaultBotSecretPath("custom")),
+			}}},
+			want: false,
+		},
+		{
+			name: "multiple bots",
+			cfg: config.Config{Bots: []config.BotConfig{
+				{ID: "default", Workspace: config.DefaultBotWorkspace("default")},
+				{ID: "other", Workspace: config.DefaultBotWorkspace("other")},
+			}},
+			want: false,
+		},
+		{
+			name: "default custom secret path",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:        "default",
+				Workspace: config.DefaultBotWorkspace("default"),
+				AppSecret: config.FileSecret("/tmp/custom.appsecret"),
+			}}},
+			want: false,
+		},
+		{
+			name: "default custom workspace",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:        "default",
+				Workspace: "/tmp/custom-workspace",
+				AppSecret: config.FileSecret(config.DefaultBotSecretPath("default")),
+			}}},
+			want: false,
+		},
+		{
+			name: "default configured owner",
+			cfg: config.Config{Bots: []config.BotConfig{{
+				ID:           "default",
+				Workspace:    config.DefaultBotWorkspace("default"),
+				AppSecret:    config.FileSecret(config.DefaultBotSecretPath("default")),
+				OwnerOpenIDs: []string{"ou_owner"},
+			}}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRegisterDefaultBotOnStartup(tt.cfg); got != tt.want {
+				t.Fatalf("shouldRegisterDefaultBotOnStartup() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunBotsRegisterRequiresPositiveTimeout(t *testing.T) {
 	oldRegisterApp := registerApp
 	registerApp = func(context.Context, *registration.Options) (*registration.RegisterAppResult, error) {
