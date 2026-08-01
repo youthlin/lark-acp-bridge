@@ -59,13 +59,13 @@ func run() error {
 	}
 
 	if args := flag.Args(); len(args) > 0 && args[0] == "bots" {
-		return runBotsCommand(configPath, args[1:])
+		return reportCommandError(runBotsCommand(configPath, args[1:]))
 	}
 	if args := flag.Args(); len(args) > 0 && args[0] == "service" {
-		return runServiceCommand(configPath, args[1:])
+		return reportCommandError(runServiceCommand(configPath, args[1:]))
 	}
 	if args := flag.Args(); len(args) > 0 && isBotsShorthand(args[0]) {
-		return runBotsCommand(configPath, args)
+		return reportCommandError(runBotsCommand(configPath, args))
 	}
 
 	loaded, err := config.LoadOrCreate(configPath)
@@ -107,6 +107,13 @@ func run() error {
 		return runDaemon(mode, loaded.Path)
 	}
 	return runForeground(loaded.Config, loaded.Path)
+}
+
+func reportCommandError(err error) error {
+	if err != nil && !errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	return err
 }
 
 func runBotsCommand(configPath string, args []string) error {

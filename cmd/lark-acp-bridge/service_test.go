@@ -15,11 +15,13 @@ func TestRenderSystemdUserService(t *testing.T) {
 		"/opt/lark acp/lark-acp-bridge",
 		"/home/user/.lark-acp-bridge/config.json",
 		"/home/user/bridge work",
+		"/opt/agent/bin:/usr/bin",
 	)
 	for _, want := range []string{
 		"[Unit]",
 		"Description=Lark ACP Bridge",
 		`WorkingDirectory="/home/user/bridge work"`,
+		"Environment=PATH=/opt/agent/bin:/usr/bin",
 		`ExecStart="/opt/lark acp/lark-acp-bridge" --config /home/user/.lark-acp-bridge/config.json run`,
 		"Restart=on-failure",
 		"WantedBy=default.target",
@@ -35,6 +37,7 @@ func TestRenderSystemdUserServiceEscapesPercent(t *testing.T) {
 		"/tmp/lark-acp-bridge",
 		"/tmp/%i/config.json",
 		"/tmp/work",
+		"/usr/bin",
 	)
 	if !strings.Contains(got, "/tmp/%%i/config.json") {
 		t.Fatalf("systemd service =\n%s\nwant escaped percent", got)
@@ -47,6 +50,7 @@ func TestRenderLaunchdAgent(t *testing.T) {
 		"/Users/me/.lark-acp-bridge/config.json",
 		"/Users/me/work & test",
 		"/Users/me/.lark-acp-bridge/lark-acp-bridge.log",
+		"/opt/agent/bin:/usr/bin",
 	)
 	for _, want := range []string{
 		"<key>Label</key>",
@@ -58,6 +62,9 @@ func TestRenderLaunchdAgent(t *testing.T) {
 		"<string>run</string>",
 		"<key>WorkingDirectory</key>",
 		"<string>/Users/me/work &amp; test</string>",
+		"<key>EnvironmentVariables</key>",
+		"<key>PATH</key>",
+		"<string>/opt/agent/bin:/usr/bin</string>",
 		"<key>RunAtLoad</key>",
 		"<key>KeepAlive</key>",
 		"<key>StandardOutPath</key>",
@@ -93,6 +100,16 @@ func TestInstallServiceWritesLinuxUnit(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("PATH", strings.Join([]string{
+		filepath.Join(home, ".trae", "tmp", "arg0"),
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".nvm", "versions", "node", "v24.13.0", "bin"),
+		filepath.Join(home, "go", "bin"),
+		filepath.Join(tmp, "go-build123", "b001", "exe"),
+		"/usr/local/bin",
+		"/usr/bin",
+		filepath.Join(home, ".local", "bin"),
+	}, string(os.PathListSeparator)))
 	binary := filepath.Join(tmp, "lark-acp-bridge")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(binary) error = %v", err)
@@ -133,6 +150,19 @@ func TestInstallServiceWritesLinuxUnit(t *testing.T) {
 	if !strings.Contains(got, "ExecStart="+binary+" --config "+configPath+" run") {
 		t.Fatalf("unit =\n%s\nwant ExecStart", got)
 	}
+	wantPath := strings.Join([]string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".nvm", "versions", "node", "v24.13.0", "bin"),
+		filepath.Join(home, "go", "bin"),
+		"/usr/local/bin",
+		"/usr/bin",
+	}, string(os.PathListSeparator))
+	if strings.Contains(got, ".trae/tmp") || strings.Contains(got, "go-build123") {
+		t.Fatalf("unit =\n%s\nwant transient PATH entries removed", got)
+	}
+	if !strings.Contains(got, "Environment=PATH="+wantPath) {
+		t.Fatalf("unit =\n%s\nwant PATH environment %q", got, wantPath)
+	}
 	if !strings.Contains(out, "systemctl --user enable --now "+serviceUnitName) ||
 		!strings.Contains(out, "已更新配置 restart_command: systemctl --user restart "+serviceUnitName) {
 		t.Fatalf("stdout = %q, want systemd next steps", out)
@@ -153,6 +183,11 @@ func TestInstallServiceWritesLaunchdPlist(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("PATH", strings.Join([]string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".nvm", "versions", "node", "v24.13.0", "bin"),
+		"/usr/bin",
+	}, string(os.PathListSeparator)))
 	binary := filepath.Join(tmp, "lark-acp-bridge")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(binary) error = %v", err)
@@ -194,6 +229,11 @@ func TestInstallServiceWritesLaunchdPlist(t *testing.T) {
 		!strings.Contains(got, "<string>"+filepath.Join(filepath.Dir(configPath), "lark-acp-bridge.log")+"</string>") {
 		t.Fatalf("plist =\n%s\nwant binary/config/log", got)
 	}
+	if !strings.Contains(got, "<key>EnvironmentVariables</key>") ||
+		!strings.Contains(got, "<key>PATH</key>") ||
+		!strings.Contains(got, "<string>"+os.Getenv("PATH")+"</string>") {
+		t.Fatalf("plist =\n%s\nwant PATH environment", got)
+	}
 	if !strings.Contains(out, "launchctl bootstrap gui/") ||
 		!strings.Contains(out, "已更新配置 restart_command: launchctl kickstart -k gui/") {
 		t.Fatalf("stdout = %q, want launchd next steps", out)
@@ -204,6 +244,31 @@ func TestInstallServiceWritesLaunchdPlist(t *testing.T) {
 	}
 	if want := launchdRestartCommand(os.Getuid()); !slices.Equal(cfg.RestartCommand, want) {
 		t.Fatalf("RestartCommand = %#v, want %#v", cfg.RestartCommand, want)
+	}
+}
+
+func TestNormalizeServicePathDropsTransientAndDuplicates(t *testing.T) {
+	path := strings.Join([]string{
+		"/tmp/.trae/tmp/arg0",
+		"/home/me/.local/bin",
+		"/tmp/go-build123/b001/exe",
+		"/usr/bin",
+		"/home/me/.local/bin",
+		"",
+	}, string(os.PathListSeparator))
+	want := strings.Join([]string{"/home/me/.local/bin", "/usr/bin"}, string(os.PathListSeparator))
+	if got := normalizeServicePath(path); got != want {
+		t.Fatalf("normalizeServicePath() = %q, want %q", got, want)
+	}
+}
+
+func TestServicePathForInstallFallsBackToPlatformDefault(t *testing.T) {
+	t.Setenv("PATH", "/tmp/.trae/tmp/arg0:/tmp/go-build123/b001/exe")
+	if got, want := servicePathForInstall("linux", ""), defaultServicePath("linux"); got != want {
+		t.Fatalf("servicePathForInstall(linux) = %q, want %q", got, want)
+	}
+	if got, want := servicePathForInstall("darwin", ""), defaultServicePath("darwin"); got != want {
+		t.Fatalf("servicePathForInstall(darwin) = %q, want %q", got, want)
 	}
 }
 

@@ -26,6 +26,7 @@ type serviceInstallOptions struct {
 	ConfigPath string
 	BinaryPath string
 	WorkingDir string
+	Path       string
 }
 
 type serviceInstallResult struct {
@@ -50,17 +51,19 @@ func runServiceInstall(configPath string, args []string) error {
 	fs := flagSet("service install")
 	binaryPath := fs.String("binary", "", "bridge 可执行文件路径（默认：当前可执行文件）")
 	workingDir := fs.String("working-dir", "", "服务工作目录（默认：用户主目录）")
+	servicePath := fs.String("path", "", "服务进程 PATH（默认：当前 PATH 去除临时目录后的稳定部分）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: lark-acp-bridge service install [--binary <path>] [--working-dir <dir>]")
+		return fmt.Errorf("用法: lark-acp-bridge service install [--binary <path>] [--working-dir <dir>] [--path <PATH>]")
 	}
 	options := serviceInstallOptions{
 		GOOS:       runtime.GOOS,
 		ConfigPath: configPath,
 		BinaryPath: *binaryPath,
 		WorkingDir: *workingDir,
+		Path:       *servicePath,
 	}
 	return installService(options)
 }
@@ -99,6 +102,7 @@ func installService(options serviceInstallOptions) error {
 	if err != nil {
 		return err
 	}
+	servicePath := servicePathForInstall(goos, options.Path)
 	target, err := serviceTargetPath(goos)
 	if err != nil {
 		return err
@@ -107,10 +111,10 @@ func installService(options serviceInstallOptions) error {
 	var result serviceInstallResult
 	switch goos {
 	case "linux":
-		content = renderSystemdUserService(binaryPath, configPath, workingDir)
+		content = renderSystemdUserService(binaryPath, configPath, workingDir, servicePath)
 		result.RestartCommand = systemdRestartCommand()
 	case "darwin":
-		content = renderLaunchdAgent(binaryPath, configPath, workingDir, serviceLogFile(configPath))
+		content = renderLaunchdAgent(binaryPath, configPath, workingDir, serviceLogFile(configPath), servicePath)
 		result.RestartCommand = launchdRestartCommand(os.Getuid())
 	default:
 		return unsupportedServicePlatform(goos)
@@ -261,8 +265,60 @@ func looksLikeGoRunExecutable(path string) bool {
 	return strings.Contains(path, "/go-build") && strings.Contains(path, "/exe/")
 }
 
-func renderSystemdUserService(binaryPath, configPath, workingDir string) string {
+func servicePathForInstall(goos, path string) string {
+	if strings.TrimSpace(path) == "" {
+		path = os.Getenv("PATH")
+	}
+	if normalized := normalizeServicePath(path); normalized != "" {
+		return normalized
+	}
+	return defaultServicePath(goos)
+}
+
+func normalizeServicePath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	parts := filepath.SplitList(path)
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || transientServicePathPart(part) {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return strings.Join(out, string(os.PathListSeparator))
+}
+
+func transientServicePathPart(path string) bool {
+	path = filepath.ToSlash(path)
+	return strings.Contains(path, "/.trae/tmp/") ||
+		strings.Contains(path, "/go-build")
+}
+
+func defaultServicePath(goos string) string {
+	switch goos {
+	case "linux":
+		return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	case "darwin":
+		return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	default:
+		return ""
+	}
+}
+
+func renderSystemdUserService(binaryPath, configPath, workingDir, servicePath string) string {
 	execStart := systemdCommand([]string{binaryPath, "--config", configPath, "run"})
+	var environment string
+	if strings.TrimSpace(servicePath) != "" {
+		environment = fmt.Sprintf("Environment=%s\n", systemdQuote("PATH="+servicePath))
+	}
 	return fmt.Sprintf(`[Unit]
 Description=Lark ACP Bridge
 After=network.target
@@ -270,13 +326,13 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStart=%s
+%sExecStart=%s
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=default.target
-`, systemdQuote(workingDir), execStart)
+`, systemdQuote(workingDir), environment, execStart)
 }
 
 func systemdCommand(args []string) string {
@@ -320,7 +376,7 @@ func systemdQuote(value string) string {
 	return b.String()
 }
 
-func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath string) string {
+func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath, servicePath string) string {
 	args := []string{binaryPath, "--config", configPath, "run"}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
@@ -344,7 +400,18 @@ func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath string) stri
   <string>`)
 	b.WriteString(xmlText(workingDir))
 	b.WriteString(`</string>
-  <key>RunAtLoad</key>
+`)
+	if strings.TrimSpace(servicePath) != "" {
+		b.WriteString(`  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>`)
+		b.WriteString(xmlText(servicePath))
+		b.WriteString(`</string>
+  </dict>
+`)
+	}
+	b.WriteString(`  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>

@@ -246,7 +246,7 @@ launchctl enable gui/$(id -u)/com.youthlin.lark-acp-bridge
 launchctl kickstart -k gui/$(id -u)/com.youthlin.lark-acp-bridge
 ```
 
-`service install` 会写入服务文件，并同步更新配置文件里的 `restart_command`，让飞书 `/restart` 交给对应的 systemd / launchd 服务管理器处理。它不会主动启动或停止真实服务；服务定义使用 `lark-acp-bridge --config <path> run` 前台模式。可用 `--config` 指定配置文件，用 `--binary` 指定可执行文件路径，用 `--working-dir` 指定服务工作目录。卸载前建议先停用服务，再删除服务文件：
+`service install` 会写入服务文件，并同步更新配置文件里的 `restart_command`，让飞书 `/restart` 交给对应的 systemd / launchd 服务管理器处理。它不会主动启动或停止真实服务；服务定义使用 `lark-acp-bridge --config <path> run` 前台模式。安装时会把当前 `PATH` 写入服务环境，方便服务进程找到 `agent_list[].command` 里配置的 `traex`、`aiden`、`codex-acp` 等命令，并自动去掉 `.trae/tmp` 和 `go-build` 这类临时目录。可用 `--config` 指定配置文件，用 `--binary` 指定可执行文件路径，用 `--working-dir` 指定服务工作目录，用 `--path` 显式覆盖服务进程的 `PATH`。卸载前建议先停用服务，再删除服务文件：
 
 ```bash
 systemctl --user disable --now lark-acp-bridge.service
