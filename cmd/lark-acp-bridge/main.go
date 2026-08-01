@@ -12,13 +12,16 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 	"github.com/youthlin/lark-acp-bridge/internal/bridge"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 var version string
+var registerApp = registration.RegisterApp
 
 func main() {
 	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -90,13 +93,15 @@ func runBotsCommand(configPath string, args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|remove>")
+		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|register|remove>")
 	}
 	switch args[0] {
 	case "list":
 		return runBotsList(path, args[1:])
 	case "add":
 		return runBotsAdd(path, args[1:])
+	case "register":
+		return runBotsRegister(path, args[1:])
 	case "remove", "rm":
 		return runBotsRemove(path, args[1:])
 	default:
@@ -106,7 +111,7 @@ func runBotsCommand(configPath string, args []string) error {
 
 func isBotsShorthand(command string) bool {
 	switch command {
-	case "list", "add", "remove", "rm":
+	case "list", "add", "register", "remove", "rm":
 		return true
 	default:
 		return false
@@ -184,6 +189,131 @@ func runBotsAdd(configPath string, args []string) error {
 	return nil
 }
 
+func runBotsRegister(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots register", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	workspace := fs.String("workspace", "", "bot workspace 路径（默认：$HOME/.lark-acp-bridge/bots/<id>）")
+	secretFile := fs.String("secret-file", "", "app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
+	botOpenID := fs.String("bot-open-id", "", "bot 自己的 open_id")
+	ownerOpenIDs := fs.String("owner-open-ids", "", "逗号分隔的 owner open_id 列表（默认使用扫码用户 open_id）")
+	timeout := fs.Duration("timeout", 10*time.Minute, "等待用户完成一键创建的超时时间")
+	appName := fs.String("app-name", "", "预填应用名称（用户可在创建页修改）")
+	appDesc := fs.String("app-desc", "", "预填应用描述（用户可在创建页修改）")
+	createOnly := fs.Bool("create-only", true, "只允许创建新应用")
+	domain := fs.String("domain", "", "飞书认证域名（默认由 SDK 决定）")
+	larkDomain := fs.String("lark-domain", "", "Lark 认证域名（默认由 SDK 决定）")
+	flagArgs, positional, err := splitBotsRegisterArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return fmt.Errorf("用法: lark-acp-bridge bots register <id>")
+	}
+	id := strings.TrimSpace(positional[0])
+	if id == "" {
+		return fmt.Errorf("bot id 不能为空")
+	}
+	if *timeout <= 0 {
+		return fmt.Errorf("--timeout 必须大于 0")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	var lastStatus string
+	opts := &registration.Options{
+		Source:     "lark-acp-bridge",
+		Domain:     strings.TrimSpace(*domain),
+		LarkDomain: strings.TrimSpace(*larkDomain),
+		CreateOnly: *createOnly,
+		OnQRCode: func(info *registration.QRCodeInfo) {
+			fmt.Fprintln(os.Stdout, "请在飞书或 Lark 中打开以下链接完成应用创建：")
+			fmt.Fprintln(os.Stdout, strings.TrimSpace(info.URL))
+			if info.ExpireIn > 0 {
+				fmt.Fprintf(os.Stdout, "链接有效期：%d 秒\n", info.ExpireIn)
+			}
+		},
+		OnStatusChange: func(info *registration.StatusChangeInfo) {
+			status := strings.TrimSpace(info.Status)
+			if status == "" {
+				return
+			}
+			statusLine := registrationStatusLine(info)
+			if statusLine == "" || statusLine == lastStatus {
+				return
+			}
+			lastStatus = statusLine
+			fmt.Fprintln(os.Stdout, statusLine)
+		},
+	}
+	if strings.TrimSpace(*appName) != "" || strings.TrimSpace(*appDesc) != "" {
+		opts.AppPreset = &registration.AppPreset{
+			Name: strings.TrimSpace(*appName),
+			Desc: strings.TrimSpace(*appDesc),
+		}
+	}
+
+	result, err := registerApp(ctx, opts)
+	if err != nil {
+		var regErr *registration.RegisterAppError
+		if errors.As(err, &regErr) {
+			return fmt.Errorf("一键创建应用失败: code=%s, description=%s", regErr.Code, regErr.Description)
+		}
+		return fmt.Errorf("一键创建应用失败: %w", err)
+	}
+	if strings.TrimSpace(result.ClientID) == "" {
+		return fmt.Errorf("一键创建应用未返回 app_id")
+	}
+	if strings.TrimSpace(result.ClientSecret) == "" {
+		return fmt.Errorf("一键创建应用未返回 app_secret")
+	}
+
+	owners := splitCSV(*ownerOpenIDs)
+	if len(owners) == 0 && result.UserInfo != nil {
+		if openID := strings.TrimSpace(result.UserInfo.OpenID); openID != "" {
+			owners = []string{openID}
+		}
+	}
+	bot := config.BotConfig{
+		ID:           id,
+		AppID:        result.ClientID,
+		Workspace:    *workspace,
+		AppSecret:    config.FileSecret(*secretFile),
+		BotOpenID:    *botOpenID,
+		OwnerOpenIDs: owners,
+	}
+	if strings.TrimSpace(*secretFile) == "" {
+		bot.AppSecret = config.FileSecret(config.DefaultBotSecretPath(id))
+	}
+	if err := config.AddBot(configPath, bot, result.ClientSecret); err != nil {
+		return err
+	}
+	fmt.Printf("已注册并添加 bot %s，配置: %s\n", id, configPath)
+	return nil
+}
+
+func registrationStatusLine(info *registration.StatusChangeInfo) string {
+	if info == nil {
+		return ""
+	}
+	switch strings.TrimSpace(info.Status) {
+	case registration.StatusPolling:
+		return "等待用户确认应用创建..."
+	case registration.StatusSlowDown:
+		if info.Interval > 0 {
+			return fmt.Sprintf("服务端要求降低轮询频率，下次轮询间隔：%d 秒", info.Interval)
+		}
+		return "服务端要求降低轮询频率"
+	case registration.StatusDomainSwitched:
+		return "已切换到 Lark 域名继续注册..."
+	default:
+		return "注册状态：" + strings.TrimSpace(info.Status)
+	}
+}
+
 func splitBotsAddArgs(args []string) ([]string, []string, error) {
 	valueFlags := map[string]struct{}{
 		"-workspace":       {},
@@ -229,6 +359,87 @@ func splitBotsAddArgs(args []string) ([]string, []string, error) {
 		positional = append(positional, arg)
 	}
 	return flagArgs, positional, nil
+}
+
+func splitBotsRegisterArgs(args []string) ([]string, []string, error) {
+	valueFlags := map[string]struct{}{
+		"-workspace":       {},
+		"--workspace":      {},
+		"-secret-file":     {},
+		"--secret-file":    {},
+		"-bot-open-id":     {},
+		"--bot-open-id":    {},
+		"-owner-open-ids":  {},
+		"--owner-open-ids": {},
+		"-timeout":         {},
+		"--timeout":        {},
+		"-app-name":        {},
+		"--app-name":       {},
+		"-app-desc":        {},
+		"--app-desc":       {},
+		"-domain":          {},
+		"--domain":         {},
+		"-lark-domain":     {},
+		"--lark-domain":    {},
+	}
+	boolFlags := map[string]struct{}{
+		"-create-only":  {},
+		"--create-only": {},
+	}
+	prefixes := []string{
+		"-workspace=",
+		"--workspace=",
+		"-secret-file=",
+		"--secret-file=",
+		"-bot-open-id=",
+		"--bot-open-id=",
+		"-owner-open-ids=",
+		"--owner-open-ids=",
+		"-timeout=",
+		"--timeout=",
+		"-app-name=",
+		"--app-name=",
+		"-app-desc=",
+		"--app-desc=",
+		"-create-only=",
+		"--create-only=",
+		"-domain=",
+		"--domain=",
+		"-lark-domain=",
+		"--lark-domain=",
+	}
+	var flagArgs []string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if _, ok := boolFlags[arg]; ok {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		if hasAnyPrefix(arg, prefixes) {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		if _, ok := valueFlags[arg]; ok {
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
+			}
+			flagArgs = append(flagArgs, arg, args[i+1])
+			i++
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return flagArgs, positional, nil
+}
+
+func hasAnyPrefix(value string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func runBotsRemove(configPath string, args []string) error {

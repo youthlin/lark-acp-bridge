@@ -47,11 +47,13 @@ $EDITOR ~/.lark-acp-bridge/config.json
 ~/.lark-acp-bridge/config.json
 ```
 
-启动时会读取该文件；如果文件不存在，会自动创建一份默认配置并提示填写 `bots[].app_id`、`bots[].app_secret` 和 `bots[].workspace`。可以访问飞书开放平台入口创建飞书智能体：
+启动时会读取该文件；如果文件不存在，会自动创建一份默认配置并提示填写 `bots[].app_id`、`bots[].app_secret` 和 `bots[].workspace`。推荐使用一键创建流程注册飞书智能体并自动写入本地配置：
 
-```text
-https://open.larkoffice.com/page/launcher
+```bash
+lark-acp-bridge bots register default
 ```
+
+该命令会在终端输出一个飞书 / Lark 验证链接。用飞书或 Lark 打开链接并确认创建应用后，bridge 会直接在 Go 进程中拿到 App ID 和 App Secret，并把 App ID 写入 `config.json`、把 App Secret 加密写入本地 secret 文件。命令不会打印 App Secret。
 
 `bots` 是数组，一个配置项对应一个飞书智能体：
 
@@ -76,12 +78,13 @@ https://open.larkoffice.com/page/launcher
 推荐用命令行维护 bot 配置和 secret 文件，避免手动在多个文件之间同步：
 
 ```bash
+lark-acp-bridge bots register default
 printf '%s\n' '<app_secret>' | lark-acp-bridge bots add default cli_xxx --stdin-secret
 lark-acp-bridge bots list
 lark-acp-bridge bots remove default
 ```
 
-也支持省略 `bots` 的简写，例如 `lark-acp-bridge add default cli_xxx --stdin-secret`。`bots add` 会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。启动时只支持加密 file secret；如果 `.appsecret` 不是加密格式，或者缺少对应 `.key`，bridge 会拒绝启动。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段。
+也支持省略 `bots` 的简写，例如 `lark-acp-bridge register default` 或 `lark-acp-bridge add default cli_xxx --stdin-secret`。`bots register` 和 `bots add` 都会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。启动时只支持加密 file secret；如果 `.appsecret` 不是加密格式，或者缺少对应 `.key`，bridge 会拒绝启动。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段；`bots register` 还支持 `--timeout`、`--app-name` 和 `--app-desc` 等一键创建参数。`bots add` 适合导入已经存在的应用凭据，`bots register` 适合新建应用。
 
 `workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片和执行 `/restart`。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准，也不能通过飞书命令重启服务。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
