@@ -26,6 +26,21 @@ func testConfigWithAgent(name string, agent AgentConfig) Config {
 	}
 }
 
+func testEncryptedBotConfig(t *testing.T, id, appID, secret string) Config {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := AddBot(configPath, BotConfig{ID: id, AppID: appID}, secret); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(config) error = %v", err)
+	}
+	return cfg
+}
+
 func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -112,7 +127,10 @@ func TestLoadExpandsHomePath(t *testing.T) {
     {
       "id": "main",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "~/bridge/main"
     }
   ],
@@ -150,7 +168,7 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
-func TestLoadSupportsFileSecretReference(t *testing.T) {
+func TestResolveSecretsRejectsPlaintextFileSecret(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
@@ -198,11 +216,9 @@ func TestLoadSupportsFileSecretReference(t *testing.T) {
 	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "" {
 		t.Fatalf("RuntimeValue before ResolveSecrets = %q, want empty", got)
 	}
-	if err := cfg.ResolveSecrets(); err != nil {
-		t.Fatalf("ResolveSecrets() error = %v", err)
-	}
-	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "resolved-secret" {
-		t.Fatalf("RuntimeValue = %q, want resolved-secret", got)
+	err = cfg.ResolveSecrets()
+	if err == nil || !strings.Contains(err.Error(), "secret 文件必须是加密格式") {
+		t.Fatalf("ResolveSecrets() error = %v, want encrypted format rejection", err)
 	}
 }
 
@@ -224,50 +240,6 @@ func TestLoadSupportsEncryptedFileSecretReference(t *testing.T) {
 	}
 	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "super-secret" {
 		t.Fatalf("RuntimeValue = %q, want super-secret", got)
-	}
-}
-
-func TestLoadSupportsEnvSecretReference(t *testing.T) {
-	tmp := t.TempDir()
-	home := filepath.Join(tmp, "home")
-	t.Setenv("HOME", home)
-	t.Setenv("TEST_LARK_APP_SECRET", "env-secret")
-
-	configPath := filepath.Join(tmp, "config.json")
-	data := []byte(`{
-  "bots": [
-    {
-      "id": "main",
-      "app_id": "cli_xxx",
-      "app_secret": {
-        "source": "env",
-        "name": "TEST_LARK_APP_SECRET"
-      },
-      "workspace": "$HOME/.lark-acp-bridge/bots/main"
-    }
-  ],
-  "agent_list": [
-    {
-      "name": "traex",
-      "command": "traex",
-      "args": ["acp", "serve"],
-      "default_cwd": "$HOME"
-    }
-  ]
-}`)
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
-		t.Fatalf("WriteFile(config) error = %v", err)
-	}
-
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if err := cfg.ResolveSecrets(); err != nil {
-		t.Fatalf("ResolveSecrets() error = %v", err)
-	}
-	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "env-secret" {
-		t.Fatalf("RuntimeValue = %q, want env-secret", got)
 	}
 }
 
@@ -375,76 +347,6 @@ func TestAddBotReplacesEmptyDefaultPlaceholder(t *testing.T) {
 	}
 }
 
-func TestMigrateBotSecretEncryptsLegacyPlainSecret(t *testing.T) {
-	tmp := t.TempDir()
-	home := filepath.Join(tmp, "home")
-	t.Setenv("HOME", home)
-	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
-	cfg := Default()
-	cfg.Bots = []BotConfig{{
-		ID:           "default",
-		AppID:        "cli_xxx",
-		AppSecret:    PlainSecret("super-secret"),
-		Workspace:    "$HOME/.lark-acp-bridge/bots/default",
-		BotOpenID:    "ou_bot",
-		OwnerOpenIDs: []string{"ou_owner"},
-	}}
-	if err := Write(configPath, cfg); err != nil {
-		t.Fatalf("Write(config) error = %v", err)
-	}
-
-	secretRef, err := MigrateBotSecret(configPath, "default", "")
-	if err != nil {
-		t.Fatalf("MigrateBotSecret() error = %v", err)
-	}
-	if secretRef != DefaultBotSecretPath("default") {
-		t.Fatalf("secretRef = %q, want default path", secretRef)
-	}
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("ReadFile(config) error = %v", err)
-	}
-	if strings.Contains(string(raw), "super-secret") {
-		t.Fatalf("config leaked secret:\n%s", raw)
-	}
-	secretPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.appsecret")
-	secretData, err := os.ReadFile(secretPath)
-	if err != nil {
-		t.Fatalf("ReadFile(secret) error = %v", err)
-	}
-	if strings.Contains(string(secretData), "super-secret") {
-		t.Fatalf("secret file leaked plaintext: %q", secretData)
-	}
-	if !strings.HasPrefix(strings.TrimSpace(string(secretData)), encryptedSecretPrefix) {
-		t.Fatalf("secret file = %q, want encrypted secret", secretData)
-	}
-	keyPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.key")
-	if _, err := os.Stat(keyPath); err != nil {
-		t.Fatalf("Stat(key) error = %v", err)
-	}
-
-	migrated, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load(config) error = %v", err)
-	}
-	if len(migrated.Bots) != 1 {
-		t.Fatalf("len(Bots) = %d, want 1", len(migrated.Bots))
-	}
-	bot := migrated.Bots[0]
-	if bot.BotOpenID != "ou_bot" || len(bot.OwnerOpenIDs) != 1 || bot.OwnerOpenIDs[0] != "ou_owner" {
-		t.Fatalf("bot metadata = %+v, want preserved bot_open_id and owner_open_ids", bot)
-	}
-	if bot.AppSecret.Source != "file" || bot.AppSecret.Path != DefaultBotSecretPath("default") {
-		t.Fatalf("AppSecret = %+v, want default file ref", bot.AppSecret)
-	}
-	if err := migrated.ResolveSecrets(); err != nil {
-		t.Fatalf("ResolveSecrets() error = %v", err)
-	}
-	if got := migrated.Bots[0].AppSecret.RuntimeValue(); got != "super-secret" {
-		t.Fatalf("RuntimeValue = %q, want super-secret", got)
-	}
-}
-
 func TestRemoveBotUpdatesConfig(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -481,7 +383,10 @@ func TestLoadMessageReaction(t *testing.T) {
     {
       "id": "default",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
     }
   ],
@@ -516,7 +421,10 @@ func TestLoadAgentListPreservesConfiguredOrder(t *testing.T) {
     {
       "id": "main",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/main"
     }
   ],
@@ -566,7 +474,10 @@ func TestLoadTrimsBotID(t *testing.T) {
     {
       "id": " main ",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/main"
     }
   ],
@@ -602,7 +513,10 @@ func TestLoadNormalizesBotOwnerOpenIDs(t *testing.T) {
     {
       "id": "main",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/main",
       "owner_open_ids": [" ou_owner ", "", "ou_owner", "ou_backup"]
     }
@@ -646,7 +560,10 @@ func TestLoadNormalizesBotOpenID(t *testing.T) {
     {
       "id": "main",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/main",
       "bot_open_id": " ou_bot "
     }
@@ -682,13 +599,19 @@ func TestLoadRejectsDuplicateBotID(t *testing.T) {
     {
       "id": "same",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/a"
     },
     {
       "id": "same",
       "app_id": "cli_b",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/b"
     }
   ],
@@ -720,13 +643,19 @@ func TestLoadRejectsDuplicateBotIDAfterTrim(t *testing.T) {
     {
       "id": " same ",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/a"
     },
     {
       "id": "same",
       "app_id": "cli_b",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/b"
     }
   ],
@@ -759,13 +688,19 @@ func TestLoadRejectsDuplicateBotWorkspace(t *testing.T) {
     {
       "id": "bot-a",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/shared"
     },
     {
       "id": "bot-b",
       "app_id": "cli_b",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "~/.lark-acp-bridge/bots/shared"
     }
   ],
@@ -798,7 +733,10 @@ func TestLoadTrimsAgentName(t *testing.T) {
     {
       "id": "default",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
@@ -834,7 +772,10 @@ func TestLoadTrimsAgentListName(t *testing.T) {
     {
       "id": "default",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
@@ -870,7 +811,10 @@ func TestLoadRejectsDuplicateAgentListNameAfterTrim(t *testing.T) {
     {
       "id": "default",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
@@ -994,7 +938,10 @@ func TestLoadNormalizesRestartCommand(t *testing.T) {
     {
       "id": "default",
       "app_id": "cli_a",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
     }
   ],
@@ -1027,7 +974,10 @@ func TestWriteResolvedBotFieldsFillsEmptyFields(t *testing.T) {
     {
       "id": "bot-a",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default"
     }
   ],
@@ -1067,7 +1017,7 @@ func TestWriteResolvedBotFieldsFillsEmptyFields(t *testing.T) {
 		Bots []struct {
 			ID           string   `json:"id"`
 			AppID        string   `json:"app_id"`
-			AppSecret    string   `json:"app_secret"`
+			AppSecret    Secret   `json:"app_secret"`
 			Workspace    string   `json:"workspace"`
 			BotOpenID    string   `json:"bot_open_id"`
 			OwnerOpenIDs []string `json:"owner_open_ids"`
@@ -1086,6 +1036,9 @@ func TestWriteResolvedBotFieldsFillsEmptyFields(t *testing.T) {
 	if got.Bots[0].Workspace != "$HOME/.lark-acp-bridge/bots/default" {
 		t.Fatalf("workspace = %q, want original literal path", got.Bots[0].Workspace)
 	}
+	if got.Bots[0].AppSecret.Source != "file" || got.Bots[0].AppSecret.Path != "secret.appsecret" {
+		t.Fatalf("app_secret = %+v, want original file ref", got.Bots[0].AppSecret)
+	}
 	if !got.Custom {
 		t.Fatal("custom field was not preserved")
 	}
@@ -1098,7 +1051,10 @@ func TestWriteResolvedBotFieldsDoesNotOverwriteConfiguredFields(t *testing.T) {
     {
       "id": "bot-a",
       "app_id": "cli_xxx",
-      "app_secret": "secret",
+      "app_secret": {
+        "source": "file",
+        "path": "secret.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
       "bot_open_id": "ou_configured_bot",
       "owner_open_ids": [

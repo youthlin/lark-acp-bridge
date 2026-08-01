@@ -78,11 +78,10 @@ https://open.larkoffice.com/page/launcher
 ```bash
 printf '%s\n' '<app_secret>' | lark-acp-bridge bots add default cli_xxx --stdin-secret
 lark-acp-bridge bots list
-lark-acp-bridge bots migrate-secret default
 lark-acp-bridge bots remove default
 ```
 
-也支持省略 `bots` 的简写，例如 `lark-acp-bridge add default cli_xxx --stdin-secret`。`bots add` 会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。已有明文配置可用 `bots migrate-secret <id>` 迁移，它会保留该 bot 的其他字段，只把 `app_secret` 改写为加密 file 引用。启动时如果发现 `.key` 文件，会解密 `.appsecret`；没有 `.key` 时仍兼容读取旧的明文 file secret。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段。兼容旧配置中直接使用字符串形式的 `app_secret`，但不推荐在长期运行环境中保存明文 secret。
+也支持省略 `bots` 的简写，例如 `lark-acp-bridge add default cli_xxx --stdin-secret`。`bots add` 会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。启动时只支持加密 file secret；如果 `.appsecret` 不是加密格式，或者缺少对应 `.key`，bridge 会拒绝启动。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段。
 
 `workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片和执行 `/restart`。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准，也不能通过飞书命令重启服务。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 

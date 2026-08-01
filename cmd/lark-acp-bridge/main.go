@@ -90,15 +90,13 @@ func runBotsCommand(configPath string, args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|migrate-secret|remove>")
+		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|remove>")
 	}
 	switch args[0] {
 	case "list":
 		return runBotsList(path, args[1:])
 	case "add":
 		return runBotsAdd(path, args[1:])
-	case "migrate-secret":
-		return runBotsMigrateSecret(path, args[1:])
 	case "remove", "rm":
 		return runBotsRemove(path, args[1:])
 	default:
@@ -108,7 +106,7 @@ func runBotsCommand(configPath string, args []string) error {
 
 func isBotsShorthand(command string) bool {
 	switch command {
-	case "list", "add", "migrate-secret", "remove", "rm":
+	case "list", "add", "remove", "rm":
 		return true
 	default:
 		return false
@@ -231,24 +229,6 @@ func splitBotsAddArgs(args []string) ([]string, []string, error) {
 		positional = append(positional, arg)
 	}
 	return flagArgs, positional, nil
-}
-
-func runBotsMigrateSecret(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots migrate-secret", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	secretFile := fs.String("secret-file", "", "迁移后的 app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: lark-acp-bridge bots migrate-secret <id>")
-	}
-	path, err := config.MigrateBotSecret(configPath, fs.Arg(0), *secretFile)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("已迁移 bot %s 的 app_secret 到加密文件引用: %s\n", strings.TrimSpace(fs.Arg(0)), path)
-	return nil
 }
 
 func runBotsRemove(configPath string, args []string) error {

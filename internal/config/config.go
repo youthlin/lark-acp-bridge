@@ -48,136 +48,71 @@ type BotConfig struct {
 }
 
 type Secret struct {
-	Plain    string `json:"-"`
-	Source   string `json:"source,omitempty"`
-	ID       string `json:"id,omitempty"`
+	Source   string `json:"source"`
 	Path     string `json:"path,omitempty"`
-	Name     string `json:"name,omitempty"`
 	resolved string
-}
-
-func PlainSecret(value string) Secret {
-	return Secret{Plain: value}
 }
 
 func FileSecret(path string) Secret {
 	return Secret{Source: "file", Path: path}
 }
 
-func EnvSecret(name string) Secret {
-	return Secret{Source: "env", Name: name}
-}
-
 func (s Secret) MarshalJSON() ([]byte, error) {
-	if strings.TrimSpace(s.Source) == "" {
-		return json.Marshal(s.Plain)
-	}
 	type secretRef Secret
 	ref := secretRef(s)
 	return json.Marshal(struct {
 		Source string `json:"source"`
-		ID     string `json:"id,omitempty"`
 		Path   string `json:"path,omitempty"`
-		Name   string `json:"name,omitempty"`
 	}{
 		Source: strings.TrimSpace(ref.Source),
-		ID:     strings.TrimSpace(ref.ID),
 		Path:   strings.TrimSpace(ref.Path),
-		Name:   strings.TrimSpace(ref.Name),
 	})
 }
 
 func (s *Secret) UnmarshalJSON(data []byte) error {
-	var plain *string
-	if err := json.Unmarshal(data, &plain); err == nil {
-		if plain == nil {
-			*s = Secret{}
-			return nil
-		}
-		*s = PlainSecret(*plain)
-		return nil
-	}
-
 	var ref struct {
 		Source string `json:"source"`
-		ID     string `json:"id"`
 		Path   string `json:"path"`
-		Name   string `json:"name"`
 	}
 	if err := json.Unmarshal(data, &ref); err != nil {
 		return err
 	}
 	*s = Secret{
 		Source: ref.Source,
-		ID:     ref.ID,
 		Path:   ref.Path,
-		Name:   ref.Name,
 	}
 	return nil
 }
 
 func (s Secret) RuntimeValue() string {
-	if strings.TrimSpace(s.resolved) != "" {
-		return s.resolved
-	}
-	return strings.TrimSpace(s.Plain)
+	return strings.TrimSpace(s.resolved)
 }
 
 func (s Secret) IsConfigured() bool {
-	if strings.TrimSpace(s.Source) != "" {
-		return true
-	}
-	return strings.TrimSpace(s.Plain) != ""
+	return strings.TrimSpace(s.Source) == "file" && strings.TrimSpace(s.Path) != ""
 }
 
 func (s Secret) Summary() string {
 	source := strings.TrimSpace(s.Source)
 	if source == "" {
-		if strings.TrimSpace(s.Plain) == "" {
-			return "missing"
-		}
-		return "plain"
+		return "missing"
 	}
 	switch source {
-	case "env":
-		return "env:" + strings.TrimSpace(s.Name)
 	case "file":
 		return "file:" + strings.TrimSpace(s.Path)
 	default:
-		if id := strings.TrimSpace(s.ID); id != "" {
-			return source + ":" + id
-		}
 		return source
 	}
 }
 
 func (s *Secret) normalize() {
-	s.Plain = strings.TrimSpace(s.Plain)
 	s.Source = strings.TrimSpace(s.Source)
-	s.ID = strings.TrimSpace(s.ID)
 	s.Path = strings.TrimSpace(s.Path)
-	s.Name = strings.TrimSpace(s.Name)
 }
 
 func (s *Secret) Resolve(label string) error {
 	s.normalize()
 	switch s.Source {
-	case "":
-		if s.Plain == "" {
-			return fmt.Errorf("%s为空", label)
-		}
-		s.resolved = s.Plain
-		return nil
-	case "env":
-		if s.Name == "" {
-			return fmt.Errorf("%s env name 为空", label)
-		}
-		value, ok := os.LookupEnv(s.Name)
-		if !ok || strings.TrimSpace(value) == "" {
-			return fmt.Errorf("%s 环境变量 %s 为空或不存在", label, s.Name)
-		}
-		s.resolved = strings.TrimSpace(value)
-		return nil
 	case "file":
 		if s.Path == "" {
 			return fmt.Errorf("%s file path 为空", label)
@@ -200,14 +135,17 @@ func (s *Secret) Resolve(label string) error {
 		s.resolved = value
 		return nil
 	default:
-		return fmt.Errorf("%s 不支持的 secret source: %s", label, s.Source)
+		return fmt.Errorf("%s 仅支持 file secret source", label)
 	}
 }
 
 func resolveFileSecretValue(path string, data []byte) (string, error) {
 	value := strings.TrimSpace(string(data))
-	if value == "" || !strings.HasPrefix(value, encryptedSecretPrefix) {
-		return value, nil
+	if value == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(value, encryptedSecretPrefix) {
+		return "", fmt.Errorf("secret 文件必须是加密格式")
 	}
 	keyPath := secretKeyPath(path)
 	keyData, err := os.ReadFile(keyPath)
@@ -255,7 +193,7 @@ func encryptSecret(plain string) (cipherText string, keyText string, err error) 
 
 func decryptSecret(cipherText, keyText string) (string, error) {
 	if !strings.HasPrefix(cipherText, encryptedSecretPrefix) {
-		return strings.TrimSpace(cipherText), nil
+		return "", fmt.Errorf("secret 密文格式不正确")
 	}
 	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyText))
 	if err != nil {
@@ -501,66 +439,6 @@ func AddBot(path string, bot BotConfig, secret string) error {
 		return err
 	}
 	return nil
-}
-
-func MigrateBotSecret(path, id, secretFile string) (string, error) {
-	path, err := ExpandPath(path)
-	if err != nil {
-		return "", err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", fmt.Errorf("bot id 不能为空")
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		return "", err
-	}
-	botIndex := -1
-	for i, bot := range cfg.Bots {
-		if strings.TrimSpace(bot.ID) == id {
-			botIndex = i
-			break
-		}
-	}
-	if botIndex < 0 {
-		return "", fmt.Errorf("bot 不存在: %s", id)
-	}
-
-	secretRef := cfg.Bots[botIndex].AppSecret
-	if err := secretRef.Resolve(fmt.Sprintf("bot %q app_secret", id)); err != nil {
-		return "", err
-	}
-	secret := secretRef.RuntimeValue()
-	if secret == "" {
-		return "", fmt.Errorf("bot %q app_secret 为空", id)
-	}
-	if strings.TrimSpace(secretFile) == "" {
-		secretFile = DefaultBotSecretPath(id)
-	}
-	cfg.Bots[botIndex].AppSecret = FileSecret(secretFile)
-	if err := normalize(&cfg); err != nil {
-		return "", err
-	}
-
-	secretPath, err := ExpandPath(secretFile)
-	if err != nil {
-		return "", fmt.Errorf("展开 bot %q secret path: %w", id, err)
-	}
-	createdSecret, createdKey, err := writeEncryptedSecretFile(secretPath, secret)
-	if err != nil {
-		return "", err
-	}
-	if err := Write(path, cfg); err != nil {
-		if createdSecret {
-			_ = os.Remove(secretPath)
-		}
-		if createdKey {
-			_ = os.Remove(secretKeyPath(secretPath))
-		}
-		return "", err
-	}
-	return secretFile, nil
 }
 
 func writeEncryptedSecretFile(secretPath, secret string) (createdSecret bool, createdKey bool, err error) {
