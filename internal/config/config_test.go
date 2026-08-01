@@ -150,6 +150,329 @@ func TestLoadExpandsHomePath(t *testing.T) {
 	}
 }
 
+func TestLoadSupportsFileSecretReference(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	secretPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "main.appsecret")
+	if err := os.MkdirAll(filepath.Dir(secretPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll(secret dir) error = %v", err)
+	}
+	if err := os.WriteFile(secretPath, []byte(" resolved-secret \n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(secret) error = %v", err)
+	}
+
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "main",
+      "app_id": "cli_xxx",
+      "app_secret": {
+        "source": "file",
+        "path": "$HOME/.lark-acp-bridge/secrets/main.appsecret"
+      },
+      "workspace": "$HOME/.lark-acp-bridge/bots/main"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MissingBotConfig() {
+		t.Fatal("MissingBotConfig() = true, want false for file secret ref")
+	}
+	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "" {
+		t.Fatalf("RuntimeValue before ResolveSecrets = %q, want empty", got)
+	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		t.Fatalf("ResolveSecrets() error = %v", err)
+	}
+	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "resolved-secret" {
+		t.Fatalf("RuntimeValue = %q, want resolved-secret", got)
+	}
+}
+
+func TestLoadSupportsEncryptedFileSecretReference(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := AddBot(configPath, BotConfig{ID: "default", AppID: "cli_xxx"}, "super-secret"); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		t.Fatalf("ResolveSecrets() error = %v", err)
+	}
+	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "super-secret" {
+		t.Fatalf("RuntimeValue = %q, want super-secret", got)
+	}
+}
+
+func TestLoadSupportsEnvSecretReference(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("TEST_LARK_APP_SECRET", "env-secret")
+
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "main",
+      "app_id": "cli_xxx",
+      "app_secret": {
+        "source": "env",
+        "name": "TEST_LARK_APP_SECRET"
+      },
+      "workspace": "$HOME/.lark-acp-bridge/bots/main"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		t.Fatalf("ResolveSecrets() error = %v", err)
+	}
+	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "env-secret" {
+		t.Fatalf("RuntimeValue = %q, want env-secret", got)
+	}
+}
+
+func TestResolveSecretsRejectsMissingFileSecret(t *testing.T) {
+	cfg := Config{Bots: []BotConfig{{
+		ID:        "bot-a",
+		AppID:     "cli_xxx",
+		AppSecret: FileSecret(filepath.Join(t.TempDir(), "missing")),
+		Workspace: t.TempDir(),
+	}}}
+
+	err := cfg.ResolveSecrets()
+	if err == nil || !strings.Contains(err.Error(), "读取 bot \"bot-a\" app_secret file secret") {
+		t.Fatalf("ResolveSecrets() error = %v, want missing file error", err)
+	}
+}
+
+func TestAddBotWritesSecretFileAndConfigReference(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+
+	err := AddBot(configPath, BotConfig{
+		ID:    "default",
+		AppID: "cli_xxx",
+	}, "super-secret")
+	if err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+
+	secretPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.appsecret")
+	keyPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.key")
+	secret, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("ReadFile(secret) error = %v", err)
+	}
+	if strings.Contains(string(secret), "super-secret") {
+		t.Fatalf("secret file leaked plaintext: %q", secret)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(secret)), encryptedSecretPrefix) {
+		t.Fatalf("secret file = %q, want encrypted prefix", secret)
+	}
+	if info, err := os.Stat(secretPath); err != nil {
+		t.Fatalf("Stat(secret) error = %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("secret mode = %o, want 600", info.Mode().Perm())
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(key) error = %v", err)
+	}
+	if strings.Contains(string(key), "super-secret") {
+		t.Fatalf("key file leaked plaintext: %q", key)
+	}
+	if info, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("Stat(key) error = %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode = %o, want 600", info.Mode().Perm())
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	if strings.Contains(string(raw), "super-secret") {
+		t.Fatalf("config leaked secret:\n%s", raw)
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("Unmarshal(config) error = %v", err)
+	}
+	if len(cfg.Bots) != 1 {
+		t.Fatalf("len(Bots) = %d, want 1", len(cfg.Bots))
+	}
+	if cfg.Bots[0].AppSecret.Source != "file" || cfg.Bots[0].AppSecret.Path != DefaultBotSecretPath("default") {
+		t.Fatalf("AppSecret = %+v, want default file ref", cfg.Bots[0].AppSecret)
+	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		t.Fatalf("ResolveSecrets() error = %v", err)
+	}
+	if got := cfg.Bots[0].AppSecret.RuntimeValue(); got != "super-secret" {
+		t.Fatalf("RuntimeValue = %q, want super-secret", got)
+	}
+}
+
+func TestAddBotReplacesEmptyDefaultPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if _, err := LoadOrCreate(configPath); err != nil {
+		t.Fatalf("LoadOrCreate() error = %v", err)
+	}
+
+	if err := AddBot(configPath, BotConfig{ID: "default", AppID: "cli_xxx"}, "secret"); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Bots) != 1 || cfg.Bots[0].AppID != "cli_xxx" {
+		t.Fatalf("Bots = %+v, want replaced default bot", cfg.Bots)
+	}
+}
+
+func TestMigrateBotSecretEncryptsLegacyPlainSecret(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	cfg := Default()
+	cfg.Bots = []BotConfig{{
+		ID:           "default",
+		AppID:        "cli_xxx",
+		AppSecret:    PlainSecret("super-secret"),
+		Workspace:    "$HOME/.lark-acp-bridge/bots/default",
+		BotOpenID:    "ou_bot",
+		OwnerOpenIDs: []string{"ou_owner"},
+	}}
+	if err := Write(configPath, cfg); err != nil {
+		t.Fatalf("Write(config) error = %v", err)
+	}
+
+	secretRef, err := MigrateBotSecret(configPath, "default", "")
+	if err != nil {
+		t.Fatalf("MigrateBotSecret() error = %v", err)
+	}
+	if secretRef != DefaultBotSecretPath("default") {
+		t.Fatalf("secretRef = %q, want default path", secretRef)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	if strings.Contains(string(raw), "super-secret") {
+		t.Fatalf("config leaked secret:\n%s", raw)
+	}
+	secretPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.appsecret")
+	secretData, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("ReadFile(secret) error = %v", err)
+	}
+	if strings.Contains(string(secretData), "super-secret") {
+		t.Fatalf("secret file leaked plaintext: %q", secretData)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(secretData)), encryptedSecretPrefix) {
+		t.Fatalf("secret file = %q, want encrypted secret", secretData)
+	}
+	keyPath := filepath.Join(home, ".lark-acp-bridge", "secrets", "default.key")
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("Stat(key) error = %v", err)
+	}
+
+	migrated, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(config) error = %v", err)
+	}
+	if len(migrated.Bots) != 1 {
+		t.Fatalf("len(Bots) = %d, want 1", len(migrated.Bots))
+	}
+	bot := migrated.Bots[0]
+	if bot.BotOpenID != "ou_bot" || len(bot.OwnerOpenIDs) != 1 || bot.OwnerOpenIDs[0] != "ou_owner" {
+		t.Fatalf("bot metadata = %+v, want preserved bot_open_id and owner_open_ids", bot)
+	}
+	if bot.AppSecret.Source != "file" || bot.AppSecret.Path != DefaultBotSecretPath("default") {
+		t.Fatalf("AppSecret = %+v, want default file ref", bot.AppSecret)
+	}
+	if err := migrated.ResolveSecrets(); err != nil {
+		t.Fatalf("ResolveSecrets() error = %v", err)
+	}
+	if got := migrated.Bots[0].AppSecret.RuntimeValue(); got != "super-secret" {
+		t.Fatalf("RuntimeValue = %q, want super-secret", got)
+	}
+}
+
+func TestRemoveBotUpdatesConfig(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := AddBot(configPath, BotConfig{ID: "bot-a", AppID: "cli_a"}, "secret-a"); err != nil {
+		t.Fatalf("AddBot(bot-a) error = %v", err)
+	}
+	if err := AddBot(configPath, BotConfig{ID: "bot-b", AppID: "cli_b"}, "secret-b"); err != nil {
+		t.Fatalf("AddBot(bot-b) error = %v", err)
+	}
+
+	removed, err := RemoveBot(configPath, "bot-a")
+	if err != nil {
+		t.Fatalf("RemoveBot() error = %v", err)
+	}
+	if !removed {
+		t.Fatal("RemoveBot() removed = false, want true")
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Bots) != 1 || cfg.Bots[0].ID != "bot-b" {
+		t.Fatalf("Bots = %+v, want only bot-b", cfg.Bots)
+	}
+}
+
 func TestLoadMessageReaction(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{

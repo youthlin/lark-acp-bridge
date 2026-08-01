@@ -3,7 +3,10 @@
     {
       "id": "default",
       "app_id": "",
-      "app_secret": "",
+      "app_secret": {
+        "source": "file",
+        "path": "$HOME/.lark-acp-bridge/secrets/default.appsecret"
+      },
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
       "bot_open_id": "",
       "owner_open_ids": []

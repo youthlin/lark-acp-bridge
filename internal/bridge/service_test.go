@@ -6796,7 +6796,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 		{
 			ID:        "bot-a",
 			AppID:     "cli_xxx",
-			AppSecret: "secret",
+			AppSecret: config.PlainSecret("secret"),
 			Workspace: workspace,
 		},
 	}

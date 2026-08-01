@@ -272,9 +272,9 @@ func TestNewServiceCreatesScheduledTaskStoresForBotWorkspaces(t *testing.T) {
 	workspaceB := filepath.Join(t.TempDir(), "bot-b")
 	cfg := config.Default()
 	cfg.Bots = []config.BotConfig{
-		{ID: "bot-a", AppID: "cli_a", AppSecret: "secret-a", Workspace: workspaceA},
-		{ID: "bot-b", AppID: "cli_b", AppSecret: "secret-b", Workspace: workspaceB},
-		{ID: "bot-c", AppID: "cli_c", AppSecret: "secret-c"},
+		{ID: "bot-a", AppID: "cli_a", AppSecret: config.PlainSecret("secret-a"), Workspace: workspaceA},
+		{ID: "bot-b", AppID: "cli_b", AppSecret: config.PlainSecret("secret-b"), Workspace: workspaceB},
+		{ID: "bot-c", AppID: "cli_c", AppSecret: config.PlainSecret("secret-c")},
 	}
 
 	svc := NewService(cfg, nil)

@@ -151,7 +151,8 @@ func (a *Adapter) OwnerOpenIDs() []string {
 
 // Start 启动Bot监听
 func (a *Adapter) Start(ctx context.Context) error {
-	if a.cfg.AppID == "" || a.cfg.AppSecret == "" {
+	appSecret := a.cfg.AppSecret.RuntimeValue()
+	if a.cfg.AppID == "" || appSecret == "" {
 		slog.Warn("未配置飞书机器人凭证，消息监听未启动")
 		return nil
 	}
@@ -162,7 +163,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	}
 
 	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-sdk"))}
-	a.client = lark.NewClient(a.cfg.AppID, a.cfg.AppSecret, clientOptions...)
+	a.client = lark.NewClient(a.cfg.AppID, appSecret, clientOptions...)
 	if a.reaction == nil {
 		a.reaction = larkReactionClient{client: a.client}
 	}
@@ -185,7 +186,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 
 	a.ws = larkws.NewClient(
 		a.cfg.AppID,
-		a.cfg.AppSecret,
+		appSecret,
 		larkws.WithEventHandler(handler),
 		larkws.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-ws")),
 	)
@@ -199,7 +200,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 }
 
 func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
-	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret).
+	handler := dispatcher.NewEventDispatcher(a.cfg.AppID, a.cfg.AppSecret.RuntimeValue()).
 		OnP2MessageReceiveV1(a.handleMessage).
 		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).

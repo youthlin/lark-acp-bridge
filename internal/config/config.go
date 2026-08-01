@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +17,7 @@ import (
 )
 
 const appName = "lark-acp-bridge"
+const encryptedSecretPrefix = "lark-acp-bridge-secret:v1:"
 
 type Config struct {
 	AgentList       []NamedAgentConfig `json:"agent_list,omitempty"`
@@ -36,10 +41,249 @@ type AgentConfig struct {
 type BotConfig struct {
 	ID           string   `json:"id"`
 	AppID        string   `json:"app_id"`
-	AppSecret    string   `json:"app_secret"`
+	AppSecret    Secret   `json:"app_secret"`
 	Workspace    string   `json:"workspace"`
 	BotOpenID    string   `json:"bot_open_id,omitempty"`
 	OwnerOpenIDs []string `json:"owner_open_ids,omitempty"`
+}
+
+type Secret struct {
+	Plain    string `json:"-"`
+	Source   string `json:"source,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Name     string `json:"name,omitempty"`
+	resolved string
+}
+
+func PlainSecret(value string) Secret {
+	return Secret{Plain: value}
+}
+
+func FileSecret(path string) Secret {
+	return Secret{Source: "file", Path: path}
+}
+
+func EnvSecret(name string) Secret {
+	return Secret{Source: "env", Name: name}
+}
+
+func (s Secret) MarshalJSON() ([]byte, error) {
+	if strings.TrimSpace(s.Source) == "" {
+		return json.Marshal(s.Plain)
+	}
+	type secretRef Secret
+	ref := secretRef(s)
+	return json.Marshal(struct {
+		Source string `json:"source"`
+		ID     string `json:"id,omitempty"`
+		Path   string `json:"path,omitempty"`
+		Name   string `json:"name,omitempty"`
+	}{
+		Source: strings.TrimSpace(ref.Source),
+		ID:     strings.TrimSpace(ref.ID),
+		Path:   strings.TrimSpace(ref.Path),
+		Name:   strings.TrimSpace(ref.Name),
+	})
+}
+
+func (s *Secret) UnmarshalJSON(data []byte) error {
+	var plain *string
+	if err := json.Unmarshal(data, &plain); err == nil {
+		if plain == nil {
+			*s = Secret{}
+			return nil
+		}
+		*s = PlainSecret(*plain)
+		return nil
+	}
+
+	var ref struct {
+		Source string `json:"source"`
+		ID     string `json:"id"`
+		Path   string `json:"path"`
+		Name   string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return err
+	}
+	*s = Secret{
+		Source: ref.Source,
+		ID:     ref.ID,
+		Path:   ref.Path,
+		Name:   ref.Name,
+	}
+	return nil
+}
+
+func (s Secret) RuntimeValue() string {
+	if strings.TrimSpace(s.resolved) != "" {
+		return s.resolved
+	}
+	return strings.TrimSpace(s.Plain)
+}
+
+func (s Secret) IsConfigured() bool {
+	if strings.TrimSpace(s.Source) != "" {
+		return true
+	}
+	return strings.TrimSpace(s.Plain) != ""
+}
+
+func (s Secret) Summary() string {
+	source := strings.TrimSpace(s.Source)
+	if source == "" {
+		if strings.TrimSpace(s.Plain) == "" {
+			return "missing"
+		}
+		return "plain"
+	}
+	switch source {
+	case "env":
+		return "env:" + strings.TrimSpace(s.Name)
+	case "file":
+		return "file:" + strings.TrimSpace(s.Path)
+	default:
+		if id := strings.TrimSpace(s.ID); id != "" {
+			return source + ":" + id
+		}
+		return source
+	}
+}
+
+func (s *Secret) normalize() {
+	s.Plain = strings.TrimSpace(s.Plain)
+	s.Source = strings.TrimSpace(s.Source)
+	s.ID = strings.TrimSpace(s.ID)
+	s.Path = strings.TrimSpace(s.Path)
+	s.Name = strings.TrimSpace(s.Name)
+}
+
+func (s *Secret) Resolve(label string) error {
+	s.normalize()
+	switch s.Source {
+	case "":
+		if s.Plain == "" {
+			return fmt.Errorf("%s为空", label)
+		}
+		s.resolved = s.Plain
+		return nil
+	case "env":
+		if s.Name == "" {
+			return fmt.Errorf("%s env name 为空", label)
+		}
+		value, ok := os.LookupEnv(s.Name)
+		if !ok || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s 环境变量 %s 为空或不存在", label, s.Name)
+		}
+		s.resolved = strings.TrimSpace(value)
+		return nil
+	case "file":
+		if s.Path == "" {
+			return fmt.Errorf("%s file path 为空", label)
+		}
+		path, err := ExpandPath(s.Path)
+		if err != nil {
+			return fmt.Errorf("展开 %s file path: %w", label, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("读取 %s file secret %s: %w", label, path, err)
+		}
+		value, err := resolveFileSecretValue(path, data)
+		if err != nil {
+			return fmt.Errorf("解析 %s file secret %s: %w", label, path, err)
+		}
+		if value == "" {
+			return fmt.Errorf("%s file secret %s 为空", label, path)
+		}
+		s.resolved = value
+		return nil
+	default:
+		return fmt.Errorf("%s 不支持的 secret source: %s", label, s.Source)
+	}
+}
+
+func resolveFileSecretValue(path string, data []byte) (string, error) {
+	value := strings.TrimSpace(string(data))
+	if value == "" || !strings.HasPrefix(value, encryptedSecretPrefix) {
+		return value, nil
+	}
+	keyPath := secretKeyPath(path)
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", fmt.Errorf("读取 key 文件 %s: %w", keyPath, err)
+	}
+	plain, err := decryptSecret(value, strings.TrimSpace(string(keyData)))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(plain), nil
+}
+
+func secretKeyPath(secretPath string) string {
+	ext := filepath.Ext(secretPath)
+	if ext == "" {
+		return secretPath + ".key"
+	}
+	return strings.TrimSuffix(secretPath, ext) + ".key"
+}
+
+func encryptSecret(plain string) (cipherText string, keyText string, err error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", "", fmt.Errorf("生成 secret key: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", "", fmt.Errorf("生成 secret nonce: %w", err)
+	}
+	sealed := gcm.Seal(nil, nonce, []byte(plain), nil)
+	payload := append(nonce, sealed...)
+	return encryptedSecretPrefix + base64.StdEncoding.EncodeToString(payload),
+		base64.StdEncoding.EncodeToString(key),
+		nil
+}
+
+func decryptSecret(cipherText, keyText string) (string, error) {
+	if !strings.HasPrefix(cipherText, encryptedSecretPrefix) {
+		return strings.TrimSpace(cipherText), nil
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyText))
+	if err != nil {
+		return "", fmt.Errorf("解析 secret key: %w", err)
+	}
+	payloadText := strings.TrimPrefix(strings.TrimSpace(cipherText), encryptedSecretPrefix)
+	payload, err := base64.StdEncoding.DecodeString(payloadText)
+	if err != nil {
+		return "", fmt.Errorf("解析 secret 密文: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("初始化 secret cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("初始化 secret gcm: %w", err)
+	}
+	if len(payload) < gcm.NonceSize() {
+		return "", fmt.Errorf("secret 密文长度不足")
+	}
+	nonce := payload[:gcm.NonceSize()]
+	sealed := payload[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, sealed, nil)
+	if err != nil {
+		return "", fmt.Errorf("解密 secret: %w", err)
+	}
+	return string(plain), nil
 }
 
 func Default() Config {
@@ -53,7 +297,7 @@ func Default() Config {
 			{
 				ID:        "default",
 				AppID:     "",
-				AppSecret: "",
+				AppSecret: FileSecret(DefaultBotSecretPath("default")),
 				Workspace: "$HOME/." + appName + "/bots/default",
 			},
 		},
@@ -83,6 +327,22 @@ func DataDir() (string, error) {
 		return "", fmt.Errorf("查找用户主目录: %w", err)
 	}
 	return filepath.Join(home, "."+appName), nil
+}
+
+func DefaultBotWorkspace(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = "default"
+	}
+	return "$HOME/." + appName + "/bots/" + id
+}
+
+func DefaultBotSecretPath(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = "default"
+	}
+	return "$HOME/." + appName + "/secrets/" + id + ".appsecret"
 }
 
 func LoadOrCreate(path string) (LoadResult, error) {
@@ -159,6 +419,224 @@ func Write(path string, cfg Config) error {
 		return fmt.Errorf("写入配置文件: %w", err)
 	}
 	return nil
+}
+
+func (c *Config) ResolveSecrets() error {
+	for i := range c.Bots {
+		label := fmt.Sprintf("bot %q app_secret", c.Bots[i].ID)
+		if err := c.Bots[i].AppSecret.Resolve(label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func AddBot(path string, bot BotConfig, secret string) error {
+	path, err := ExpandPath(path)
+	if err != nil {
+		return err
+	}
+	bot.ID = strings.TrimSpace(bot.ID)
+	bot.AppID = strings.TrimSpace(bot.AppID)
+	if bot.ID == "" {
+		return fmt.Errorf("bot id 不能为空")
+	}
+	if bot.AppID == "" {
+		return fmt.Errorf("bot %q app_id 不能为空", bot.ID)
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return fmt.Errorf("bot %q app_secret 不能为空", bot.ID)
+	}
+	if strings.TrimSpace(bot.Workspace) == "" {
+		bot.Workspace = DefaultBotWorkspace(bot.ID)
+	}
+	if !bot.AppSecret.IsConfigured() {
+		bot.AppSecret = FileSecret(DefaultBotSecretPath(bot.ID))
+	}
+	if strings.TrimSpace(bot.AppSecret.Source) != "file" {
+		return fmt.Errorf("bots add 仅支持写入 file secret 引用")
+	}
+	if strings.TrimSpace(bot.AppSecret.Path) == "" {
+		bot.AppSecret.Path = DefaultBotSecretPath(bot.ID)
+	}
+
+	cfg, err := loadForEdit(path)
+	if err != nil {
+		return err
+	}
+	replaced := false
+	for i, existing := range cfg.Bots {
+		if strings.TrimSpace(existing.ID) == bot.ID {
+			if strings.TrimSpace(existing.AppID) != "" {
+				return fmt.Errorf("bot id 已存在: %s", bot.ID)
+			}
+			cfg.Bots[i] = bot
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		cfg.Bots = append(cfg.Bots, bot)
+	}
+	if err := normalize(&cfg); err != nil {
+		return err
+	}
+
+	secretPath, err := ExpandPath(bot.AppSecret.Path)
+	if err != nil {
+		return fmt.Errorf("展开 bot %q secret path: %w", bot.ID, err)
+	}
+	createdSecret, createdKey, err := writeEncryptedSecretFile(secretPath, secret)
+	if err != nil {
+		return err
+	}
+	if err := Write(path, cfg); err != nil {
+		if createdSecret {
+			_ = os.Remove(secretPath)
+		}
+		if createdKey {
+			_ = os.Remove(secretKeyPath(secretPath))
+		}
+		return err
+	}
+	return nil
+}
+
+func MigrateBotSecret(path, id, secretFile string) (string, error) {
+	path, err := ExpandPath(path)
+	if err != nil {
+		return "", err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("bot id 不能为空")
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		return "", err
+	}
+	botIndex := -1
+	for i, bot := range cfg.Bots {
+		if strings.TrimSpace(bot.ID) == id {
+			botIndex = i
+			break
+		}
+	}
+	if botIndex < 0 {
+		return "", fmt.Errorf("bot 不存在: %s", id)
+	}
+
+	secretRef := cfg.Bots[botIndex].AppSecret
+	if err := secretRef.Resolve(fmt.Sprintf("bot %q app_secret", id)); err != nil {
+		return "", err
+	}
+	secret := secretRef.RuntimeValue()
+	if secret == "" {
+		return "", fmt.Errorf("bot %q app_secret 为空", id)
+	}
+	if strings.TrimSpace(secretFile) == "" {
+		secretFile = DefaultBotSecretPath(id)
+	}
+	cfg.Bots[botIndex].AppSecret = FileSecret(secretFile)
+	if err := normalize(&cfg); err != nil {
+		return "", err
+	}
+
+	secretPath, err := ExpandPath(secretFile)
+	if err != nil {
+		return "", fmt.Errorf("展开 bot %q secret path: %w", id, err)
+	}
+	createdSecret, createdKey, err := writeEncryptedSecretFile(secretPath, secret)
+	if err != nil {
+		return "", err
+	}
+	if err := Write(path, cfg); err != nil {
+		if createdSecret {
+			_ = os.Remove(secretPath)
+		}
+		if createdKey {
+			_ = os.Remove(secretKeyPath(secretPath))
+		}
+		return "", err
+	}
+	return secretFile, nil
+}
+
+func writeEncryptedSecretFile(secretPath, secret string) (createdSecret bool, createdKey bool, err error) {
+	if err := os.MkdirAll(filepath.Dir(secretPath), 0o700); err != nil {
+		return false, false, fmt.Errorf("创建 secret 目录: %w", err)
+	}
+	cipherText, keyText, err := encryptSecret(secret)
+	if err != nil {
+		return false, false, err
+	}
+	keyPath := secretKeyPath(secretPath)
+	_, statErr := os.Stat(secretPath)
+	createdSecret = errors.Is(statErr, os.ErrNotExist)
+	_, keyStatErr := os.Stat(keyPath)
+	createdKey = errors.Is(keyStatErr, os.ErrNotExist)
+	if err := writeFileAtomic(secretPath, []byte(cipherText+"\n"), 0o600); err != nil {
+		return false, false, fmt.Errorf("写入 secret 文件: %w", err)
+	}
+	if err := writeFileAtomic(keyPath, []byte(keyText+"\n"), 0o600); err != nil {
+		if createdSecret {
+			_ = os.Remove(secretPath)
+		}
+		return false, false, fmt.Errorf("写入 secret key 文件: %w", err)
+	}
+	return createdSecret, createdKey, nil
+}
+
+func RemoveBot(path, id string) (bool, error) {
+	path, err := ExpandPath(path)
+	if err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("bot id 不能为空")
+	}
+	cfg, err := loadForEdit(path)
+	if err != nil {
+		return false, err
+	}
+	out := make([]BotConfig, 0, len(cfg.Bots))
+	removed := false
+	for _, bot := range cfg.Bots {
+		if strings.TrimSpace(bot.ID) == id {
+			removed = true
+			continue
+		}
+		out = append(out, bot)
+	}
+	if !removed {
+		return false, nil
+	}
+	cfg.Bots = out
+	if len(cfg.Bots) == 0 {
+		return false, fmt.Errorf("不能删除最后一个 bot")
+	}
+	if err := normalize(&cfg); err != nil {
+		return false, err
+	}
+	if err := Write(path, cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func loadForEdit(path string) (Config, error) {
+	cfg, err := Load(path)
+	if err == nil {
+		return cfg, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return Config{}, err
+	}
+	cfg = Default()
+	cfg.Bots = nil
+	return cfg, nil
 }
 
 func WriteResolvedBotFields(path string, bots []BotConfig) (bool, error) {
@@ -311,7 +789,7 @@ func (c Config) MissingBotConfig() bool {
 	}
 	for _, bot := range c.Bots {
 		if strings.TrimSpace(bot.AppID) == "" ||
-			strings.TrimSpace(bot.AppSecret) == "" ||
+			!bot.AppSecret.IsConfigured() ||
 			strings.TrimSpace(bot.Workspace) == "" {
 			return true
 		}
@@ -478,6 +956,7 @@ func normalize(cfg *Config) error {
 		}
 		bot.BotOpenID = strings.TrimSpace(bot.BotOpenID)
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
+		bot.AppSecret.normalize()
 		cfg.Bots[i] = bot
 	}
 	if len(cfg.AgentList) == 0 {

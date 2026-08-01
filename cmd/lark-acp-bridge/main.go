@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -40,6 +41,13 @@ func run() error {
 		return nil
 	}
 
+	if args := flag.Args(); len(args) > 0 && args[0] == "bots" {
+		return runBotsCommand(configPath, args[1:])
+	}
+	if args := flag.Args(); len(args) > 0 && isBotsShorthand(args[0]) {
+		return runBotsCommand(configPath, args)
+	}
+
 	loaded, err := config.LoadOrCreate(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "读取配置失败, err=%v\n", err)
@@ -59,6 +67,10 @@ func run() error {
 		fmt.Fprintln(os.Stderr, msg)
 		return errors.New(msg)
 	}
+	if err := loaded.Config.ResolveSecrets(); err != nil {
+		fmt.Fprintf(os.Stderr, "解析 bot secret 失败, err=%v\n", err)
+		return err
+	}
 	filteredConfig, err := loaded.Config.FilterAvailableAgentCommands(os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "无法识别的acp命令失败, err=%v\n", err)
@@ -70,6 +82,208 @@ func run() error {
 		return runDaemon(mode, loaded.Path)
 	}
 	return runForeground(loaded.Config, loaded.Path)
+}
+
+func runBotsCommand(configPath string, args []string) error {
+	path, err := configPathOrDefault(configPath)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|migrate-secret|remove>")
+	}
+	switch args[0] {
+	case "list":
+		return runBotsList(path, args[1:])
+	case "add":
+		return runBotsAdd(path, args[1:])
+	case "migrate-secret":
+		return runBotsMigrateSecret(path, args[1:])
+	case "remove", "rm":
+		return runBotsRemove(path, args[1:])
+	default:
+		return fmt.Errorf("未知 bots 子命令: %s", args[0])
+	}
+}
+
+func isBotsShorthand(command string) bool {
+	switch command {
+	case "list", "add", "migrate-secret", "remove", "rm":
+		return true
+	default:
+		return false
+	}
+}
+
+func configPathOrDefault(configPath string) (string, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return config.DefaultPath()
+	}
+	return config.ExpandPath(configPath)
+}
+
+func runBotsList(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("用法: lark-acp-bridge bots list")
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "读取配置失败, err=%v\n", err)
+		return err
+	}
+	for _, bot := range cfg.Bots {
+		fmt.Printf("%s\t%s\t%s\t%s\n", bot.ID, bot.AppID, bot.Workspace, bot.AppSecret.Summary())
+	}
+	return nil
+}
+
+func runBotsAdd(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots add", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	stdinSecret := fs.Bool("stdin-secret", false, "从 stdin 读取 app secret")
+	workspace := fs.String("workspace", "", "bot workspace 路径（默认：$HOME/.lark-acp-bridge/bots/<id>）")
+	secretFile := fs.String("secret-file", "", "app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
+	botOpenID := fs.String("bot-open-id", "", "bot 自己的 open_id")
+	ownerOpenIDs := fs.String("owner-open-ids", "", "逗号分隔的 owner open_id 列表")
+	flagArgs, positional, err := splitBotsAddArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(positional) != 2 {
+		return fmt.Errorf("用法: lark-acp-bridge bots add <id> <app_id> --stdin-secret")
+	}
+	if !*stdinSecret {
+		return fmt.Errorf("请使用 --stdin-secret 从 stdin 读取 app_secret")
+	}
+	secretData, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("读取 stdin secret: %w", err)
+	}
+	id := positional[0]
+	bot := config.BotConfig{
+		ID:           id,
+		AppID:        positional[1],
+		Workspace:    *workspace,
+		AppSecret:    config.FileSecret(*secretFile),
+		BotOpenID:    *botOpenID,
+		OwnerOpenIDs: splitCSV(*ownerOpenIDs),
+	}
+	if strings.TrimSpace(*secretFile) == "" {
+		bot.AppSecret = config.FileSecret(config.DefaultBotSecretPath(id))
+	}
+	if err := config.AddBot(configPath, bot, string(secretData)); err != nil {
+		return err
+	}
+	fmt.Printf("已添加 bot %s，配置: %s\n", strings.TrimSpace(id), configPath)
+	return nil
+}
+
+func splitBotsAddArgs(args []string) ([]string, []string, error) {
+	valueFlags := map[string]struct{}{
+		"-workspace":       {},
+		"--workspace":      {},
+		"-secret-file":     {},
+		"--secret-file":    {},
+		"-bot-open-id":     {},
+		"--bot-open-id":    {},
+		"-owner-open-ids":  {},
+		"--owner-open-ids": {},
+	}
+	boolFlags := map[string]struct{}{
+		"-stdin-secret":  {},
+		"--stdin-secret": {},
+	}
+	var flagArgs []string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if _, ok := boolFlags[arg]; ok {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		if strings.HasPrefix(arg, "-workspace=") ||
+			strings.HasPrefix(arg, "--workspace=") ||
+			strings.HasPrefix(arg, "-secret-file=") ||
+			strings.HasPrefix(arg, "--secret-file=") ||
+			strings.HasPrefix(arg, "-bot-open-id=") ||
+			strings.HasPrefix(arg, "--bot-open-id=") ||
+			strings.HasPrefix(arg, "-owner-open-ids=") ||
+			strings.HasPrefix(arg, "--owner-open-ids=") {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		if _, ok := valueFlags[arg]; ok {
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
+			}
+			flagArgs = append(flagArgs, arg, args[i+1])
+			i++
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return flagArgs, positional, nil
+}
+
+func runBotsMigrateSecret(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots migrate-secret", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	secretFile := fs.String("secret-file", "", "迁移后的 app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("用法: lark-acp-bridge bots migrate-secret <id>")
+	}
+	path, err := config.MigrateBotSecret(configPath, fs.Arg(0), *secretFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("已迁移 bot %s 的 app_secret 到加密文件引用: %s\n", strings.TrimSpace(fs.Arg(0)), path)
+	return nil
+}
+
+func runBotsRemove(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots remove", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("用法: lark-acp-bridge bots remove <id>")
+	}
+	removed, err := config.RemoveBot(configPath, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("bot 不存在: %s", strings.TrimSpace(fs.Arg(0)))
+	}
+	fmt.Printf("已删除 bot %s，配置: %s\n", strings.TrimSpace(fs.Arg(0)), configPath)
+	return nil
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func appVersion() string {
