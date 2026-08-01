@@ -34,6 +34,8 @@ type runningTask struct {
 type runningTaskOptions struct {
 	drainPendingAtAuto bool
 	queuedContinuation bool
+	skipPostPromptWork bool
+	silentPrompt       bool
 }
 
 type promptTaskRunResult struct {

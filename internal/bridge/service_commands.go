@@ -76,6 +76,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/compact",
+		helpLines: []string{"/compact [on <percent>|off] - 查看或配置当前会话自动 compact，例如 /compact on 80%"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleCompactCommand(ctx, text, msg)
+		},
+	},
+	{
 		name: "/loop",
 		helpLines: []string{
 			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
@@ -241,6 +248,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/cmds"),
 		"//command [args] - 透传执行 ACP slash command 的简写",
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/compact"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/config"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/model"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/mode"),
@@ -411,6 +419,7 @@ func (s *Service) status(msg feishu.Message) string {
 			"队列："+formatSessionQueueStatus(status),
 			"wiki："+formatSessionWikiStatus(wikiStatus),
 			"loop："+formatSessionLoopStatus(loopStatus, hasLoopStatus),
+			"compact："+formatCompactStatusInline(session),
 			"ACP错误："+formatACPErrorStatus(acpError, hasACPError),
 		)
 	} else {

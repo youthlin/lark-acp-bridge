@@ -55,7 +55,7 @@ func (s *Service) updateSessionState(ctx context.Context, msg feishu.Message, se
 
 func isACPStateUpdate(update acp.SessionUpdate) bool {
 	switch update.SessionUpdate {
-	case "available_commands_update", "config_option_update", "session_info_update":
+	case "available_commands_update", "config_option_update", "session_info_update", "usage_update":
 		return true
 	case "current_mode_update":
 		return strings.TrimSpace(update.ModeID) != ""
@@ -73,6 +73,15 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 	case "available_commands_update":
 		session.AvailableCommands = append([]acp.AvailableCommand(nil), update.AvailableCommands...)
 		changed = true
+	case "usage_update":
+		usage, ok := contextWindowFromUpdate(update)
+		if ok && (session.ContextWindow == nil ||
+			session.ContextWindow.Used != usage.Used ||
+			session.ContextWindow.Size != usage.Size ||
+			session.ContextWindow.AutoCompactTokenLimit != usage.AutoCompactTokenLimit) {
+			session.ContextWindow = &usage
+			changed = true
+		}
 	case "config_option_update":
 		session.ConfigOptions = append([]acp.SessionConfigOption(nil), update.ConfigOptions...)
 		changed = true

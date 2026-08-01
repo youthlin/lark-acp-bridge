@@ -110,6 +110,9 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	if !opts.SkipPostPromptWork && !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
 		session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
 	}
+	if !opts.SkipPostPromptWork {
+		s.maybeRunAutoCompact(ctx, msg, session, agent, result, err)
+	}
 	if sentProgress {
 		reply = ""
 		result.Text = ""
@@ -214,6 +217,10 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 
 func (s *Service) runUserPromptWithOptions(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) (acp.PromptResult, bool, error) {
 	out, err := runPromptTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+		if opts.silentPrompt {
+			result, err := s.runtime.Prompt(taskCtx, session, agent, text, acp.PromptOptions{})
+			return result, false, err
+		}
 		return s.promptRuntimeWithProgress(taskCtx, msg, session, agent, text)
 	})
 	if errors.Is(err, context.Canceled) {

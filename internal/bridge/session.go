@@ -126,6 +126,11 @@ type Session struct {
 	HideTools         bool                      `json:"hide_tools,omitempty"`
 	HideStatusBar     bool                      `json:"hide_status_bar,omitempty"`
 	HideUsageDetail   bool                      `json:"hide_usage_detail,omitempty"`
+	ContextWindow     *acp.ContextWindowUsage   `json:"context_window,omitempty"`
+	AutoCompact       bool                      `json:"auto_compact,omitempty"`
+	AutoCompactPct    int                       `json:"auto_compact_pct,omitempty"`
+	AutoCompacting    bool                      `json:"auto_compacting,omitempty"`
+	LastAutoCompactAt *time.Time                `json:"last_auto_compact_at,omitempty"`
 	AvailableCommands []acp.AvailableCommand    `json:"available_commands,omitempty"`
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`

@@ -695,11 +695,26 @@ func normalizeSessionForStore(session Session) Session {
 	session.Key = normalizeSessionKey(session.Key)
 	session.AgentName = strings.TrimSpace(session.AgentName)
 	session.ACPSessionID = strings.TrimSpace(session.ACPSessionID)
+	session.ContextWindow = normalizeContextWindowUsagePtr(session.ContextWindow)
+	if session.AutoCompactPct < 0 {
+		session.AutoCompactPct = 0
+	}
+	if !session.AutoCompact {
+		session.AutoCompacting = false
+	}
 	return session
 }
 
 func cloneSession(session Session) Session {
 	session.ACPMeta = cloneJSONMap(session.ACPMeta)
+	if session.ContextWindow != nil {
+		contextWindow := *session.ContextWindow
+		session.ContextWindow = &contextWindow
+	}
+	if session.LastAutoCompactAt != nil {
+		last := *session.LastAutoCompactAt
+		session.LastAutoCompactAt = &last
+	}
 	session.AvailableCommands = cloneAvailableCommands(session.AvailableCommands)
 	session.ConfigOptions = cloneConfigOptions(session.ConfigOptions)
 	if session.Models != nil {

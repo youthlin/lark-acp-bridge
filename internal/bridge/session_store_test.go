@@ -6,9 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
 
 func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
@@ -184,11 +189,15 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	store := NewSessionStore(storePath)
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
 	session := Session{
-		Key:          key,
-		Title:        "ready session",
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          "/repo",
+		Key:               key,
+		Title:             "ready session",
+		AgentName:         "traex",
+		ACPSessionID:      "acp-session-1",
+		Cwd:               "/repo",
+		ContextWindow:     &acp.ContextWindowUsage{Used: 160000, Size: 200000},
+		AutoCompact:       true,
+		AutoCompactPct:    80,
+		LastAutoCompactAt: ptrTime(time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)),
 		AvailableCommands: []acp.AvailableCommand{
 			{Name: "review", Description: "Review my current changes and find issues", Input: &acp.AvailableCommandInput{Hint: "optional custom review instructions"}},
 		},
@@ -263,6 +272,9 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	}
 	if persisted.Mode == nil || persisted.Mode.CurrentModeID != "default" || len(persisted.Mode.AvailableModes) != 0 {
 		t.Fatalf("Mode persisted = %+v, want current mode only", persisted.Mode)
+	}
+	if persisted.ContextWindow == nil || persisted.ContextWindow.Used != 160000 || persisted.ContextWindow.Size != 200000 || !persisted.AutoCompact || persisted.AutoCompactPct != 80 || persisted.LastAutoCompactAt == nil {
+		t.Fatalf("compact state persisted = %+v, want context and compact config", persisted)
 	}
 	if len(file.History) != 1 || len(file.History[0].AvailableCommands) != 0 {
 		t.Fatalf("History persisted = %+v, want compact history entry", file.History)

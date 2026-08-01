@@ -1159,6 +1159,339 @@ func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageCompactConfig(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ContextWindow = &acp.ContextWindowUsage{Used: 160000, Size: 200000}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(&fakeRuntime{})
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "/compact on 80%",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/compact on) error = %v", err)
+	}
+	for _, want := range []string{"已开启自动 compact", "阈值：80%", "上下文窗口：160K/200K"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || !updated.AutoCompact || updated.AutoCompactPct != 80 {
+		t.Fatalf("updated session = %+v, %v; want auto compact 80%%", updated, ok)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "/compact off",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/compact off) error = %v", err)
+	}
+	if !strings.Contains(reply, "已关闭自动 compact") {
+		t.Fatalf("reply = %q, want closed acknowledgement", reply)
+	}
+	updated, ok = store.Get(session.Key)
+	if !ok || updated.AutoCompact || updated.AutoCompactPct != 0 || updated.AutoCompacting {
+		t.Fatalf("updated session = %+v, %v; want auto compact disabled", updated, ok)
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactAfterPromptThreshold(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{
+			{
+				Text: "done",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+				}},
+			},
+			{Text: "compacted"},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "done" {
+		t.Fatalf("reply = %q, want original prompt reply", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	calls := rt.promptCallsSnapshot()
+	if calls[1].Text != "/compact" {
+		t.Fatalf("prompt calls = %+v, want automatic compact second", calls)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.ContextWindow == nil || updated.ContextWindow.Used != 160000 || updated.ContextWindow.Size != 200000 {
+		t.Fatalf("updated session = %+v, %v; want context window persisted", updated, ok)
+	}
+	if updated.AutoCompacting || updated.LastAutoCompactAt == nil {
+		t.Fatalf("updated session = %+v, want compact finished timestamp", updated)
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactRunsSilently(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: session.ACPSessionID,
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "正在压缩。"},
+				},
+			},
+		},
+		promptResults: []acp.PromptResult{
+			{
+				Text: "done",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+				}},
+			},
+			{Text: "compacted"},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	ctx := withFakeSentMessageClient(context.Background(), svc, session.Key.BotID, client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want original prompt streamed and automatic compact silent", reply)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		updated, ok := store.Get(session.Key)
+		return rt.promptCallCount() == 2 && ok && !updated.AutoCompacting && updated.LastAutoCompactAt != nil
+	})
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 2 || calls[1].Text != "/compact" {
+		t.Fatalf("prompt calls = %+v, want automatic compact second", calls)
+	}
+	if !calls[0].HasUpdateHandler || !calls[0].HasPermissionHandler {
+		t.Fatalf("first prompt call = %+v, want normal stream and permission handlers", calls[0])
+	}
+	if calls[1].HasUpdateHandler || calls[1].HasPermissionHandler {
+		t.Fatalf("auto compact prompt call = %+v, want silent without stream or permission handlers", calls[1])
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want only original prompt stream card", cards)
+	}
+	if got := cards[0].textUpdatesSnapshot(); len(got) != 1 || got[0] != "正在压缩。" {
+		t.Fatalf("textUpdates = %+v, want only original prompt chunk rendered", got)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "done" {
+		t.Fatalf("finalTextUpdates = %+v, want only original prompt final text", got)
+	}
+	if got := client.sentSnapshot(); len(got) != 0 {
+		t.Fatalf("sent messages = %+v, want no extra automatic compact reply", got)
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactCancelsPendingWikiTimer(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	session.WikiIntervalSec = 60
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{
+			{
+				Text: "done",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+				}},
+			},
+			{Text: "compacted"},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	svc.taskMu.Lock()
+	_, hasTimer := svc.wikiTimers[normalizeSessionKey(session.Key)]
+	svc.taskMu.Unlock()
+	if hasTimer {
+		t.Fatal("pending wiki timer should be cancelled by automatic compact user task")
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactCanBeInterruptedByNewMessage(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	compactBlocked := make(chan struct{})
+	rt := &fakeRuntime{
+		blockPrompt:   compactBlocked,
+		blockPromptAt: 2,
+		promptResults: []acp.PromptResult{
+			{
+				Text: "done",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+				}},
+			},
+			{Text: "compacted"},
+			{
+				Text: "new reply",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 10000, Size: 200000},
+				}},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(first prompt) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "新的用户消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second prompt) error = %v", err)
+	}
+	if reply != "new reply" {
+		t.Fatalf("reply = %q, want new prompt reply", reply)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	waitForCondition(t, time.Second, func() bool {
+		updated, ok := store.Get(session.Key)
+		return ok && !updated.AutoCompacting
+	})
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 3 || calls[1].Text != "/compact" || !strings.Contains(calls[2].Text, "新的用户消息") {
+		t.Fatalf("prompt calls = %+v, want compact interrupted by new user prompt", calls)
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactRequiresCommand(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptResult: acp.PromptResult{
+		Text: "done",
+		Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+			ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+		}},
+	}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.AutoCompacting || updated.LastAutoCompactAt != nil {
+		t.Fatalf("updated session = %+v, %v; want no automatic compact", updated, ok)
+	}
+}
+
 func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
@@ -8982,9 +9315,11 @@ type fakeNewCall struct {
 }
 
 type fakePromptCall struct {
-	Runtime runtimeKey
-	Session Session
-	Text    string
+	Runtime              runtimeKey
+	Session              Session
+	Text                 string
+	HasUpdateHandler     bool
+	HasPermissionHandler bool
 }
 
 type fakeCancelCall struct {
@@ -9098,7 +9433,13 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
 	f.mu.Lock()
-	call := fakePromptCall{Runtime: key, Session: session, Text: text}
+	call := fakePromptCall{
+		Runtime:              key,
+		Session:              session,
+		Text:                 text,
+		HasUpdateHandler:     opts.OnUpdate != nil,
+		HasPermissionHandler: opts.OnPermissionRequest != nil,
+	}
 	if wiki {
 		f.wikiRuntimeCalls = append(f.wikiRuntimeCalls, call)
 	} else {
@@ -9277,6 +9618,12 @@ func (f *fakeRuntime) promptCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.promptCalls)
+}
+
+func (f *fakeRuntime) promptCallsSnapshot() []fakePromptCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakePromptCall(nil), f.promptCalls...)
 }
 
 func (f *fakeRuntime) wikiRuntimeCallCount() int {

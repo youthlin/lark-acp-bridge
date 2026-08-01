@@ -191,6 +191,7 @@ func (s *Service) canRestartPromptQueueDrainLocked(key SessionKey) bool {
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {
 	result, sentProgress, err := s.runUserPromptWithOptions(ctx, item.msg, item.session, item.agent, item.text, runningTaskOptions{
 		queuedContinuation: true,
+		skipPostPromptWork: true,
 	})
 	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
 		refreshed, refreshErr := s.refreshACPSession(ctx, item.msg, item.session, item.agent)
@@ -200,6 +201,7 @@ func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (stri
 		item.session = refreshed
 		result, sentProgress, err = s.runUserPromptWithOptions(ctx, item.msg, item.session, item.agent, item.text, runningTaskOptions{
 			queuedContinuation: true,
+			skipPostPromptWork: true,
 		})
 	}
 	reply := result.Text

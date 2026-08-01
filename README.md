@@ -280,6 +280,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。
 - `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
+- `/compact`、`/compact on 80%`、`/compact off`：查看或配置当前会话的 bridge 侧自动 compact。自动 compact 使用上下文窗口使用率阈值，在普通 prompt 完成后、且 ACP server 已上报 `compact` 命令时触发；手动执行 agent compact 请使用 `//compact`。自动 compact 按同一会话里的普通 ACP command 执行，等价于本轮结束后自动补发一次 `//compact`：它会占用当前 session 的 user task、可能取消本轮后等待触发的 wiki 反思 timer，并且可被后续用户消息按普通 prompt 规则打断。自动 compact 成功时静默，不创建流式卡片、不额外回复用户；失败会记录到 `/status` 的 ACP 错误中。
 - `/config`：查看当前 ACP server 上报的配置项。
 - `/config <id>`：查看指定配置项的类型、当前值和可选值。
 - `/config <id> <value>`：通过 ACP `session/set_config_option` 设置指定配置项。当前支持 `select` 和 `boolean` 类型；布尔值可用 `true/false`、`on/off`、`yes/no`、`1/0`。
