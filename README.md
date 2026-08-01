@@ -212,6 +212,52 @@ go run ./cmd/lark-acp-bridge stop     # 停止后台进程
 go run ./cmd/lark-acp-bridge restart  # 重启后台进程
 ```
 
+也可以把当前可执行文件安装为用户级系统服务。建议先安装稳定二进制，避免把 `go run` 生成的临时可执行文件写入服务配置：
+
+```bash
+go install ./cmd/lark-acp-bridge
+lark-acp-bridge service install
+```
+
+Linux 会写入 systemd user unit：
+
+```text
+~/.config/systemd/user/lark-acp-bridge.service
+```
+
+启用和启动：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lark-acp-bridge.service
+```
+
+macOS 会写入 launchd user agent：
+
+```text
+~/Library/LaunchAgents/com.youthlin.lark-acp-bridge.plist
+```
+
+启用和启动：
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.youthlin.lark-acp-bridge.plist
+launchctl enable gui/$(id -u)/com.youthlin.lark-acp-bridge
+launchctl kickstart -k gui/$(id -u)/com.youthlin.lark-acp-bridge
+```
+
+`service install` 会写入服务文件，并同步更新配置文件里的 `restart_command`，让飞书 `/restart` 交给对应的 systemd / launchd 服务管理器处理。它不会主动启动或停止真实服务；服务定义使用 `lark-acp-bridge --config <path> run` 前台模式。可用 `--config` 指定配置文件，用 `--binary` 指定可执行文件路径，用 `--working-dir` 指定服务工作目录。卸载前建议先停用服务，再删除服务文件：
+
+```bash
+systemctl --user disable --now lark-acp-bridge.service
+lark-acp-bridge service uninstall
+```
+
+```bash
+launchctl bootout gui/$(id -u)/com.youthlin.lark-acp-bridge
+lark-acp-bridge service uninstall
+```
+
 Feishu Adapter 使用官方 Go SDK：
 
 ```text

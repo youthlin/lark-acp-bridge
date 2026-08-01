@@ -61,6 +61,9 @@ func run() error {
 	if args := flag.Args(); len(args) > 0 && args[0] == "bots" {
 		return runBotsCommand(configPath, args[1:])
 	}
+	if args := flag.Args(); len(args) > 0 && args[0] == "service" {
+		return runServiceCommand(configPath, args[1:])
+	}
 	if args := flag.Args(); len(args) > 0 && isBotsShorthand(args[0]) {
 		return runBotsCommand(configPath, args)
 	}
