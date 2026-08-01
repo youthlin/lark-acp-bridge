@@ -401,6 +401,27 @@ func TestSDKStreamCardFullCardJSONIncludesSnapshotPanels(t *testing.T) {
 	}
 }
 
+func TestSDKStreamCardFullCardJSONUsesUpdatedMeta(t *testing.T) {
+	card := &sdkStreamCard{
+		text: "最终回复",
+		meta: StreamCardMeta{
+			Title:    "定时任务已完成",
+			Subtitle: "task-id: daily",
+			Footer:   "本消息的回复链将在本次执行会话中处理。",
+		},
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(card.fullCardJSONLocked()), &payload); err != nil {
+		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{"定时任务已完成", "task-id: daily", "本消息的回复链将在本次执行会话中处理。"} {
+		if !jsonContainsValue(payload, want) {
+			t.Fatalf("full card snapshot does not contain updated meta %q: %#v", want, payload)
+		}
+	}
+}
+
 func TestSDKStreamCardFullCardJSONCanOmitHiddenStatusBar(t *testing.T) {
 	card := &sdkStreamCard{
 		text:           "最终回复",

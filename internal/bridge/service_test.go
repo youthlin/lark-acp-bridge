@@ -8544,6 +8544,7 @@ type fakeStreamCard struct {
 	textUpdates           []string
 	finalTextUpdates      []string
 	finalRenderContexts   []feishu.OutboundRenderContext
+	metaUpdates           []feishu.StreamCardMeta
 	processUpdates        []string
 	statusUpdates         []string
 	usageDetails          []string
@@ -8576,6 +8577,16 @@ func (f *fakeStreamCard) SetFinalText(ctx context.Context, text string, render f
 	}
 	f.finalTextUpdates = append(f.finalTextUpdates, text)
 	f.finalRenderContexts = append(f.finalRenderContexts, render)
+	return nil
+}
+
+func (f *fakeStreamCard) UpdateMeta(ctx context.Context, meta feishu.StreamCardMeta) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	f.metaUpdates = append(f.metaUpdates, meta)
 	return nil
 }
 
@@ -8635,6 +8646,12 @@ func (f *fakeStreamCard) finalRenderContextsSnapshot() []feishu.OutboundRenderCo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]feishu.OutboundRenderContext(nil), f.finalRenderContexts...)
+}
+
+func (f *fakeStreamCard) metaUpdatesSnapshot() []feishu.StreamCardMeta {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]feishu.StreamCardMeta(nil), f.metaUpdates...)
 }
 
 func (f *fakeStreamCard) processUpdatesSnapshot() []string {

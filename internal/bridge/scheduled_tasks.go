@@ -21,6 +21,9 @@ const (
 	scheduleOverlapSkipIfRunning = "skip_if_running"
 	sessionSourceSchedule        = "schedule"
 	scheduleRunHistoryLimit      = 100
+	scheduleStreamCardRunning    = "定时任务执行中"
+	scheduleStreamCardCompleted  = "定时任务已完成"
+	scheduleStreamCardResult     = "定时任务执行结果"
 )
 
 type scheduleRunState string
@@ -590,6 +593,7 @@ func (s *scheduledTaskIMSink) OnComplete(ctx context.Context, result TriggerResu
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
 		stream.updatePromptResult(result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)
+		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(result, scheduleStreamCardCompleted))
 		stream.closeWithContext(finalCtx)
 		return nil
 	}
@@ -609,6 +613,7 @@ func (s *scheduledTaskIMSink) OnError(ctx context.Context, result TriggerResult)
 		}
 		stream.updateProcessMessageWithContext(finalCtx, text)
 		stream.failPromptStatusWithContext(finalCtx)
+		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(result, scheduleStreamCardResult))
 		stream.closeWithContext(finalCtx)
 		return nil
 	}
@@ -640,13 +645,17 @@ func (s *scheduledTaskIMSink) ensureStream(ctx context.Context, result TriggerRe
 }
 
 func (s *scheduledTaskIMSink) streamCardMeta(result TriggerResult) feishu.StreamCardMeta {
+	return s.streamCardMetaWithTitle(result, scheduleStreamCardRunning)
+}
+
+func (s *scheduledTaskIMSink) streamCardMetaWithTitle(result TriggerResult, title string) feishu.StreamCardMeta {
 	taskID := firstNonEmpty(s.taskID, result.Request.Metadata["task_id"])
 	subtitle := ""
 	if taskID != "" {
 		subtitle = "task-id: " + taskID
 	}
 	return feishu.StreamCardMeta{
-		Title:    "定时任务执行结果",
+		Title:    title,
 		Subtitle: subtitle,
 		Footer:   "本消息的回复链将在本次执行会话中处理。",
 	}

@@ -366,6 +366,17 @@ func (c *sdkStreamCard) SetFinalText(ctx context.Context, text string, render Ou
 	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardTextElementID, c.text))
 }
 
+func (c *sdkStreamCard) UpdateMeta(ctx context.Context, meta StreamCardMeta) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.meta = normalizeStreamCardMeta(meta)
+	c.streamingClosed = true
+	return c.updateFullCardLocked(ctx, true)
+}
+
 func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
 	seq := c.nextSequenceLocked()
 	elements := newStreamCardProcessPanelJSON()

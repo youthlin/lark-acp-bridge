@@ -891,16 +891,18 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	}
 	var streamTargets []feishu.Message
 	var streamMetas []feishu.StreamCardMeta
+	var streamCard *fakeStreamCard
 	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
 		streamMetas = append(streamMetas, feishu.StreamCardMetaFromContext(ctx))
-		return &fakeStreamCard{message: feishu.SentMessage{
+		streamCard = &fakeStreamCard{message: feishu.SentMessage{
 			MessageID: "om_schedule_result",
 			ChatID:    msg.ChatID,
 			ChatType:  msg.ChatType,
 			ThreadID:  msg.ThreadID,
 			RootID:    "om_schedule_result",
-		}}, nil
+		}}
+		return streamCard, nil
 	}
 	chatSession := Session{
 		Key:          imSessionKey("bot-a", "oc_chat", ""),
@@ -922,8 +924,15 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	if streamTargets[0].ChatID != "oc_chat" || streamTargets[0].ThreadID != "" || streamTargets[0].MessageID != "" || streamTargets[0].ForceReplyInThread {
 		t.Fatalf("stream target = %+v, want new root result card target", streamTargets[0])
 	}
-	if len(streamMetas) != 1 || streamMetas[0].Title != "定时任务执行结果" || streamMetas[0].Subtitle != "task-id: daily" || streamMetas[0].Footer != "本消息的回复链将在本次执行会话中处理。" {
+	if len(streamMetas) != 1 || streamMetas[0].Title != "定时任务执行中" || streamMetas[0].Subtitle != "task-id: daily" || streamMetas[0].Footer != "本消息的回复链将在本次执行会话中处理。" {
 		t.Fatalf("stream metas = %+v, want schedule result card metadata", streamMetas)
+	}
+	if streamCard == nil {
+		t.Fatal("stream card was not created")
+	}
+	metaUpdates := streamCard.metaUpdatesSnapshot()
+	if len(metaUpdates) != 1 || metaUpdates[0].Title != "定时任务已完成" || metaUpdates[0].Subtitle != "task-id: daily" || metaUpdates[0].Footer != "本消息的回复链将在本次执行会话中处理。" {
+		t.Fatalf("meta updates = %+v, want completed schedule result card metadata", metaUpdates)
 	}
 	runSession := runResult.TriggerResult.Session
 	if runSession.Key.Source != sessionSourceSchedule || runSession.Key.MainID != "task:daily" || runSession.Key.SubID != "run:run-1" {

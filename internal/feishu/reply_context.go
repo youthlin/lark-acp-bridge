@@ -63,6 +63,7 @@ type StreamCard interface {
 	UpdateUsageDetail(context.Context, string) error
 	UpdateText(context.Context, string) error
 	SetFinalText(context.Context, string, OutboundRenderContext) error
+	UpdateMeta(context.Context, StreamCardMeta) error
 	Close(context.Context) error
 }
 

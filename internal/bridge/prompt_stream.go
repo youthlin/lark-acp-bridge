@@ -163,6 +163,22 @@ func (s *promptCardStream) setFinalTextWithContext(ctx context.Context, text str
 	}
 }
 
+func (s *promptCardStream) updateMetaWithContext(ctx context.Context, meta feishu.StreamCardMeta) {
+	s.mu.Lock()
+	delayed := s.delayed
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
+	card := s.ensureCardWithContext(ctx)
+	if card == nil {
+		return
+	}
+	if err := card.UpdateMeta(ctx, meta); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片元信息失败", "session", s.session.ACPSessionID, "错误", err)
+	}
+}
+
 func (s *promptCardStream) updatePromptStatusFromUpdate(update acp.PromptUpdate) {
 	if !s.showStatusBar {
 		return
