@@ -122,7 +122,7 @@ func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
 	}
 
 	client := newFakeSentMessageClient("om_loop_start")
-	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
 		ChatID:   "oc_chat",
@@ -263,14 +263,14 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 		defer cardsMu.Unlock()
 		return append([]*fakeStreamCard(nil), cards...)
 	}
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{failOnCanceledContext: true}
 		cardsMu.Lock()
 		cards = append(cards, card)
 		cardsMu.Unlock()
 		return card, nil
-	})
+	}
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",

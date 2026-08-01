@@ -157,7 +157,7 @@ func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message,
 		if strings.TrimSpace(reply) == "" {
 			return
 		}
-		if ok, err := feishu.SendIntermediateReply(context.WithoutCancel(ctx), autoMsg, reply); err != nil {
+		if ok, err := s.sendIntermediateReply(context.WithoutCancel(ctx), autoMsg, reply); err != nil {
 			slog.WarnContext(context.WithoutCancel(ctx), "发送待处理群聊 auto 回复失败", "错误", err)
 		} else if !ok {
 			slog.WarnContext(context.WithoutCancel(ctx), "缺少待处理群聊 auto 回复发送器")
@@ -222,7 +222,7 @@ func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.M
 
 func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
 	if s.shouldDelayAtAutoProgress(msg) {
-		stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix)
+		stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
 		stream.delayCardCreation()
 		chunks := newPromptChunkAccumulator(stream)
 		flushStreams := func() {
@@ -246,7 +246,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 				stream.updatePromptUpdate(update)
 			},
 			OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
-				outcome, ok, err := feishu.RequestPermission(reqCtx, msg, req)
+				outcome, ok, err := s.requestPermission(reqCtx, msg, req)
 				if err != nil {
 					return acp.PermissionOutcome{}, err
 				}
@@ -272,7 +272,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 		}
 		return result, stream.hasStarted(), result, streamedReply, err
 	}
-	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix)
+	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
 	chunks := newPromptChunkAccumulator(stream)
 	flushStreams := func() {
 		chunks.finishStream()
@@ -296,7 +296,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 			stream.updatePromptUpdate(update)
 		},
 		OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
-			outcome, ok, err := feishu.RequestPermission(reqCtx, msg, req)
+			outcome, ok, err := s.requestPermission(reqCtx, msg, req)
 			if err != nil {
 				return acp.PermissionOutcome{}, err
 			}

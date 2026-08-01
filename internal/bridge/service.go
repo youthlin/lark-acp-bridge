@@ -25,6 +25,8 @@ type Service struct {
 	scheduleMessageSenders map[string]scheduledTaskMessageSender
 	scheduleStreams        map[string]scheduledTaskStreamStarter
 	usageStores            map[string]*TokenUsageStore
+	outboundMu             sync.Mutex
+	outbounds              map[string]feishu.Outbound
 	restartCommand         func(context.Context) error
 	builtinRestart         bool // 是否允许使用内置后台 restart
 
@@ -59,6 +61,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
 		scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
 		usageStores:            make(map[string]*TokenUsageStore),
+		outbounds:              make(map[string]feishu.Outbound),
 		runtime:                newRuntimeManager(),
 		tasks:                  make(map[SessionKey]*runningTask),
 		wikiTasks:              make(map[runtimeKey]*runningTask),
@@ -152,7 +155,7 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return "", nil
 	}
 	if s.shouldStartProcessingReaction(msg) {
-		if cleanup, ok := feishu.StartProcessingReaction(ctx, msg); ok {
+		if cleanup, ok := s.startProcessingReaction(ctx, msg); ok {
 			defer cleanup()
 		}
 	}

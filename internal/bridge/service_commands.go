@@ -141,7 +141,7 @@ func (s *Service) handleRestartCommand(ctx context.Context, msg feishu.Message) 
 		slog.ErrorContext(ctx, "记录重启确认消息失败", "错误", err)
 		return "记录重启确认消息失败：" + err.Error()
 	}
-	if ok, err := feishu.SendIntermediateReply(ctx, msg, "收到，准备重启 bridge 服务。"); err != nil {
+	if ok, err := s.sendIntermediateReply(ctx, msg, "收到，准备重启 bridge 服务。"); err != nil {
 		removeRestartAck(workspace)
 		slog.ErrorContext(ctx, "发送重启准备消息失败", "错误", err)
 		return "发送重启准备消息失败：" + err.Error()

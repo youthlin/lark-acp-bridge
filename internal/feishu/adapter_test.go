@@ -45,7 +45,17 @@ func (h replyingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (
 type reactionStartingHandler struct{}
 
 func (h reactionStartingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (string, error) {
-	cleanup, _ := StartProcessingReaction(ctx, msg)
+	return "", nil
+}
+
+func (h reactionStartingHandler) HandleFeishuMessageWithOutbound(ctx context.Context, msg Message, outbound Outbound) (string, error) {
+	starter, _ := outbound.(interface {
+		StartProcessingReaction(context.Context, Message) func()
+	})
+	if starter == nil {
+		return "", nil
+	}
+	cleanup := starter.StartProcessingReaction(ctx, msg)
 	if cleanup != nil {
 		defer cleanup()
 	}

@@ -96,7 +96,7 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 		ACPSessionID: session.ACPSessionID,
 		Text:         startText,
 	}
-	if card, ok, err := feishu.SendLoopStatusCard(ctx, msg, cardReq); err != nil {
+	if card, ok, err := s.sendLoopStatusCard(ctx, msg, cardReq); err != nil {
 		return "启动 loop 失败：" + err.Error()
 	} else if ok {
 		anchor := loopAnchor{message: loopAnchorMessage(msg, card.Message()), request: req, card: card, started: started}

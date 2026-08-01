@@ -87,17 +87,25 @@ func handleFeishuMessage(t *testing.T, svc *Service, ctx context.Context, msg fe
 }
 
 type fakeSentMessageClient struct {
-	mu            sync.Mutex
-	nextID        string
-	sent          []string
-	msgs          []feishu.Message
-	updates       []string
-	updateIDs     []string
-	finishes      []string
-	finishIDs     []string
-	loopRequests  []feishu.LoopStatusCardRequest
-	textUpdates   []string
-	textUpdateIDs []string
+	mu                      sync.Mutex
+	nextID                  string
+	replySender             func(context.Context, feishu.Message, string) error
+	streamStarter           func(context.Context, feishu.Message) (feishu.StreamCard, error)
+	reactionStarter         func(context.Context, feishu.Message) func()
+	modelSelectionSender    func(context.Context, feishu.Message, feishu.ModelSelectionCard) error
+	modeSelectionSender     func(context.Context, feishu.Message, feishu.ModeSelectionCard) error
+	sessionSelectionSender  func(context.Context, feishu.Message, feishu.SessionSelectionCard) error
+	configDetailSender      func(context.Context, feishu.Message, feishu.ConfigDetailCard) error
+	driveCommentReplySender func(context.Context, feishu.DriveComment, string) error
+	sent                    []string
+	msgs                    []feishu.Message
+	updates                 []string
+	updateIDs               []string
+	finishes                []string
+	finishIDs               []string
+	loopRequests            []feishu.LoopStatusCardRequest
+	textUpdates             []string
+	textUpdateIDs           []string
 }
 
 func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
@@ -105,6 +113,18 @@ func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
 }
 
 func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, error) {
+	return f.SendTextMessage(ctx, msg, text)
+}
+
+func (f *fakeSentMessageClient) SendText(ctx context.Context, msg feishu.Message, text string) error {
+	if f != nil && f.replySender != nil {
+		return f.replySender(ctx, msg, text)
+	}
+	_, err := f.SendTextMessage(ctx, msg, text)
+	return err
+}
+
+func (f *fakeSentMessageClient) SendTextMessage(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := strings.TrimSpace(f.nextID)
@@ -123,6 +143,10 @@ func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, te
 }
 
 func (f *fakeSentMessageClient) update(ctx context.Context, messageID string, text string) error {
+	return f.UpdateText(ctx, messageID, text)
+}
+
+func (f *fakeSentMessageClient) UpdateText(ctx context.Context, messageID string, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.textUpdateIDs = append(f.textUpdateIDs, messageID)
@@ -131,6 +155,10 @@ func (f *fakeSentMessageClient) update(ctx context.Context, messageID string, te
 }
 
 func (f *fakeSentMessageClient) sendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {
+	return f.SendLoopStatusCard(ctx, msg, request)
+}
+
+func (f *fakeSentMessageClient) SendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := strings.TrimSpace(f.nextID)
@@ -148,6 +176,55 @@ func (f *fakeSentMessageClient) sendLoopStatusCard(ctx context.Context, msg feis
 	f.msgs = append(f.msgs, msg)
 	f.loopRequests = append(f.loopRequests, request)
 	return &fakeLoopStatusCard{client: f, message: sent}, nil
+}
+
+func (f *fakeSentMessageClient) StartStreamCard(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	if f == nil || f.streamStarter == nil {
+		return nil, nil
+	}
+	return f.streamStarter(ctx, msg)
+}
+
+func (f *fakeSentMessageClient) StartProcessingReaction(ctx context.Context, msg feishu.Message) func() {
+	if f == nil || f.reactionStarter == nil {
+		return func() {}
+	}
+	return f.reactionStarter(ctx, msg)
+}
+
+func (f *fakeSentMessageClient) SendModelSelectionCard(ctx context.Context, msg feishu.Message, card feishu.ModelSelectionCard) error {
+	if f == nil || f.modelSelectionSender == nil {
+		return nil
+	}
+	return f.modelSelectionSender(ctx, msg, card)
+}
+
+func (f *fakeSentMessageClient) SendModeSelectionCard(ctx context.Context, msg feishu.Message, card feishu.ModeSelectionCard) error {
+	if f == nil || f.modeSelectionSender == nil {
+		return nil
+	}
+	return f.modeSelectionSender(ctx, msg, card)
+}
+
+func (f *fakeSentMessageClient) SendSessionSelectionCard(ctx context.Context, msg feishu.Message, card feishu.SessionSelectionCard) error {
+	if f == nil || f.sessionSelectionSender == nil {
+		return nil
+	}
+	return f.sessionSelectionSender(ctx, msg, card)
+}
+
+func (f *fakeSentMessageClient) SendConfigDetailCard(ctx context.Context, msg feishu.Message, card feishu.ConfigDetailCard) error {
+	if f == nil || f.configDetailSender == nil {
+		return nil
+	}
+	return f.configDetailSender(ctx, msg, card)
+}
+
+func (f *fakeSentMessageClient) ReplyDriveComment(ctx context.Context, comment feishu.DriveComment, text string) error {
+	if f == nil || f.driveCommentReplySender == nil {
+		return nil
+	}
+	return f.driveCommentReplySender(ctx, comment, text)
 }
 
 type fakeLoopStatusCard struct {
@@ -235,10 +312,11 @@ func (f *fakeSentMessageClient) textUpdatesSnapshot() []string {
 	return append([]string(nil), f.textUpdates...)
 }
 
-func withFakeSentMessageClient(ctx context.Context, client *fakeSentMessageClient) context.Context {
-	ctx = feishu.WithSentMessageSender(ctx, client.send)
-	ctx = feishu.WithMessageUpdater(ctx, client.update)
-	return feishu.WithLoopStatusCardSender(ctx, client.sendLoopStatusCard)
+func withFakeSentMessageClient(ctx context.Context, svc *Service, botID string, client *fakeSentMessageClient) context.Context {
+	if svc != nil {
+		svc.setOutbound(botID, client)
+	}
+	return ctx
 }
 
 func ensureTestOwner(t *testing.T, svc *Service, botID string) {
@@ -998,10 +1076,13 @@ func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	var got feishu.ConfigDetailCard
-	ctx := feishu.WithConfigDetailCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ConfigDetailCard) error {
+	client := newFakeSentMessageClient("")
+	client.configDetailSender = func(ctx context.Context, msg feishu.Message, card feishu.ConfigDetailCard) error {
 		got = card
 		return nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
+	ctx := context.Background()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
@@ -1262,10 +1343,13 @@ func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
 	cfg.Bots[0].OwnerOpenIDs = []string{"ou_requester"}
 	svc := NewService(cfg, store)
 	var got feishu.ModelSelectionCard
-	ctx := feishu.WithModelSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModelSelectionCard) error {
+	client := newFakeSentMessageClient("")
+	client.modelSelectionSender = func(ctx context.Context, msg feishu.Message, card feishu.ModelSelectionCard) error {
 		got = card
 		return nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
+	ctx := context.Background()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
@@ -1396,10 +1480,13 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 	cfg.Bots[0].OwnerOpenIDs = []string{"ou_requester"}
 	svc := NewService(cfg, store)
 	var got feishu.ModeSelectionCard
-	ctx := feishu.WithModeSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.ModeSelectionCard) error {
+	client := newFakeSentMessageClient("")
+	client.modeSelectionSender = func(ctx context.Context, msg feishu.Message, card feishu.ModeSelectionCard) error {
 		got = card
 		return nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
+	ctx := context.Background()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
@@ -1657,13 +1744,16 @@ func TestHandleFeishuMessageShowCommandSurvivesNewSession(t *testing.T) {
 	}
 	var statusBarEnabled *bool
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		enabled := feishu.StreamCardStatusBarEnabled(ctx)
 		statusBarEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     msg.BotID,
@@ -2653,12 +2743,15 @@ func TestHandleFeishuGroupChatStartsReactionOnlyWhenMessageIsProcessed(t *testin
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var started, cleaned int
-	ctx := feishu.WithProcessingReactionStarter(context.Background(), func(context.Context, feishu.Message) func() {
+	client := newFakeSentMessageClient("")
+	client.reactionStarter = func(context.Context, feishu.Message) func() {
 		started++
 		return func() {
 			cleaned++
 		}
-	})
+	}
+	svc.setOutbound("bot-a", client)
+	ctx := context.Background()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -2858,11 +2951,13 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	}
 
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     msg.BotID,
@@ -2929,6 +3024,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 		},
 	}
 	rt.mu.Unlock()
+	svc.setOutbound("bot-a", client)
 
 	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     msg.BotID,
@@ -3073,10 +3169,13 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 		t.Fatalf("UpsertChat() error = %v", err)
 	}
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	mentionDone := make(chan struct {
 		reply string
@@ -3299,11 +3398,14 @@ func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCar
 		t.Fatalf("UpsertChat() error = %v", err)
 	}
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -3645,10 +3747,13 @@ func TestHandleFeishuTopicThreadAllowsNewAndSessionCommands(t *testing.T) {
 	}
 
 	var card feishu.SessionSelectionCard
-	ctx := feishu.WithSessionSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, sent feishu.SessionSelectionCard) error {
+	client := newFakeSentMessageClient("")
+	client.sessionSelectionSender = func(ctx context.Context, msg feishu.Message, sent feishu.SessionSelectionCard) error {
 		card = sent
 		return nil
-	})
+	}
+	svc.setOutbound(base.BotID, client)
+	ctx := context.Background()
 	listMsg := base
 	listMsg.MessageID = "om_list"
 	listMsg.Text = "@智能助手 /session list"
@@ -3822,10 +3927,13 @@ func TestHandleFeishuSessionListSendsSelectionCard(t *testing.T) {
 	}
 
 	var got feishu.SessionSelectionCard
-	ctx := feishu.WithSessionSelectionCardSender(context.Background(), func(ctx context.Context, msg feishu.Message, card feishu.SessionSelectionCard) error {
+	client := newFakeSentMessageClient("")
+	client.sessionSelectionSender = func(ctx context.Context, msg feishu.Message, card feishu.SessionSelectionCard) error {
 		got = card
 		return nil
-	})
+	}
+	svc.setOutbound(base.BotID, client)
+	ctx := context.Background()
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     base.BotID,
 		ChatID:    base.ChatID,
@@ -4458,10 +4566,13 @@ func TestHandleFeishuMessageNewOnlyConfirmsSessionCreation(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "bot-a")
 	workDir := t.TempDir()
 	var immediateReplies []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		immediateReplies = append(immediateReplies, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -4528,11 +4639,14 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -4583,11 +4697,14 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -4654,11 +4771,14 @@ func TestHandleFeishuMessageFinalStreamCardUsesMarkdownImageRenderContext(t *tes
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -4743,11 +4863,14 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 		t.Fatalf("UpsertChat(chat) error = %v", err)
 	}
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -4845,11 +4968,14 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 		t.Fatalf("UpsertChat(chat) error = %v", err)
 	}
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5013,13 +5139,16 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 	svc.setRuntime(rt)
 	var statusBarEnabled *bool
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		enabled := feishu.StreamCardStatusBarEnabled(ctx)
 		statusBarEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
@@ -5079,11 +5208,14 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
@@ -5130,11 +5262,14 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
@@ -5193,11 +5328,14 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 		t.Fatalf("UpsertChat(chat) error = %v", err)
 	}
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5270,11 +5408,14 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 		t.Fatalf("UpsertChat(chat) error = %v", err)
 	}
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5336,11 +5477,14 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5415,11 +5559,14 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5496,11 +5643,14 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5564,11 +5714,14 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
@@ -5696,11 +5849,14 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 			svc := newTestService(config.Default(), store)
 			svc.setRuntime(rt)
 			var cards []*fakeStreamCard
-			ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+			ctx := context.Background()
+			client := newFakeSentMessageClient("")
+			client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 				card := &fakeStreamCard{}
 				cards = append(cards, card)
 				return card, nil
-			})
+			}
+			svc.setOutbound(session.Key.BotID, client)
 
 			reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 				BotID:     session.Key.BotID,
@@ -5772,13 +5928,16 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	svc.setRuntime(rt)
 	var processPanelEnabled *bool
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		enabled := feishu.StreamCardProcessPanelEnabled(ctx)
 		processPanelEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound(session.Key.BotID, client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
@@ -5872,13 +6031,16 @@ func TestPromptRuntimeWaitsForInFlightDebouncedCardFlush(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		close(started)
 		<-release
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	result := make(chan struct {
 		reply string
@@ -7271,11 +7433,13 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	ctx := context.Background()
 	var cards []*fakeStreamCard
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	firstDone := make(chan struct {
 		reply string
 		err   error
@@ -7463,11 +7627,11 @@ func TestLoopCommandRunsUntilDoneAndUpdatesStartCard(t *testing.T) {
 	}
 	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7564,17 +7728,17 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	var intermediate []string
 	var streamMsgs []feishu.Message
 	var cards []*fakeStreamCard
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	}
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		streamMsgs = append(streamMsgs, msg)
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7659,13 +7823,13 @@ func TestLoopCommandStopsWhenFinalCardTextIsDoneAfterProcessMessages(t *testing.
 		t.Fatalf("Upsert() error = %v", err)
 	}
 	client := newFakeSentMessageClient("om_loop_start")
-	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
 	var cards []*fakeStreamCard
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
-	})
+	}
 
 	if reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7730,13 +7894,13 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 		defer streamMsgsMu.Unlock()
 		return append([]feishu.Message(nil), streamMsgs...)
 	}
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithStreamCardStarter(ctx, func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		streamMsgsMu.Lock()
 		streamMsgs = append(streamMsgs, msg)
 		streamMsgsMu.Unlock()
 		return &fakeStreamCard{}, nil
-	})
+	}
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7784,11 +7948,11 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 	}
 	client := newFakeSentMessageClient("om_loop_start")
 	var intermediate []string
-	ctx := withFakeSentMessageClient(context.Background(), client)
-	ctx = feishu.WithIntermediateReplySender(ctx, func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
 
 	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7837,7 +8001,7 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	}
 
 	client := newFakeSentMessageClient("om_loop_start")
-	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7905,7 +8069,7 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 	}
 
 	client := newFakeSentMessageClient("om_loop_start")
-	ctx := withFakeSentMessageClient(context.Background(), client)
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
 
 	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    "bot-a",
@@ -7965,10 +8129,13 @@ func TestHandleRestartCommandWritesAckSendsPreparingReplyAndRunsCommand(t *testi
 		return nil
 	})
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	workspace := t.TempDir()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
@@ -8041,10 +8208,12 @@ func TestHandleRestartCommandRejectsDefaultRestartOutsideDaemon(t *testing.T) {
 	cfg.Bots[0].ID = "bot-a"
 	cfg.Bots[0].OwnerOpenIDs = []string{"ou_owner"}
 	svc := NewService(cfg, store)
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		t.Fatal("intermediate reply should not be sent when restart command is unavailable")
 		return nil
-	})
+	}
 	workspace := t.TempDir()
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
@@ -8092,9 +8261,12 @@ func TestRestartCommandAllowsAdapterResolvedOwner(t *testing.T) {
 		restartCalled <- struct{}{}
 		return nil
 	})
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",

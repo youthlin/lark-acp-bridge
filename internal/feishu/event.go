@@ -60,19 +60,24 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	msg.Images = hydrateMessageImages(ctx, a.messages, msg.MessageID, msg.Workspace, msg.Images)
 	setMessagePrimaryImage(&msg)
 	msg = a.withReplyContext(ctx, msg)
-	ctx = WithIntermediateReplySender(ctx, a.SendText)
-	ctx = WithSentMessageSender(ctx, a.SendTextMessage)
-	ctx = WithMessageUpdater(ctx, a.UpdateText)
-	ctx = WithLoopStatusCardSender(ctx, a.SendLoopStatusCard)
-	ctx = WithStreamCardStarter(ctx, a.StartStreamCard)
-	ctx = WithPermissionRequester(ctx, a.RequestPermission)
-	ctx = WithProcessingReactionStarter(ctx, a.StartProcessingReaction)
-	ctx = WithModelSelectionCardSender(ctx, a.SendModelSelectionCard)
-	ctx = WithModeSelectionCardSender(ctx, a.SendModeSelectionCard)
-	ctx = WithSessionSelectionCardSender(ctx, a.SendSessionSelectionCard)
-	ctx = WithConfigDetailCardSender(ctx, a.SendConfigDetailCard)
 
-	reply, err := a.handler.HandleFeishuMessage(ctx, msg)
+	handler := a.handler
+	if outboundHandler, ok := handler.(OutboundHandler); ok {
+		reply, err := outboundHandler.HandleFeishuMessageWithOutbound(ctx, msg, a)
+		if err != nil {
+			slog.ErrorContext(ctx, "处理飞书消息失败", "错误", err)
+			reply = "处理消息失败：" + err.Error()
+		}
+		if reply == "" {
+			return nil
+		}
+		if err := a.SendText(ctx, msg, reply); err != nil {
+			return fmt.Errorf("回复飞书消息: %w", err)
+		}
+		slog.InfoContext(ctx, "回复飞书消息成功")
+		return nil
+	}
+	reply, err := handler.HandleFeishuMessage(ctx, msg)
 	if err != nil {
 		slog.ErrorContext(ctx, "处理飞书消息失败", "错误", err)
 		reply = "处理消息失败：" + err.Error()

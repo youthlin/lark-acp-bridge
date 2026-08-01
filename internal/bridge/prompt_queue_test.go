@@ -41,10 +41,13 @@ func TestHandleQueueCommandQueuesWithoutCancelingRunningTaskAndDrainsFIFO(t *tes
 	svc.setRuntime(rt)
 
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	promptDone := make(chan string, 1)
 	go func() {
 		reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
@@ -135,10 +138,13 @@ func TestHandleQueueCommandRunsImmediatelyWhenIdle(t *testing.T) {
 	svc.setRuntime(rt)
 
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
 		MessageID: "om_queue",
@@ -179,10 +185,13 @@ func TestFinishPromptQueueDrainRestartsWhenItemArrivesBeforeFinish(t *testing.T)
 	svc.setRuntime(rt)
 
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	key := normalizeSessionKey(session.Key)
 	svc.promptQueues[key] = &promptQueue{
 		draining: true,
@@ -235,10 +244,13 @@ func TestHandleQueueCommandRefreshesUnavailableACPSession(t *testing.T) {
 	svc.setRuntime(rt)
 
 	var intermediate []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate = append(intermediate, text)
 		return nil
-	})
+	}
+	svc.setOutbound("bot-a", client)
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
 		MessageID: "om_queue",

@@ -54,7 +54,7 @@ func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveCo
 }
 
 func (s *Service) replyDriveComment(ctx context.Context, comment feishu.DriveComment, text string) error {
-	sent, err := feishu.ReplyDriveComment(ctx, comment, text)
+	sent, err := s.replyDriveCommentWithOutbound(ctx, comment, text)
 	if err != nil {
 		return fmt.Errorf("回复云文档评论: %w", err)
 	}
@@ -68,7 +68,7 @@ func (s *Service) replyDriveCommentError(ctx context.Context, comment feishu.Dri
 	if err == nil {
 		return
 	}
-	sent, replyErr := feishu.ReplyDriveComment(ctx, comment, "处理评论失败："+err.Error())
+	sent, replyErr := s.replyDriveCommentWithOutbound(ctx, comment, "处理评论失败："+err.Error())
 	if replyErr != nil {
 		slog.WarnContext(ctx, "回复云文档评论错误失败", "file_token", comment.FileToken, "comment_id", comment.CommentID, "错误", replyErr)
 		return

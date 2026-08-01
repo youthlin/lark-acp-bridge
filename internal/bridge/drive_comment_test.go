@@ -18,6 +18,10 @@ type driveCommentReplyRecorder struct {
 }
 
 func (r *driveCommentReplyRecorder) send(ctx context.Context, comment feishu.DriveComment, text string) error {
+	return r.ReplyDriveComment(ctx, comment, text)
+}
+
+func (r *driveCommentReplyRecorder) ReplyDriveComment(ctx context.Context, comment feishu.DriveComment, text string) error {
 	r.comments = append(r.comments, comment)
 	r.texts = append(r.texts, text)
 	return nil
@@ -34,7 +38,8 @@ func TestDriveCommentSessionKeyAndPromptMetadata(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "agent reply"}
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
-	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+	svc.setOutbound("bot-a", replies)
+	ctx := context.Background()
 
 	comment := feishu.DriveComment{
 		BotID:             "bot-a",
@@ -150,7 +155,8 @@ func TestDriveCommentReusesSameCommentSessionAndIsolatesDifferentComments(t *tes
 		promptReply:   "ok",
 	}
 	svc.setRuntime(rt)
-	ctx := feishu.WithDriveCommentReplySender(context.Background(), (&driveCommentReplyRecorder{}).send)
+	svc.setOutbound("bot-a", &driveCommentReplyRecorder{})
+	ctx := context.Background()
 
 	base := feishu.DriveComment{
 		BotID:       "bot-a",
@@ -204,7 +210,8 @@ func TestDriveCommentMissingBodyRepliesWithoutTriggerPrompt(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "agent reply"}
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
-	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+	svc.setOutbound("bot-a", replies)
+	ctx := context.Background()
 
 	err := svc.HandleDriveComment(ctx, feishu.DriveComment{
 		BotID:       "bot-a",
@@ -240,7 +247,8 @@ func TestDriveCommentUnmentionedUsesSilentAutoJudgement(t *testing.T) {
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "需要回复"}}}
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
-	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+	svc.setOutbound("bot-a", replies)
+	ctx := context.Background()
 
 	comment := feishu.DriveComment{
 		BotID:       "bot-a",
@@ -326,7 +334,8 @@ func TestDriveCommentRepliesErrorWhenTriggerFails(t *testing.T) {
 	}
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
-	ctx := feishu.WithDriveCommentReplySender(context.Background(), replies.send)
+	svc.setOutbound("bot-a", replies)
+	ctx := context.Background()
 
 	err := svc.HandleDriveComment(ctx, feishu.DriveComment{
 		BotID:       "bot-a",

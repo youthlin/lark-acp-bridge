@@ -47,7 +47,7 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 }
 
 func (s *Service) sendConfigDetailCard(ctx context.Context, msg feishu.Message, opt acp.SessionConfigOption) string {
-	sent, err := feishu.SendConfigDetailCard(ctx, msg, configDetailCard(opt))
+	sent, err := s.sendConfigDetailCardOutbound(ctx, msg, configDetailCard(opt))
 	if err != nil {
 		slog.ErrorContext(ctx, "发送配置项详情卡片失败", "错误", err)
 		return "发送配置项详情卡片失败：" + err.Error()
@@ -142,7 +142,7 @@ func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message
 	if len(options) == 0 {
 		return "当前 ACP server 没有上报可选模型，请使用 /model <model> 设置。"
 	}
-	sent, err := feishu.SendModelSelectionCard(ctx, msg, feishu.ModelSelectionCard{
+	sent, err := s.sendModelSelectionCardOutbound(ctx, msg, feishu.ModelSelectionCard{
 		BotID:            session.Key.BotID,
 		ChatID:           session.Key.ChatID,
 		ThreadID:         session.Key.SubID,
@@ -220,7 +220,7 @@ func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message,
 	if len(options) == 0 {
 		return "当前 ACP server 没有上报可选模式，请使用 /mode <mode> 设置。"
 	}
-	sent, err := feishu.SendModeSelectionCard(ctx, msg, feishu.ModeSelectionCard{
+	sent, err := s.sendModeSelectionCardOutbound(ctx, msg, feishu.ModeSelectionCard{
 		BotID:            session.Key.BotID,
 		ChatID:           session.Key.ChatID,
 		ThreadID:         session.Key.SubID,

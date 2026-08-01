@@ -188,9 +188,14 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 	if !ok || handler == nil {
 		return nil
 	}
-	ctx = WithDriveCommentReplySender(ctx, a.ReplyDriveComment)
-	if err := handler.HandleDriveComment(ctx, comment); err != nil {
-		slog.ErrorContext(ctx, "处理云文档评论事件失败", "错误", err)
+	var handleErr error
+	if outboundHandler, ok := handler.(OutboundDriveCommentHandler); ok {
+		handleErr = outboundHandler.HandleDriveCommentWithOutbound(ctx, comment, a)
+	} else {
+		handleErr = handler.HandleDriveComment(ctx, comment)
+	}
+	if handleErr != nil {
+		slog.ErrorContext(ctx, "处理云文档评论事件失败", "错误", handleErr)
 	}
 	return nil
 }

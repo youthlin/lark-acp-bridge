@@ -15,7 +15,8 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		started <- struct{}{}
 		<-release
 		card := &fakeStreamCard{}
@@ -28,7 +29,7 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    "oc_private",
 		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{}, starter)
 
 	done := make(chan struct{}, 2)
 	go func() {
@@ -75,7 +76,8 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 
 func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -84,7 +86,7 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    "oc_private",
 		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{}, starter)
 
 	stream.updateProcess(strings.Repeat("前", maxPromptProcessRunes+20) + "尾部")
 
@@ -108,7 +110,8 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 
 func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -117,7 +120,7 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    "oc_private",
 		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{}, starter)
 
 	stream.updateProcess("one")
 	stream.updateProcess("two")
@@ -149,7 +152,8 @@ func TestProcessPanelTextKeepsProcessRowsCompact(t *testing.T) {
 func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
 	var cardsMu sync.Mutex
 	var cards []*fakeStreamCard
-	ctx := feishu.WithStreamCardStarter(context.Background(), func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cardsMu.Lock()
 		cards = append(cards, card)
@@ -165,7 +169,7 @@ func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
 		MessageID: "om_msg",
 		ChatID:    "oc_private",
 		ChatType:  "p2p",
-	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{})
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{}, starter)
 	chunks := newPromptChunkAccumulator(stream)
 	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "Hel"})
 	chunks.add(promptChunk{Target: promptChunkTargetText, Key: "agent_message", Text: "lo"})

@@ -539,6 +539,9 @@ func (s *Service) scheduleMessageSender(botID string) scheduledTaskMessageSender
 		return nil
 	}
 	botID = strings.TrimSpace(botID)
+	if sender, ok := s.outboundForBot(botID).(sentMessageSender); ok && sender != nil {
+		return sender.SendTextMessage
+	}
 	if sender := s.scheduleMessageSenders[botID]; sender != nil {
 		return sender
 	}
@@ -550,6 +553,9 @@ func (s *Service) scheduleStreamStarter(botID string) scheduledTaskStreamStarter
 		return nil
 	}
 	botID = strings.TrimSpace(botID)
+	if starter, ok := s.outboundForBot(botID).(streamCardStarter); ok && starter != nil {
+		return starter.StartStreamCard
+	}
 	if starter := s.scheduleStreams[botID]; starter != nil {
 		return starter
 	}
@@ -627,13 +633,12 @@ func (s *scheduledTaskIMSink) ensureStream(ctx context.Context, result TriggerRe
 	if s.starter == nil || strings.TrimSpace(s.message.ChatID) == "" {
 		return nil
 	}
-	ctx = feishu.WithStreamCardStarter(ctx, s.starter)
 	ctx = feishu.WithStreamCardMeta(ctx, s.streamCardMeta(result))
 	session := result.Session
 	if strings.TrimSpace(session.Cwd) == "" {
 		session.Cwd = s.cwd
 	}
-	stream := newPromptCardStream(ctx, s.message, session, ChatConfig{})
+	stream := newPromptCardStream(ctx, s.message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
 		return nil
@@ -691,13 +696,6 @@ func (s *scheduledTaskIMSink) send(ctx context.Context, result TriggerResult, te
 			return nil
 		}
 		slog.WarnContext(ctx, "定时任务 IM result sink 发送新消息失败，尝试降级发送", "chat_id", s.message.ChatID, "错误", err)
-	}
-	ok, err := feishu.SendIntermediateReply(ctx, s.message, text)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return nil
 	}
 	if s.sender != nil {
 		return s.sender(ctx, s.message, text, feishu.OutboundRenderContext{BaseDir: s.cwd})

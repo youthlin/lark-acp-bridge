@@ -777,21 +777,19 @@ func TestRunScheduledTaskOnceSendsResultToIMSink(t *testing.T) {
 			MessageID: "om_source",
 		},
 	}
-	var sent []string
-	var sentMsgs []feishu.Message
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
-		sent = append(sent, text)
-		sentMsgs = append(sentMsgs, msg)
-		return nil
-	})
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	svc.setOutbound("bot-a", client)
 
 	_, err := svc.runScheduledTaskOnce(ctx, task, "run-1", time.Now(), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("runScheduledTaskOnce() error = %v", err)
 	}
+	sent := client.sentSnapshot()
 	if len(sent) != 1 || sent[0] != "schedule done" {
 		t.Fatalf("sent = %+v, want schedule result", sent)
 	}
+	sentMsgs := client.messagesSnapshot()
 	if len(sentMsgs) != 1 || sentMsgs[0].BotID != "bot-a" || sentMsgs[0].ChatID != "oc_chat" || sentMsgs[0].ThreadID != "" || sentMsgs[0].MessageID != "" || sentMsgs[0].ForceReplyInThread {
 		t.Fatalf("sent messages = %+v, want new root result message target", sentMsgs)
 	}
@@ -1002,16 +1000,15 @@ func TestRunScheduledTaskOnceSendsErrorToIMSink(t *testing.T) {
 			ChatID: "oc_chat",
 		},
 	}
-	var sent []string
-	ctx := feishu.WithIntermediateReplySender(context.Background(), func(ctx context.Context, msg feishu.Message, text string) error {
-		sent = append(sent, text)
-		return nil
-	})
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	svc.setOutbound("bot-a", client)
 
 	_, err := svc.runScheduledTaskOnce(ctx, task, "run-1", time.Now(), t.TempDir(), nil)
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("runScheduledTaskOnce() error = %v, want boom", err)
 	}
+	sent := client.sentSnapshot()
 	if len(sent) != 1 || !strings.Contains(sent[0], "定时任务执行失败") || !strings.Contains(sent[0], "boom") {
 		t.Fatalf("sent = %+v, want failure text", sent)
 	}

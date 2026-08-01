@@ -15,6 +15,7 @@ type promptCardStream struct {
 	ctx     context.Context
 	msg     feishu.Message
 	session Session
+	starter streamCardStarter
 
 	mu                sync.Mutex
 	card              feishu.StreamCard
@@ -49,15 +50,16 @@ type promptToolRow struct {
 	active bool
 }
 
-func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session, show ChatConfig) *promptCardStream {
-	return newPromptCardStreamWithStatusPrefix(ctx, msg, session, show, "")
+func newPromptCardStream(ctx context.Context, msg feishu.Message, session Session, show ChatConfig, starter streamCardStarter) *promptCardStream {
+	return newPromptCardStreamWithStatusPrefix(ctx, msg, session, show, "", starter)
 }
 
-func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message, session Session, show ChatConfig, statusPrefix string) *promptCardStream {
+func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message, session Session, show ChatConfig, statusPrefix string, starter streamCardStarter) *promptCardStream {
 	return &promptCardStream{
 		ctx:              ctx,
 		msg:              msg,
 		session:          session,
+		starter:          starter,
 		available:        true,
 		showStepMessages: !show.HideStepMessages,
 		showPlans:        !show.HidePlans,
@@ -738,7 +740,19 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 
 	cardCtx := feishu.WithStreamCardProcessPanel(ctx, s.showStepMessages || s.showThoughts || s.showTools)
 	cardCtx = feishu.WithStreamCardStatusBar(cardCtx, s.showStatusBar)
-	card, ok, err := feishu.StartStreamCard(cardCtx, s.msg)
+	starter := s.starter
+	if starter == nil {
+		s.mu.Lock()
+		s.creating = false
+		if s.ready == ready {
+			s.ready = nil
+		}
+		close(ready)
+		s.available = false
+		s.mu.Unlock()
+		return nil
+	}
+	card, err := starter.StartStreamCard(cardCtx, s.msg)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.creating = false
@@ -751,7 +765,7 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 		slog.ErrorContext(s.ctx, "创建 ACP 流式卡片失败", "session", s.session.ACPSessionID, "错误", err)
 		return nil
 	}
-	if !ok || card == nil {
+	if card == nil {
 		s.available = false
 		return nil
 	}

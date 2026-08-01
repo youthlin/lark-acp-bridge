@@ -58,15 +58,28 @@ func (h *driveCommentRecordingHandler) HandleFeishuMessage(context.Context, Mess
 }
 
 func (h *driveCommentRecordingHandler) HandleDriveComment(ctx context.Context, comment DriveComment) error {
+	return h.HandleDriveCommentWithOutbound(ctx, comment, nil)
+}
+
+func (h *driveCommentRecordingHandler) HandleDriveCommentWithOutbound(ctx context.Context, comment DriveComment, outbound Outbound) error {
 	h.count++
 	h.comment = comment
+	replier, _ := outbound.(interface {
+		ReplyDriveComment(context.Context, DriveComment, string) error
+	})
 	if h.reply != "" {
-		if _, err := ReplyDriveComment(ctx, comment, h.reply); err != nil {
+		if replier == nil {
+			return errors.New("missing drive comment replier")
+		}
+		if err := replier.ReplyDriveComment(ctx, comment, h.reply); err != nil {
 			return err
 		}
 	}
 	if h.errReply != "" {
-		if _, err := ReplyDriveComment(ctx, comment, h.errReply); err != nil {
+		if replier == nil {
+			return errors.New("missing drive comment replier")
+		}
+		if err := replier.ReplyDriveComment(ctx, comment, h.errReply); err != nil {
 			return err
 		}
 	}

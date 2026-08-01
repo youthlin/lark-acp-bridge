@@ -48,7 +48,7 @@ func (s *Service) sendSessionList(ctx context.Context, msg feishu.Message) strin
 	if len(items) == 0 {
 		return "当前聊天还没有历史 ACP 会话。发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。"
 	}
-	sent, err := feishu.SendSessionSelectionCard(ctx, msg, feishu.SessionSelectionCard{
+	sent, err := s.sendSessionSelectionCardOutbound(ctx, msg, feishu.SessionSelectionCard{
 		BotID:               msg.BotID,
 		ChatID:              msg.ChatID,
 		ThreadID:            msg.ThreadID,

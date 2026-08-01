@@ -128,7 +128,7 @@ func (s *Service) drainPromptQueue(ctx context.Context, key SessionKey) {
 		if strings.TrimSpace(reply) == "" {
 			continue
 		}
-		if ok, err := feishu.SendIntermediateReply(ctx, item.msg, reply); err != nil {
+		if ok, err := s.sendIntermediateReply(ctx, item.msg, reply); err != nil {
 			slog.WarnContext(ctx, "发送队列 prompt 回复失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", err)
 		} else if !ok {
 			slog.WarnContext(ctx, "缺少队列 prompt 回复发送器", "session", item.session.ACPSessionID, "queue_index", item.replyIndex)
