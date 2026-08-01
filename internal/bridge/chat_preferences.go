@@ -360,21 +360,28 @@ func (s *Service) queueAtAutoMessageIfBusy(msg feishu.Message) bool {
 	if !ok {
 		return false
 	}
+	key := normalizeSessionKey(session.Key)
+	return s.appendPendingAtAutoMessage(key, entry)
+}
+
+func (s *Service) appendPendingAtAutoMessage(key SessionKey, entry pendingAtMessage) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
-	task := s.tasks[session.Key]
+	task := s.tasks[key]
 	if task == nil || !task.drainPendingAtAuto {
 		return false
 	}
-	pending := append(s.pendingAtAuto[session.Key], entry)
+	pending := append(s.pendingAtAuto[key], entry)
 	if len(pending) > maxPendingAtAuto {
 		pending = append([]pendingAtMessage(nil), pending[len(pending)-maxPendingAtAuto:]...)
 	}
-	s.pendingAtAuto[session.Key] = pending
+	s.pendingAtAuto[key] = pending
 	return true
 }
 
 func (s *Service) takePendingAtAutoMessages(key SessionKey) []pendingAtMessage {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	pending := append([]pendingAtMessage(nil), s.pendingAtAuto[key]...)

@@ -109,6 +109,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		if errors.Is(err, context.Canceled) {
 			return "", nil
 		}
+		s.recordACPError(session, "prompt", err)
 		if strings.TrimSpace(reply) != "" {
 			return reply, nil
 		}
@@ -126,6 +127,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	if !opts.SkipPendingAtAutoDrain {
 		s.runPendingAtAutoAsync(ctx, msg, session, agent)
 	}
+	s.clearACPError(session)
 	return reply, nil
 }
 

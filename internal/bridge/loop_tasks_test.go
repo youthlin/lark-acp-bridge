@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -179,6 +180,475 @@ func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
 	}
 }
 
+func TestLoopStatusHelpersIgnoreStaleStarted(t *testing.T) {
+	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	oldStarted := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	newStarted := oldStarted.Add(time.Minute)
+	svc.markLoopStarted(key, oldStarted, loopRequest{Prompt: "旧 loop", MaxRounds: 5, Interval: time.Second})
+	svc.markLoopStarted(key, newStarted, loopRequest{Prompt: "新 loop", MaxRounds: 3, Interval: 2 * time.Second})
+	if !svc.addLoopPendingMessage(key, "新补充") {
+		t.Fatal("addLoopPendingMessage() = false, want running loop")
+	}
+
+	svc.markLoopRound(key, oldStarted, 7)
+	if got := svc.takeLoopPendingAdd(key, oldStarted); got != "" {
+		t.Fatalf("takeLoopPendingAdd(old) = %q, want empty", got)
+	}
+	svc.markLoopFinished(key, oldStarted, "旧 loop 结束", nil)
+
+	svc.taskMu.Lock()
+	status := svc.loopStatuses[key]
+	svc.taskMu.Unlock()
+	if !status.running || !status.started.Equal(newStarted) || status.round != 0 || status.reason != "" {
+		t.Fatalf("loop status after stale updates = %+v, want new loop still running", status)
+	}
+	if status.pendingAdd != "新补充" {
+		t.Fatalf("pendingAdd = %q, want preserved new supplement", status.pendingAdd)
+	}
+
+	svc.markLoopRound(key, newStarted, 1)
+	if got := svc.takeLoopPendingAdd(key, newStarted); got != "新补充" {
+		t.Fatalf("takeLoopPendingAdd(new) = %q, want new supplement", got)
+	}
+	svc.markLoopFinished(key, newStarted, "新 loop 完成", nil)
+
+	svc.taskMu.Lock()
+	status = svc.loopStatuses[key]
+	svc.taskMu.Unlock()
+	if status.running || status.round != 1 || status.reason != "新 loop 完成" || status.lastError != "" {
+		t.Fatalf("loop status after current finish = %+v, want finished new loop", status)
+	}
+}
+
+func TestStartLoopStatusSessionWorkBoundaries(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	normalizedKey := normalizeSessionKey(key)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	started := time.Date(2026, 8, 1, 10, 30, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		existing  loopRunStatus
+		request   loopRequest
+		wantRound int
+	}{
+		{
+			name:     "新 loop 状态按规范化 key 写入",
+			request:  loopRequest{Prompt: "持续推进", MaxRounds: 3, MaxDuration: 5 * time.Minute, Interval: 2 * time.Second},
+			existing: loopRunStatus{},
+		},
+		{
+			name: "新 loop 开始会覆盖同 session 旧状态",
+			existing: loopRunStatus{
+				running:    false,
+				started:    started.Add(-time.Minute),
+				round:      4,
+				pendingAdd: "旧补充",
+				reason:     "旧 loop 完成",
+				lastError:  "旧错误",
+				prompt:     "旧 loop",
+			},
+			request: loopRequest{Prompt: "新 loop", MaxRounds: 1, Interval: time.Second},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.taskMu.Lock()
+			if !tt.existing.started.IsZero() || tt.existing.prompt != "" {
+				svc.loopStatuses[normalizedKey] = tt.existing
+			}
+			svc.loopStatuses[otherKey] = loopRunStatus{
+				running: true,
+				started: started.Add(time.Minute),
+				round:   8,
+				prompt:  "其他 loop",
+			}
+			svc.taskMu.Unlock()
+
+			svc.startLoopStatus(key, started, tt.request)
+
+			svc.taskMu.Lock()
+			status := svc.loopStatuses[normalizedKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			_, rawExists := svc.loopStatuses[key]
+			svc.taskMu.Unlock()
+			if rawExists && key != normalizedKey {
+				t.Fatalf("loopStatuses contains raw key %+v, want only normalized key", key)
+			}
+			if !status.running || !status.started.Equal(started) || status.round != 0 || status.prompt != tt.request.Prompt {
+				t.Fatalf("status = %+v, want new running loop for prompt %q", status, tt.request.Prompt)
+			}
+			if status.pendingAdd != "" || status.reason != "" || status.lastError != "" {
+				t.Fatalf("status = %+v, want stale terminal fields cleared", status)
+			}
+			if status.maxRounds != tt.request.MaxRounds || status.maxDuration != tt.request.MaxDuration || status.interval != tt.request.Interval {
+				t.Fatalf("status = %+v, want request limits copied from %+v", status, tt.request)
+			}
+			if otherStatus.round != 8 || otherStatus.prompt != "其他 loop" {
+				t.Fatalf("other status = %+v, want unchanged other session", otherStatus)
+			}
+		})
+	}
+}
+
+func TestAppendLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	normalizedKey := normalizeSessionKey(key)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	started := time.Date(2026, 8, 1, 10, 45, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		existing    *loopRunStatus
+		text        string
+		wantAdded   bool
+		wantPending string
+	}{
+		{
+			name:        "运行中 loop 写入裁剪后的补充消息",
+			existing:    &loopRunStatus{running: true, started: started, prompt: "目标 loop"},
+			text:        "  补充 A  ",
+			wantAdded:   true,
+			wantPending: "补充 A",
+		},
+		{
+			name:        "运行中 loop 追加补充消息用空行分隔",
+			existing:    &loopRunStatus{running: true, started: started, pendingAdd: "已有补充", prompt: "目标 loop"},
+			text:        "补充 B",
+			wantAdded:   true,
+			wantPending: "已有补充\n\n补充 B",
+		},
+		{
+			name:        "已结束 loop 不接受补充消息",
+			existing:    &loopRunStatus{running: false, started: started, reason: "已完成", prompt: "目标 loop"},
+			text:        "补充 C",
+			wantPending: "",
+		},
+		{
+			name:        "缺少 loop 状态不接受补充消息",
+			text:        "补充 D",
+			wantPending: "",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.taskMu.Lock()
+			if tt.existing != nil {
+				svc.loopStatuses[normalizedKey] = *tt.existing
+			}
+			svc.loopStatuses[otherKey] = loopRunStatus{
+				running:    true,
+				started:    started.Add(time.Minute),
+				pendingAdd: "其他补充",
+				prompt:     "其他 loop",
+			}
+			svc.taskMu.Unlock()
+
+			added := svc.appendLoopPendingMessage(key, tt.text)
+
+			svc.taskMu.Lock()
+			status := svc.loopStatuses[normalizedKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			svc.taskMu.Unlock()
+			if added != tt.wantAdded {
+				t.Fatalf("appendLoopPendingMessage() = %v, want %v", added, tt.wantAdded)
+			}
+			if status.pendingAdd != tt.wantPending {
+				t.Fatalf("pendingAdd = %q, want %q", status.pendingAdd, tt.wantPending)
+			}
+			if otherStatus.pendingAdd != "其他补充" || otherStatus.prompt != "其他 loop" {
+				t.Fatalf("other status = %+v, want unchanged other session", otherStatus)
+			}
+		})
+	}
+}
+
+func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	normalizedKey := normalizeSessionKey(key)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	started := time.Date(2026, 8, 1, 10, 50, 0, 0, time.UTC)
+	otherStarted := started.Add(time.Minute)
+	cases := []struct {
+		name          string
+		existing      *loopRunStatus
+		consumeStart  time.Time
+		wantPending   string
+		wantRemaining string
+	}{
+		{
+			name:          "当前代际消费补充消息并清空",
+			existing:      &loopRunStatus{running: true, started: started, pendingAdd: "补充 A", prompt: "目标 loop"},
+			consumeStart:  started,
+			wantPending:   "补充 A",
+			wantRemaining: "",
+		},
+		{
+			name:          "旧代际不消费当前补充消息",
+			existing:      &loopRunStatus{running: true, started: started, pendingAdd: "补充 B", prompt: "目标 loop"},
+			consumeStart:  started.Add(-time.Minute),
+			wantPending:   "",
+			wantRemaining: "补充 B",
+		},
+		{
+			name:          "空补充消息返回空且保持空",
+			existing:      &loopRunStatus{running: true, started: started, prompt: "目标 loop"},
+			consumeStart:  started,
+			wantPending:   "",
+			wantRemaining: "",
+		},
+		{
+			name:          "缺少 loop 状态返回空",
+			consumeStart:  started,
+			wantPending:   "",
+			wantRemaining: "",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.taskMu.Lock()
+			if tt.existing != nil {
+				svc.loopStatuses[normalizedKey] = *tt.existing
+			}
+			svc.loopStatuses[otherKey] = loopRunStatus{
+				running:    true,
+				started:    otherStarted,
+				pendingAdd: "其他补充",
+				prompt:     "其他 loop",
+			}
+			svc.taskMu.Unlock()
+
+			pending := svc.consumeLoopPendingMessage(key, tt.consumeStart)
+
+			svc.taskMu.Lock()
+			status := svc.loopStatuses[normalizedKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			svc.taskMu.Unlock()
+			if pending != tt.wantPending {
+				t.Fatalf("consumeLoopPendingMessage() = %q, want %q", pending, tt.wantPending)
+			}
+			if status.pendingAdd != tt.wantRemaining {
+				t.Fatalf("remaining pendingAdd = %q, want %q", status.pendingAdd, tt.wantRemaining)
+			}
+			if otherStatus.pendingAdd != "其他补充" || otherStatus.prompt != "其他 loop" {
+				t.Fatalf("other status = %+v, want unchanged other session", otherStatus)
+			}
+		})
+	}
+}
+
+func TestUpdateLoopRoundStatusSessionWorkBoundaries(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	normalizedKey := normalizeSessionKey(key)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	started := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
+	otherStarted := started.Add(time.Minute)
+	cases := []struct {
+		name          string
+		updateKey     SessionKey
+		updateStarted time.Time
+		round         int
+		wantUpdated   bool
+		wantRound     int
+		wantRunning   bool
+		wantOther     int
+	}{
+		{
+			name:          "当前代际更新轮次并标记 running",
+			updateKey:     key,
+			updateStarted: started,
+			round:         3,
+			wantUpdated:   true,
+			wantRound:     3,
+			wantRunning:   true,
+			wantOther:     8,
+		},
+		{
+			name:          "旧代际不覆盖当前 loop 轮次",
+			updateKey:     key,
+			updateStarted: started.Add(-time.Minute),
+			round:         9,
+			wantUpdated:   false,
+			wantRound:     1,
+			wantRunning:   false,
+			wantOther:     8,
+		},
+		{
+			name:          "其他 session 更新不影响目标 session",
+			updateKey:     otherKey,
+			updateStarted: otherStarted,
+			round:         4,
+			wantUpdated:   true,
+			wantRound:     1,
+			wantRunning:   false,
+			wantOther:     4,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.taskMu.Lock()
+			svc.loopStatuses[normalizedKey] = loopRunStatus{
+				started: started,
+				running: false,
+				round:   1,
+				prompt:  "目标 loop",
+			}
+			svc.loopStatuses[otherKey] = loopRunStatus{
+				started: otherStarted,
+				running: true,
+				round:   8,
+				prompt:  "其他 loop",
+			}
+			svc.taskMu.Unlock()
+
+			updated := svc.updateLoopRoundStatus(tt.updateKey, tt.updateStarted, tt.round)
+
+			svc.taskMu.Lock()
+			status := svc.loopStatuses[normalizedKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			svc.taskMu.Unlock()
+			if updated != tt.wantUpdated {
+				t.Fatalf("updateLoopRoundStatus() = %v, want %v", updated, tt.wantUpdated)
+			}
+			if status.round != tt.wantRound || status.running != tt.wantRunning || status.prompt != "目标 loop" {
+				t.Fatalf("status = %+v, want round=%d running=%v", status, tt.wantRound, tt.wantRunning)
+			}
+			if otherStatus.round != tt.wantOther || otherStatus.prompt != "其他 loop" {
+				t.Fatalf("other status = %+v, want round=%d unchanged prompt", otherStatus, tt.wantOther)
+			}
+		})
+	}
+}
+
+func TestFinishLoopStatusSessionWorkBoundaries(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	normalizedKey := normalizeSessionKey(key)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	started := time.Date(2026, 8, 1, 11, 30, 0, 0, time.UTC)
+	otherStarted := started.Add(time.Minute)
+	loopErr := errors.New("agent 调用失败")
+	cases := []struct {
+		name          string
+		existing      loopRunStatus
+		finishStarted time.Time
+		reason        string
+		err           error
+		wantUpdated   bool
+		wantRunning   bool
+		wantReason    string
+		wantError     string
+	}{
+		{
+			name: "当前代际成功完成并清理错误",
+			existing: loopRunStatus{
+				running:   true,
+				started:   started,
+				lastError: "旧错误",
+				prompt:    "目标 loop",
+			},
+			finishStarted: started,
+			reason:        "agent 返回 DONE",
+			wantUpdated:   true,
+			wantReason:    "agent 返回 DONE",
+		},
+		{
+			name: "当前代际普通错误记录 lastError",
+			existing: loopRunStatus{
+				running: true,
+				started: started,
+				prompt:  "目标 loop",
+			},
+			finishStarted: started,
+			reason:        "执行失败",
+			err:           loopErr,
+			wantUpdated:   true,
+			wantReason:    "执行失败",
+			wantError:     loopErr.Error(),
+		},
+		{
+			name: "旧代际 finish 不覆盖当前状态",
+			existing: loopRunStatus{
+				running: true,
+				started: started,
+				round:   2,
+				prompt:  "目标 loop",
+			},
+			finishStarted: started.Add(-time.Minute),
+			reason:        "旧 loop 完成",
+			wantRunning:   true,
+			wantReason:    "",
+		},
+		{
+			name: "手动取消后的 context canceled 不覆盖既有原因",
+			existing: loopRunStatus{
+				running:   false,
+				started:   started,
+				reason:    "已手动停止",
+				lastError: "",
+				prompt:    "目标 loop",
+			},
+			finishStarted: started,
+			reason:        "已取消",
+			err:           context.Canceled,
+			wantReason:    "已手动停止",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.taskMu.Lock()
+			svc.loopStatuses[normalizedKey] = tt.existing
+			svc.loopStatuses[otherKey] = loopRunStatus{
+				running: true,
+				started: otherStarted,
+				round:   8,
+				prompt:  "其他 loop",
+			}
+			svc.taskMu.Unlock()
+
+			updated := svc.finishLoopStatus(key, tt.finishStarted, tt.reason, tt.err)
+
+			svc.taskMu.Lock()
+			status := svc.loopStatuses[normalizedKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			svc.taskMu.Unlock()
+			if updated != tt.wantUpdated {
+				t.Fatalf("finishLoopStatus() = %v, want %v", updated, tt.wantUpdated)
+			}
+			if status.running != tt.wantRunning || status.reason != tt.wantReason || status.lastError != tt.wantError {
+				t.Fatalf("status = %+v, want running=%v reason=%q lastError=%q", status, tt.wantRunning, tt.wantReason, tt.wantError)
+			}
+			if tt.wantUpdated && status.ended.IsZero() {
+				t.Fatalf("status.ended is zero after updated finish: %+v", status)
+			}
+			if !tt.wantUpdated && !status.ended.IsZero() {
+				t.Fatalf("status.ended = %v, want unchanged zero time", status.ended)
+			}
+			if otherStatus.round != 8 || otherStatus.prompt != "其他 loop" {
+				t.Fatalf("other status = %+v, want unchanged other session", otherStatus)
+			}
+		})
+	}
+}
+
+func TestLoopStatusSnapshotNormalizesSessionKey(t *testing.T) {
+	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	started := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
+	svc.markLoopStarted(key, started, loopRequest{Prompt: "持续推进", MaxRounds: 2, Interval: time.Second})
+
+	status, ok := svc.loopStatusSnapshot(key)
+	if !ok {
+		t.Fatal("loopStatusSnapshot() ok=false, want normalized lookup to find status")
+	}
+	if !status.started.Equal(started) || status.prompt != "持续推进" || status.maxRounds != 2 {
+		t.Fatalf("loop status = %+v, want status written by markLoopStarted", status)
+	}
+}
+
 func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{}
@@ -225,6 +695,103 @@ func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
 	svc.taskMu.Unlock()
 	if stillRunning || status.running || status.reason != "已通过卡片取消" {
 		t.Fatalf("task stillRunning=%v status=%+v, want cancelled loop", stillRunning, status)
+	}
+}
+
+func TestCancelLoopTaskSessionWorkBoundaries(t *testing.T) {
+	agent := config.AgentConfig{Command: "traex"}
+	cases := []struct {
+		name              string
+		targetKind        taskKind
+		otherKind         taskKind
+		wantCanceled      bool
+		wantTargetRunning bool
+		wantOtherRunning  bool
+	}{
+		{
+			name:              "不会取消同会话非 loop 任务",
+			targetKind:        taskKindUser,
+			otherKind:         taskKindLoop,
+			wantCanceled:      false,
+			wantTargetRunning: true,
+			wantOtherRunning:  true,
+		},
+		{
+			name:              "只取消目标会话 loop",
+			targetKind:        taskKindLoop,
+			otherKind:         taskKindLoop,
+			wantCanceled:      true,
+			wantTargetRunning: false,
+			wantOtherRunning:  true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &fakeRuntime{}
+			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+			svc.setRuntime(rt)
+			targetKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_target"})
+			otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_other"})
+			targetSession := Session{Key: targetKey, AgentName: "traex", ACPSessionID: "acp-target"}
+			otherSession := Session{Key: otherKey, AgentName: "traex", ACPSessionID: "acp-other"}
+			targetCtx, targetFinish := svc.startTask(context.Background(), targetSession, agent, tt.targetKind)
+			defer targetFinish()
+			otherCtx, otherFinish := svc.startTask(context.Background(), otherSession, agent, tt.otherKind)
+			defer otherFinish()
+			svc.taskMu.Lock()
+			svc.loopStatuses[targetKey] = loopRunStatus{running: true, started: time.Now()}
+			svc.loopStatuses[otherKey] = loopRunStatus{running: true, started: time.Now()}
+			svc.taskMu.Unlock()
+
+			if got := svc.cancelLoopTask(context.Background(), targetKey, "已手动停止"); got != tt.wantCanceled {
+				t.Fatalf("cancelLoopTask() = %v, want %v", got, tt.wantCanceled)
+			}
+
+			if tt.wantCanceled {
+				select {
+				case <-targetCtx.Done():
+				default:
+					t.Fatal("target loop context was not canceled")
+				}
+				waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() == 1 })
+			} else {
+				select {
+				case <-targetCtx.Done():
+					t.Fatal("target non-loop context was canceled")
+				default:
+				}
+				if got := rt.cancelCallCount(); got != 0 {
+					t.Fatalf("cancel calls = %d, want none for non-loop target", got)
+				}
+			}
+			select {
+			case <-otherCtx.Done():
+				t.Fatal("other session context was canceled")
+			default:
+			}
+
+			svc.taskMu.Lock()
+			targetTask := svc.tasks[targetKey]
+			otherTask := svc.tasks[otherKey]
+			targetStatus := svc.loopStatuses[targetKey]
+			otherStatus := svc.loopStatuses[otherKey]
+			svc.taskMu.Unlock()
+			if (targetTask != nil) != tt.wantTargetRunning {
+				t.Fatalf("target task = %+v, want running=%v", targetTask, tt.wantTargetRunning)
+			}
+			if (otherTask != nil) != tt.wantOtherRunning {
+				t.Fatalf("other task = %+v, want running=%v", otherTask, tt.wantOtherRunning)
+			}
+			if targetStatus.running != tt.wantTargetRunning {
+				t.Fatalf("target status = %+v, want running=%v", targetStatus, tt.wantTargetRunning)
+			}
+			if !otherStatus.running {
+				t.Fatalf("other status = %+v, want still running", otherStatus)
+			}
+			if tt.wantCanceled && targetStatus.reason != "已手动停止" {
+				t.Fatalf("target status reason = %q, want 已手动停止", targetStatus.reason)
+			}
+		})
 	}
 }
 

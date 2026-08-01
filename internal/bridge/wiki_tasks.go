@@ -35,6 +35,21 @@ type wikiRunStatus struct {
 	lastError   string
 }
 
+type wikiStatusSnapshot struct {
+	status         wikiRunStatus
+	timerSet       bool
+	foregroundTask *runningTask
+	backgroundTask bool
+}
+
+type wikiTimerRunState int
+
+const (
+	wikiTimerRunStale wikiTimerRunState = iota
+	wikiTimerRunReady
+	wikiTimerRunBusy
+)
+
 func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
@@ -134,45 +149,49 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 		"延迟：" + formatDuration(wikiInterval(chat)),
 	}
 	session, hasSession := s.findSession(msg)
-	s.taskMu.Lock()
-	var status wikiRunStatus
-	var timerSet bool
-	var task *runningTask
-	wikiTaskRunning := false
+	var snapshot wikiStatusSnapshot
 	if hasSession {
-		key := normalizeSessionKey(session.Key)
-		status = s.wikiStatuses[key]
-		_, timerSet = s.wikiTimers[key]
-		task = s.tasks[key]
-		for runtime := range s.wikiTasks {
-			if normalizeSessionKey(runtime.SessionKey) == key {
-				wikiTaskRunning = true
-				break
-			}
-		}
+		snapshot = s.wikiStatusSnapshot(session.Key)
 	}
-	s.taskMu.Unlock()
-	if timerSet {
+	if snapshot.timerSet {
 		lines = append(lines, "状态：等待定时触发")
-	} else if status.running || wikiTaskRunning || (task != nil && task.kind == taskKindWiki) {
+	} else if snapshot.status.running || snapshot.backgroundTask || (snapshot.foregroundTask != nil && snapshot.foregroundTask.kind == taskKindWiki) {
 		lines = append(lines, "状态：正在反思")
-	} else if !status.lastStarted.IsZero() {
+	} else if !snapshot.status.lastStarted.IsZero() {
 		state := "成功"
-		if !status.lastSuccess {
+		if !snapshot.status.lastSuccess {
 			state = "失败"
 		}
 		lines = append(lines, "最近一次："+state)
-		lines = append(lines, "开始："+status.lastStarted.Format(time.RFC3339))
-		if !status.lastEnded.IsZero() {
-			lines = append(lines, "结束："+status.lastEnded.Format(time.RFC3339))
+		lines = append(lines, "开始："+snapshot.status.lastStarted.Format(time.RFC3339))
+		if !snapshot.status.lastEnded.IsZero() {
+			lines = append(lines, "结束："+snapshot.status.lastEnded.Format(time.RFC3339))
 		}
-		if status.lastError != "" {
-			lines = append(lines, "错误："+status.lastError)
+		if snapshot.status.lastError != "" {
+			lines = append(lines, "错误："+snapshot.status.lastError)
 		}
 	} else {
 		lines = append(lines, "状态：尚未触发")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) wikiStatusSnapshot(key SessionKey) wikiStatusSnapshot {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	snapshot := wikiStatusSnapshot{
+		status:         s.wikiStatuses[key],
+		foregroundTask: s.tasks[key],
+	}
+	_, snapshot.timerSet = s.wikiTimers[key]
+	for runtime := range s.wikiTasks {
+		if normalizeSessionKey(runtime.SessionKey) == key {
+			snapshot.backgroundTask = true
+			break
+		}
+	}
+	return snapshot
 }
 
 func wikiReflectionPrompt(workspace string) string {
@@ -202,34 +221,37 @@ func (s *Service) startWikiTask(ctx context.Context, session Session, agent conf
 		agent:   agent,
 	}
 
-	s.taskMu.Lock()
-	if s.wikiTasks == nil {
-		s.wikiTasks = make(map[runtimeKey]*runningTask)
-	}
-	s.wikiTasks[runtime] = task
-	s.taskMu.Unlock()
+	s.beginWikiTask(runtime, task)
 
 	return ctx, func() {
-		s.taskMu.Lock()
-		if s.wikiTasks[runtime] == task {
-			delete(s.wikiTasks, runtime)
-		}
-		s.taskMu.Unlock()
+		s.finishWikiTask(runtime, task)
 		cancel()
 	}
 }
 
-func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
-	key = normalizeSessionKey(key)
+func (s *Service) beginWikiTask(runtime runtimeKey, task *runningTask) {
+	runtime = normalizeRuntimeKey(runtime)
 	s.taskMu.Lock()
-	tasks := make([]*runningTask, 0)
-	for runtime, task := range s.wikiTasks {
-		if runtime.SessionKey == key {
-			tasks = append(tasks, task)
-			delete(s.wikiTasks, runtime)
-		}
+	defer s.taskMu.Unlock()
+	if s.wikiTasks == nil {
+		s.wikiTasks = make(map[runtimeKey]*runningTask)
 	}
-	s.taskMu.Unlock()
+	s.wikiTasks[runtime] = task
+}
+
+func (s *Service) finishWikiTask(runtime runtimeKey, task *runningTask) bool {
+	runtime = normalizeRuntimeKey(runtime)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if s.wikiTasks[runtime] != task {
+		return false
+	}
+	delete(s.wikiTasks, runtime)
+	return true
+}
+
+func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
+	tasks := s.takeWikiTasks(key)
 	for _, task := range tasks {
 		task.cancel()
 		if task.onCancel != nil {
@@ -239,7 +261,28 @@ func (s *Service) cancelWikiTasks(ctx context.Context, key SessionKey) {
 	}
 }
 
+func (s *Service) takeWikiTasks(key SessionKey) []*runningTask {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	tasks := make([]*runningTask, 0)
+	for runtime, task := range s.wikiTasks {
+		if runtime.SessionKey == key {
+			tasks = append(tasks, task)
+			delete(s.wikiTasks, runtime)
+		}
+	}
+	return tasks
+}
+
 func (s *Service) cancelWikiTimer(key SessionKey) {
+	pending, _ := s.takeWikiTimer(key)
+	if pending != nil && pending.timer != nil {
+		pending.timer.Stop()
+	}
+}
+
+func (s *Service) takeWikiTimer(key SessionKey) (*pendingWikiRun, bool) {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	if s.wikiGenerations == nil {
@@ -249,9 +292,7 @@ func (s *Service) cancelWikiTimer(key SessionKey) {
 	pending := s.wikiTimers[key]
 	delete(s.wikiTimers, key)
 	s.taskMu.Unlock()
-	if pending != nil && pending.timer != nil {
-		pending.timer.Stop()
-	}
+	return pending, pending != nil
 }
 
 func (s *Service) hasWikiTimer(key SessionKey) bool {
@@ -262,16 +303,8 @@ func (s *Service) hasWikiTimer(key SessionKey) bool {
 }
 
 func (s *Service) takePendingWiki(key SessionKey) (pendingWikiRun, bool) {
-	key = normalizeSessionKey(key)
-	s.taskMu.Lock()
-	if s.wikiGenerations == nil {
-		s.wikiGenerations = make(map[SessionKey]int64)
-	}
-	s.wikiGenerations[key]++
-	pending := s.wikiTimers[key]
-	delete(s.wikiTimers, key)
-	s.taskMu.Unlock()
-	if pending == nil {
+	pending, ok := s.takeWikiTimer(key)
+	if !ok {
 		return pendingWikiRun{}, false
 	}
 	if pending.timer != nil {
@@ -294,21 +327,7 @@ func (s *Service) restorePendingWiki(pending pendingWikiRun) {
 		delay = time.Millisecond
 	}
 	key := pending.session.Key
-	s.taskMu.Lock()
-	if s.wikiGenerations == nil {
-		s.wikiGenerations = make(map[SessionKey]int64)
-	}
-	s.wikiGenerations[key]++
-	generation := s.wikiGenerations[key]
-	if old := s.wikiTimers[key]; old != nil {
-		old.timer.Stop()
-	}
-	pending.generation = generation
-	pending.timer = time.AfterFunc(delay, func() {
-		s.runWikiTimer(key, generation, pending.session, pending.agent)
-	})
-	s.wikiTimers[key] = &pending
-	s.taskMu.Unlock()
+	s.scheduleWikiTimer(key, delay, pending)
 }
 
 func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.AgentConfig) {
@@ -323,6 +342,16 @@ func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.Agen
 		interval = defaultWikiInterval
 	}
 	key := session.Key
+	s.scheduleWikiTimer(key, interval, pendingWikiRun{
+		session:   session,
+		agent:     agent,
+		scheduled: time.Now(),
+	})
+}
+
+func (s *Service) scheduleWikiTimer(key SessionKey, delay time.Duration, pending pendingWikiRun) {
+	key = normalizeSessionKey(key)
+	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	s.taskMu.Lock()
 	if s.wikiGenerations == nil {
 		s.wikiGenerations = make(map[SessionKey]int64)
@@ -332,16 +361,11 @@ func (s *Service) scheduleWikiAfterUserPrompt(session Session, agent config.Agen
 	if old := s.wikiTimers[key]; old != nil {
 		old.timer.Stop()
 	}
-	timer := time.AfterFunc(interval, func() {
-		s.runWikiTimer(key, generation, session, agent)
+	pending.generation = generation
+	pending.timer = time.AfterFunc(delay, func() {
+		s.runWikiTimer(key, generation, pending.session, pending.agent)
 	})
-	s.wikiTimers[key] = &pendingWikiRun{
-		timer:      timer,
-		generation: generation,
-		session:    session,
-		agent:      agent,
-		scheduled:  time.Now(),
-	}
+	s.wikiTimers[key] = &pending
 	s.taskMu.Unlock()
 }
 
@@ -362,25 +386,34 @@ func (s *Service) wikiConfigForSession(session Session) ChatConfig {
 func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {
 	key = normalizeSessionKey(key)
 	session.Key = normalizeSessionKey(session.Key)
-	s.taskMu.Lock()
-	if s.wikiGenerations[key] != generation {
-		s.taskMu.Unlock()
+	switch s.beginWikiTimerRun(key, generation) {
+	case wikiTimerRunStale:
 		return
-	}
-	delete(s.wikiTimers, key)
-	if current := s.tasks[key]; current != nil {
-		s.wikiGenerations[key]++
-		s.taskMu.Unlock()
+	case wikiTimerRunBusy:
 		s.scheduleWikiAfterUserPrompt(session, agent)
 		return
 	}
-	s.taskMu.Unlock()
 
 	ctx, finish := s.startTask(context.Background(), session, agent, taskKindWiki)
 	s.markWikiStarted(key)
 	_, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
 	finish()
 	s.markWikiFinished(key, session, err)
+}
+
+func (s *Service) beginWikiTimerRun(key SessionKey, generation int64) wikiTimerRunState {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if s.wikiGenerations[key] != generation {
+		return wikiTimerRunStale
+	}
+	delete(s.wikiTimers, key)
+	if current := s.tasks[key]; current != nil {
+		s.wikiGenerations[key]++
+		return wikiTimerRunBusy
+	}
+	return wikiTimerRunReady
 }
 
 func (s *Service) runPendingWikiAsync(pending pendingWikiRun) {

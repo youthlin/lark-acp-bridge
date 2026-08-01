@@ -344,6 +344,11 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 
 func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopRequest) {
 	key = normalizeSessionKey(key)
+	s.startLoopStatus(key, started, req)
+}
+
+func (s *Service) startLoopStatus(key SessionKey, started time.Time, req loopRequest) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	s.loopStatuses[key] = loopRunStatus{
 		running:     true,
@@ -358,14 +363,21 @@ func (s *Service) markLoopStarted(key SessionKey, started time.Time, req loopReq
 
 func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
 	key = normalizeSessionKey(key)
+	s.updateLoopRoundStatus(key, started, round)
+}
+
+func (s *Service) updateLoopRoundStatus(key SessionKey, started time.Time, round int) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
 	status := s.loopStatuses[key]
-	if status.started.Equal(started) {
-		status.running = true
-		status.round = round
-		s.loopStatuses[key] = status
+	if !status.started.Equal(started) {
+		return false
 	}
-	s.taskMu.Unlock()
+	status.running = true
+	status.round = round
+	s.loopStatuses[key] = status
+	return true
 }
 
 func (s *Service) handleLoopAddCommand(ctx context.Context, msg feishu.Message, text string) string {
@@ -385,6 +397,11 @@ func (s *Service) handleLoopAddCommand(ctx context.Context, msg feishu.Message, 
 
 func (s *Service) addLoopPendingMessage(key SessionKey, text string) bool {
 	key = normalizeSessionKey(key)
+	return s.appendLoopPendingMessage(key, text)
+}
+
+func (s *Service) appendLoopPendingMessage(key SessionKey, text string) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	status, ok := s.loopStatuses[key]
@@ -403,6 +420,11 @@ func (s *Service) addLoopPendingMessage(key SessionKey, text string) bool {
 
 func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
 	key = normalizeSessionKey(key)
+	return s.consumeLoopPendingMessage(key, started)
+}
+
+func (s *Service) consumeLoopPendingMessage(key SessionKey, started time.Time) string {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	status, ok := s.loopStatuses[key]
@@ -417,24 +439,30 @@ func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
 
 func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason string, err error) {
 	key = normalizeSessionKey(key)
+	s.finishLoopStatus(key, started, reason, err)
+}
+
+func (s *Service) finishLoopStatus(key SessionKey, started time.Time, reason string, err error) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
 	status := s.loopStatuses[key]
-	if status.started.Equal(started) {
-		if errors.Is(err, context.Canceled) && !status.running && status.reason != "" {
-			s.taskMu.Unlock()
-			return
-		}
-		status.running = false
-		status.ended = time.Now()
-		status.reason = reason
-		if err != nil && !errors.Is(err, context.Canceled) {
-			status.lastError = err.Error()
-		} else {
-			status.lastError = ""
-		}
-		s.loopStatuses[key] = status
+	if !status.started.Equal(started) {
+		return false
 	}
-	s.taskMu.Unlock()
+	if errors.Is(err, context.Canceled) && !status.running && status.reason != "" {
+		return false
+	}
+	status.running = false
+	status.ended = time.Now()
+	status.reason = reason
+	if err != nil && !errors.Is(err, context.Canceled) {
+		status.lastError = err.Error()
+	} else {
+		status.lastError = ""
+	}
+	s.loopStatuses[key] = status
+	return true
 }
 
 func (s *Service) updateLoopFinished(ctx context.Context, msg feishu.Message, anchor loopAnchor, reason string, err error) {
@@ -485,20 +513,11 @@ func (s *Service) HandleLoopCancel(ctx context.Context, cancel feishu.LoopCancel
 
 func (s *Service) cancelLoopTask(ctx context.Context, key SessionKey, reason string) bool {
 	key = normalizeSessionKey(key)
-	s.taskMu.Lock()
-	task := s.tasks[key]
-	if task == nil || task.kind != taskKindLoop {
-		s.taskMu.Unlock()
+	task := s.takeRunningTaskOfKind(key, taskKindLoop)
+	if task == nil {
 		return false
 	}
-	delete(s.tasks, key)
-	status := s.loopStatuses[key]
-	status.running = false
-	status.ended = time.Now()
-	status.reason = reason
-	status.lastError = ""
-	s.loopStatuses[key] = status
-	s.taskMu.Unlock()
+	s.markLoopTaskCanceled(key, reason)
 	task.cancel()
 	if task.onCancel != nil {
 		task.onCancel(ctx, reason)
@@ -512,9 +531,7 @@ func (s *Service) loopStatus(msg feishu.Message) string {
 	if !hasSession {
 		return "当前会话还没有 loop 状态。"
 	}
-	s.taskMu.Lock()
-	status, ok := s.loopStatuses[session.Key]
-	s.taskMu.Unlock()
+	status, ok := s.loopStatusSnapshot(session.Key)
 	if !ok || status.started.IsZero() {
 		return "当前会话还没有 loop 状态。"
 	}
@@ -548,6 +565,14 @@ func (s *Service) loopStatus(msg feishu.Message) string {
 		lines = append(lines, "提示词："+truncateRunes(status.prompt, 80))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) loopStatusSnapshot(key SessionKey) (loopRunStatus, bool) {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status, ok := s.loopStatuses[key]
+	return status, ok
 }
 
 func loopDurationStatus(d time.Duration) string {

@@ -37,6 +37,7 @@ type Service struct {
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
 	loopStatuses    map[SessionKey]loopRunStatus
+	acpErrors       map[SessionKey]acpErrorSnapshot
 	scheduleRuns    map[string]scheduleRunStatus
 	scheduleJobs    map[string]*scheduledTaskJob
 	pendingAtTexts  map[ChatKey][]pendingAtMessage
@@ -69,6 +70,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		wikiGenerations:        make(map[SessionKey]int64),
 		wikiStatuses:           make(map[SessionKey]wikiRunStatus),
 		loopStatuses:           make(map[SessionKey]loopRunStatus),
+		acpErrors:              make(map[SessionKey]acpErrorSnapshot),
 		scheduleRuns:           make(map[string]scheduleRunStatus),
 		scheduleJobs:           make(map[string]*scheduledTaskJob),
 		pendingAtTexts:         make(map[ChatKey][]pendingAtMessage),

@@ -76,14 +76,6 @@ func (s *Service) enqueuePrompt(item queuedPrompt) int {
 	return item.replyIndex
 }
 
-func (s *Service) sessionHasRunningUserTask(key SessionKey) bool {
-	key = normalizeSessionKey(key)
-	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
-	task := s.tasks[key]
-	return task != nil && task.kind == taskKindUser
-}
-
 func (s *Service) drainPromptQueueAsync(ctx context.Context, key SessionKey) {
 	key = normalizeSessionKey(key)
 	if !s.beginPromptQueueDrain(key) {
@@ -93,6 +85,7 @@ func (s *Service) drainPromptQueueAsync(ctx context.Context, key SessionKey) {
 }
 
 func (s *Service) beginPromptQueueDrain(key SessionKey) bool {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	queue := s.promptQueues[key]
@@ -122,6 +115,7 @@ func (s *Service) drainPromptQueue(ctx context.Context, key SessionKey) {
 			return
 		}
 		if err != nil {
+			s.recordACPError(item.session, "queue prompt", err)
 			slog.WarnContext(ctx, "执行队列 prompt 失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", err)
 			reply = "队列任务执行失败：" + err.Error()
 		}
@@ -137,6 +131,7 @@ func (s *Service) drainPromptQueue(ctx context.Context, key SessionKey) {
 }
 
 func (s *Service) takeQueuedPrompt(key SessionKey) (queuedPrompt, bool) {
+	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	queue := s.promptQueues[key]
@@ -178,7 +173,7 @@ func (s *Service) finishPromptQueueDrain(ctx context.Context, key SessionKey) {
 	queue.draining = false
 	if len(queue.items) == 0 {
 		delete(s.promptQueues, key)
-	} else if s.tasks[key] == nil {
+	} else if s.canRestartPromptQueueDrainLocked(key) {
 		queue.draining = true
 		restart = true
 	}
@@ -186,6 +181,11 @@ func (s *Service) finishPromptQueueDrain(ctx context.Context, key SessionKey) {
 	if restart {
 		go s.drainPromptQueue(context.WithoutCancel(ctx), key)
 	}
+}
+
+func (s *Service) canRestartPromptQueueDrainLocked(key SessionKey) bool {
+	key = normalizeSessionKey(key)
+	return s.tasks[key] == nil
 }
 
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {

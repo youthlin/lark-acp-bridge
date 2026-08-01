@@ -516,6 +516,237 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	}
 }
 
+func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-table"})
+	helpReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		Text: "/help",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/help) error = %v", err)
+	}
+	newCommandDir := t.TempDir()
+	newCommandWorkspace := filepath.Join(t.TempDir(), "workspace")
+	newCommandText := "/new " + newCommandDir + " 表项会话"
+	for _, tt := range []struct {
+		name string
+		text string
+		msg  feishu.Message
+	}{
+		{
+			name: "/help",
+			text: "/help",
+			msg:  feishu.Message{Text: "/help"},
+		},
+		{
+			name: "/agent",
+			text: "/agent status",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p", Text: "/agent status"},
+		},
+		{
+			name: "/at",
+			text: "/at status",
+			msg: feishu.Message{
+				BotID:    "bot-a",
+				ChatID:   "oc_group",
+				ChatType: "group",
+				Mentions: testBotMentions(),
+				Text:     "/at status",
+			},
+		},
+		{
+			name: "/status",
+			text: "/status",
+			msg:  feishu.Message{Text: "/status", Workspace: filepath.Join(t.TempDir(), "workspace")},
+		},
+		{
+			name: "/debug",
+			text: "/debug status",
+			msg:  feishu.Message{Text: "/debug status"},
+		},
+		{
+			name: "/usage",
+			text: "/usage day",
+			msg:  feishu.Message{Text: "/usage day"},
+		},
+		{
+			name: "/wiki",
+			text: "/wiki status",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_wiki", ChatType: "p2p", Text: "/wiki status"},
+		},
+		{
+			name: "/loop",
+			text: "/loop status",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_loop", ChatType: "p2p", Text: "/loop status"},
+		},
+		{
+			name: "/cmds",
+			text: "/cmds",
+			msg:  feishu.Message{Text: "/cmds"},
+		},
+		{
+			name: "/config",
+			text: "/config",
+			msg: feishu.Message{
+				BotID:            session.Key.BotID,
+				ChatID:           session.Key.ChatID,
+				ThreadID:         session.Key.SubID,
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				Mentions:         testBotMentions(),
+				Text:             "/config",
+			},
+		},
+		{
+			name: "/model",
+			text: "/model",
+			msg: feishu.Message{
+				BotID:            session.Key.BotID,
+				ChatID:           session.Key.ChatID,
+				ThreadID:         session.Key.SubID,
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				Mentions:         testBotMentions(),
+				Text:             "/model",
+			},
+		},
+		{
+			name: "/mode",
+			text: "/mode",
+			msg: feishu.Message{
+				BotID:            session.Key.BotID,
+				ChatID:           session.Key.ChatID,
+				ThreadID:         session.Key.SubID,
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				Mentions:         testBotMentions(),
+				Text:             "/mode",
+			},
+		},
+		{
+			name: "/new",
+			text: newCommandText,
+			msg: feishu.Message{
+				BotID:     "bot-a",
+				ChatID:    "oc_new",
+				ChatType:  "p2p",
+				Text:      newCommandText,
+				Workspace: newCommandWorkspace,
+			},
+		},
+		{
+			name: "/queue",
+			text: "/queue",
+			msg:  feishu.Message{Text: "/queue"},
+		},
+		{
+			name: "/restart",
+			text: "/restart",
+			msg: feishu.Message{
+				BotID:     "bot-a",
+				ChatID:    "oc_restart",
+				ChatType:  "p2p",
+				SenderID:  testOwnerOpenID,
+				Text:      "/restart",
+				Workspace: filepath.Join(t.TempDir(), "workspace"),
+			},
+		},
+		{
+			name: "/schedule",
+			text: "/schedule",
+			msg: feishu.Message{
+				BotID:     "bot-a",
+				ChatID:    "oc_schedule",
+				ChatType:  "p2p",
+				SenderID:  testOwnerOpenID,
+				Text:      "/schedule",
+				Workspace: filepath.Join(t.TempDir(), "workspace"),
+			},
+		},
+		{
+			name: "/session",
+			text: "/session list",
+			msg: feishu.Message{
+				BotID:            session.Key.BotID,
+				ChatID:           session.Key.ChatID,
+				ThreadID:         session.Key.SubID,
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				Mentions:         testBotMentions(),
+				Text:             "/session list",
+			},
+		},
+		{
+			name: "/show",
+			text: "/show status",
+			msg: feishu.Message{
+				BotID:            session.Key.BotID,
+				ChatID:           session.Key.ChatID,
+				ThreadID:         session.Key.SubID,
+				ChatType:         "topic_group",
+				GroupMessageType: "thread",
+				Mentions:         testBotMentions(),
+				Text:             "/show status",
+			},
+		},
+	} {
+		command, ok := lookupSlashCommand(tt.name)
+		if !ok {
+			t.Fatalf("%s command missing from command table", tt.name)
+		}
+		if len(command.helpLines) == 0 {
+			t.Fatalf("%s command help is empty", tt.name)
+		}
+		for _, helpLine := range command.helpLines {
+			if !strings.Contains(helpReply, helpLine) {
+				t.Fatalf("help reply = %q, want command table help %q", helpReply, helpLine)
+			}
+		}
+		if strings.TrimSpace(tt.msg.Workspace) != "" {
+			if err := os.MkdirAll(tt.msg.Workspace, 0o755); err != nil {
+				t.Fatalf("MkdirAll(workspace) error = %v", err)
+			}
+		}
+		got, err := handleFeishuMessage(t, svc, context.Background(), tt.msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", tt.text, err)
+		}
+		want := command.run(svc, context.Background(), tt.text, tt.msg)
+		if got != want {
+			t.Fatalf("%s reply = %q, want command table handler reply %q", tt.name, got, want)
+		}
+	}
+}
+
 func TestHandleFeishuMessageSlashCommandRequiresConfiguredOwner(t *testing.T) {
 	cfg := config.Default()
 	svc := NewService(cfg, nil)
@@ -3168,11 +3399,11 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
 		t.Fatalf("UpsertChat() error = %v", err)
 	}
-	var intermediate []string
+	var intermediate queueIntermediateReplies
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
 	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
-		intermediate = append(intermediate, text)
+		intermediate.append(text)
 		return nil
 	}
 	svc.setOutbound("bot-a", client)
@@ -3250,8 +3481,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("promptCalls = %+v, want mention prompt and one batched auto prompt", calls)
 	}
-	if len(intermediate) != 1 || intermediate[0] != "需要回复一次" {
-		t.Fatalf("intermediate replies = %+v, want one batched auto reply", intermediate)
+	if !intermediate.equal([]string{"需要回复一次"}) {
+		t.Fatal("intermediate replies should contain one batched auto reply")
 	}
 	autoPrompt := calls[1].Text
 	for _, want := range []string{
@@ -7543,13 +7774,33 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 	svc.setRuntime(rt)
 	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
 	session := Session{
-		Key:          key,
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          t.TempDir(),
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		WikiIntervalSec: 60,
 	}
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+
+	statusBeforePrompt, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_status_before",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) before prompt error = %v", err)
+	}
+	if !strings.Contains(statusBeforePrompt, "wiki：等待定时触发") {
+		t.Fatalf("reply = %q, want pending wiki timer status", statusBeforePrompt)
 	}
 
 	firstDone := make(chan struct {
@@ -7608,6 +7859,255 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first prompt did not finish after unblock")
+	}
+}
+
+func TestHandleFeishuMessageStatusShowsRuntimeDiagnostics(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply:   "ACP 回复",
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	loopStarted := time.Now()
+	svc.markLoopStarted(key, loopStarted, loopRequest{
+		Prompt:    "包含敏感正文的 loop 提示词",
+		MaxRounds: 3,
+		Interval:  time.Second,
+	})
+	svc.markLoopRound(key, loopStarted, 2)
+	if !svc.addLoopPendingMessage(key, "包含敏感正文的 loop 补充消息") {
+		t.Fatal("addLoopPendingMessage() = false, want running loop")
+	}
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	queueReply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_queue",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "/queue 包含敏感正文的排队任务",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/queue) error = %v", err)
+	}
+	if !strings.Contains(queueReply, "第 1 条") {
+		t.Fatalf("queue reply = %q, want queued index", queueReply)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_status",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	for _, want := range []string{
+		"session：acp-session-1",
+		"运行态：忙碌（user）",
+		"队列：待执行 1 条",
+		"wiki：尚未触发",
+		"loop：运行中，第 2 轮，有待处理补充消息",
+		"ACP错误：无",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"包含敏感正文的排队任务",
+		"包含敏感正文的 loop 提示词",
+		"包含敏感正文的 loop 补充消息",
+	} {
+		if strings.Contains(reply, forbidden) {
+			t.Fatalf("reply = %q, should not include sensitive diagnostic text %q", reply, forbidden)
+		}
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want status and queue not to cancel running prompt", got)
+	}
+	select {
+	case got := <-firstDone:
+		t.Fatalf("first prompt finished before unblock: %+v", got)
+	default:
+	}
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "ACP 回复" {
+			t.Fatalf("first reply = %q, want ACP reply after unblock", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt did not finish after unblock")
+	}
+}
+
+func TestHandleFeishuMessageStatusShowsSanitizedACPError(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptErrors: []error{errors.New("request failed Authorization: Bearer real-token token abc123 api_key xyz789 app_secret=super-secret prompt=用户隐私正文")},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "用户隐私正文",
+	})
+	if err == nil {
+		t.Fatal("HandleFeishuMessage(prompt) error = nil, want prompt failure")
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	for _, want := range []string{
+		"ACP错误：",
+		"prompt：request failed",
+		"Authorization:[已隐藏] [已隐藏] [已隐藏]",
+		"token [已隐藏]",
+		"api_key [已隐藏]",
+		"app_secret=[已隐藏]",
+		"prompt=[已隐藏]",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"real-token",
+		"abc123",
+		"xyz789",
+		"super-secret",
+		"用户隐私正文",
+	} {
+		if strings.Contains(reply, forbidden) {
+			t.Fatalf("reply = %q, should not include sensitive diagnostic text %q", reply, forbidden)
+		}
+	}
+}
+
+func TestHandleFeishuMessageStatusIgnoresStaleACPErrorAfterNewSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-2",
+		promptErrors: []error{
+			errors.New("request failed token old-token"),
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	oldDir := t.TempDir()
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          oldDir,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "触发旧会话错误",
+	})
+	if err == nil {
+		t.Fatal("HandleFeishuMessage(prompt) error = nil, want prompt failure")
+	}
+	newDir := t.TempDir()
+	if reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/new " + newDir,
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	} else if !strings.Contains(reply, "session：acp-session-2") {
+		t.Fatalf("reply = %q, want new acp session", reply)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	for _, want := range []string{
+		"session：acp-session-2",
+		"ACP错误：无",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	if strings.Contains(reply, "old-token") || strings.Contains(reply, "request failed") {
+		t.Fatalf("reply = %q, should not include stale acp error", reply)
 	}
 }
 

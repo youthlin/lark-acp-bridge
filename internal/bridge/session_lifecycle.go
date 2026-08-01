@@ -112,6 +112,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if hasPendingWiki {
 		s.runPendingWikiAsync(pendingWiki)
 	}
+	s.clearACPError(session)
 	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd)
 	return session, agent, source, ""
 }

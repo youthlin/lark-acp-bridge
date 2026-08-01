@@ -137,6 +137,48 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	}
 }
 
+func TestPromptProcessUpdateThrottlerBoundaries(t *testing.T) {
+	now := time.Unix(100, 0)
+	throttler := promptProcessUpdateThrottler{interval: time.Second}
+	var timerGenerations []int64
+
+	if text, ok := throttler.queueLocked(now, "one", false, func(generation int64) {
+		timerGenerations = append(timerGenerations, generation)
+	}); !ok || text != "one" {
+		t.Fatalf("first queue = %q, %v, want immediate one", text, ok)
+	}
+	if throttler.lastFlush != now {
+		t.Fatalf("lastFlush = %v, want %v", throttler.lastFlush, now)
+	}
+
+	if text, ok := throttler.queueLocked(now.Add(100*time.Millisecond), "two", false, func(generation int64) {
+		timerGenerations = append(timerGenerations, generation)
+	}); ok || text != "" {
+		t.Fatalf("second queue = %q, %v, want throttled", text, ok)
+	}
+	if throttler.timer == nil {
+		t.Fatal("timer = nil, want delayed flush timer")
+	}
+	if text, ok := throttler.takeLocked(now.Add(200 * time.Millisecond)); !ok || text != "two" {
+		t.Fatalf("takeLocked = %q, %v, want pending two", text, ok)
+	}
+	if text, ok := throttler.takeLocked(now.Add(300 * time.Millisecond)); ok || text != "" {
+		t.Fatalf("takeLocked after clean = %q, %v, want empty", text, ok)
+	}
+	throttler.stopTimerLocked()
+	throttler.wait()
+	if len(timerGenerations) != 0 {
+		t.Fatalf("timerGenerations = %+v, want stopped timer not fired", timerGenerations)
+	}
+
+	if text, ok := throttler.queueLocked(now.Add(400*time.Millisecond), "three", true, nil); !ok || text != "three" {
+		t.Fatalf("forced queue = %q, %v, want immediate three", text, ok)
+	}
+	if throttler.timer != nil {
+		t.Fatal("timer should be stopped after forced flush")
+	}
+}
+
 func TestProcessPanelTextKeepsProcessRowsCompact(t *testing.T) {
 	got := processPanelText([]string{
 		"📌 计划\n• ✅ 读取现有实现\n• 🔄 修复展示",

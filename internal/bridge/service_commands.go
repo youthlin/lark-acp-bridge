@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -10,6 +11,172 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
+
+type slashCommandHandler func(*Service, context.Context, string, feishu.Message) string
+
+type slashCommandSpec struct {
+	name      string
+	helpLines []string
+	run       slashCommandHandler
+}
+
+const slashHelpCommandHelp = "/help - 查看帮助"
+
+var slashHelpCommand = slashCommandSpec{
+	name:      "/help",
+	helpLines: []string{slashHelpCommandHelp},
+	run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+		return s.handleHelpCommand()
+	},
+}
+
+var slashCommandTable = append([]slashCommandSpec{slashHelpCommand}, slashRoutedCommandTable...)
+
+var slashRoutedCommandTable = []slashCommandSpec{
+	{
+		name:      "/agent",
+		helpLines: []string{"/agent [name] - 查看或切换当前聊天默认使用的 ACP agent"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleAgentCommand(ctx, text, msg)
+		},
+	},
+	{
+		name:      "/at",
+		helpLines: []string{"/at - /at on: 必须at才响应; /at off auto|auto-reaction|every: 无需at, auto=自动判断且不加处理中表情, auto-reaction=自动判断并加处理中表情, every=每次响应"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleAtCommand(ctx, msg, text)
+		},
+	},
+	{
+		name:      "/debug",
+		helpLines: []string{"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleDebugCommand(ctx, text)
+		},
+	},
+	{
+		name: "/cmds",
+		helpLines: []string{
+			"/cmds - 查看 ACP server 支持的 slash commands",
+			"/cmds /command [args] - 透传执行 ACP slash command",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleCommandsCommand(ctx, text, msg)
+		},
+	},
+	{
+		name: "/config",
+		helpLines: []string{
+			"/config - 查看 ACP server 上报的配置项",
+			"/config <id> - 查看指定配置项",
+			"/config <id> <value> - 设置指定配置项",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleConfigCommand(ctx, text, msg)
+		},
+	},
+	{
+		name: "/loop",
+		helpLines: []string{
+			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
+			"/loop add <补充消息>|status|stop - 补充下一轮 loop prompt、查看或停止当前会话的循环任务",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleLoopCommand(ctx, text, msg)
+		},
+	},
+	{
+		name: "/model",
+		helpLines: []string{
+			"/model - 打开模型选择卡片",
+			"/model <model> - 设置当前会话模型",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleModelCommand(ctx, text, msg)
+		},
+	},
+	{
+		name: "/mode",
+		helpLines: []string{
+			"/mode - 打开模式选择卡片",
+			"/mode <mode> - 设置当前会话模式",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleModeCommand(ctx, text, msg)
+		},
+	},
+	{
+		name:      "/new",
+		helpLines: []string{"/new [cwd] [title] - 为当前会话创建新的 ACP 会话映射"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.newSession(ctx, strings.Fields(text), msg)
+		},
+	},
+	{
+		name:      "/queue",
+		helpLines: []string{"/queue <prompt> - 暂存提示词，当前任务结束后按顺序执行"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleQueueCommand(ctx, text, msg)
+		},
+	},
+	{
+		name:      "/restart",
+		helpLines: []string{"/restart - 重启 bridge 服务，重启完成后自动回复确认"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleRestartCommand(ctx, msg)
+		},
+	},
+	{
+		name: "/schedule",
+		helpLines: []string{
+			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
+			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
+			"/schedule list|status <id>|run <id>|edit <id> ...|pause <id>|resume <id>|delete <id> - 管理定时任务",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleScheduleCommand(ctx, text, msg)
+		},
+	},
+	{
+		name: "/session",
+		helpLines: []string{
+			"/session list - 列出当前聊天的历史 ACP 会话",
+			"/session resume <index> - 恢复 /session list 中的指定会话",
+			"/session title <title> - 设置当前 ACP 会话标题",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleSessionCommand(ctx, text, msg)
+		},
+	},
+	{
+		name:      "/show",
+		helpLines: []string{"/show step|plan|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleShowCommand(ctx, msg, text)
+		},
+	},
+	{
+		name:      "/status",
+		helpLines: []string{"/status - 查看服务状态"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.status(msg)
+		},
+	},
+	{
+		name:      "/usage",
+		helpLines: []string{"/usage [day|week|month|year] - 查看按 agent 和模型聚合的 token 用量"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleUsageCommand(text, msg)
+		},
+	},
+	{
+		name:      "/wiki",
+		helpLines: []string{"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleWikiCommand(ctx, text, msg)
+		},
+	},
+}
 
 func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
@@ -19,79 +186,74 @@ func (s *Service) handleCommand(ctx context.Context, text string, msg feishu.Mes
 	if strings.HasPrefix(fields[0], "//") && len(fields[0]) > 2 {
 		return s.forwardACPCommand(ctx, "/"+strings.TrimPrefix(commandRemainder(text, 0), "//"), msg)
 	}
-	switch fields[0] {
-	case "/help":
-		return strings.Join([]string{
-			"当前支持的命令：",
-			"/help - 查看帮助",
-			"/new [cwd] [title] - 为当前会话创建新的 ACP 会话映射",
-			"/agent [name] - 查看或切换当前聊天默认使用的 ACP agent",
-			"/session list - 列出当前聊天的历史 ACP 会话",
-			"/session resume <index> - 恢复 /session list 中的指定会话",
-			"/session title <title> - 设置当前 ACP 会话标题",
-			"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀",
-			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
-			"/loop add <补充消息>|status|stop - 补充下一轮 loop prompt、查看或停止当前会话的循环任务",
-			"/queue <prompt> - 暂存提示词，当前任务结束后按顺序执行",
-			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
-			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
-			"/schedule list|status <id>|run <id>|edit <id> ...|pause <id>|resume <id>|delete <id> - 管理定时任务",
-			"/cmds - 查看 ACP server 支持的 slash commands",
-			"/cmds /command [args] - 透传执行 ACP slash command",
-			"//command [args] - 透传执行 ACP slash command 的简写",
-			"/config - 查看 ACP server 上报的配置项",
-			"/config <id> - 查看指定配置项",
-			"/config <id> <value> - 设置指定配置项",
-			"/model - 打开模型选择卡片",
-			"/model <model> - 设置当前会话模型",
-			"/mode - 打开模式选择卡片",
-			"/mode <mode> - 设置当前会话模式",
-			"/usage [day|week|month|year] - 查看按 agent 和模型聚合的 token 用量",
-			"/show step|plan|thought|tool|status|used on|off - 设置当前聊天流式卡片展示项",
-			"/at - /at on: 必须at才响应; /at off auto|auto-reaction|every: 无需at, auto=自动判断且不加处理中表情, auto-reaction=自动判断并加处理中表情, every=每次响应",
-			"/debug status|on|off - 查看或设置当前 bridge 进程 debug 日志",
-			"/restart - 重启 bridge 服务，重启完成后自动回复确认",
-			"/status - 查看服务状态",
-			"",
-			"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
-		}, "\n")
-	case "/new":
-		return s.newSession(ctx, fields, msg)
-	case "/agent":
-		return s.handleAgentCommand(ctx, text, msg)
-	case "/session":
-		return s.handleSessionCommand(ctx, text, msg)
-	case "/wiki":
-		return s.handleWikiCommand(ctx, text, msg)
-	case "/loop":
-		return s.handleLoopCommand(ctx, text, msg)
-	case "/queue":
-		return s.handleQueueCommand(ctx, text, msg)
-	case "/schedule":
-		return s.handleScheduleCommand(ctx, text, msg)
-	case "/cmds":
-		return s.handleCommandsCommand(ctx, text, msg)
-	case "/config":
-		return s.handleConfigCommand(ctx, text, msg)
-	case "/model":
-		return s.handleModelCommand(ctx, text, msg)
-	case "/mode":
-		return s.handleModeCommand(ctx, text, msg)
-	case "/usage":
-		return s.handleUsageCommand(text, msg)
-	case "/show":
-		return s.handleShowCommand(ctx, msg, text)
-	case "/at":
-		return s.handleAtCommand(ctx, msg, text)
-	case "/debug":
-		return s.handleDebugCommand(ctx, text)
-	case "/restart":
-		return s.handleRestartCommand(ctx, msg)
-	case "/status":
-		return s.status(msg)
-	default:
-		return "暂不支持这个命令。发送 /help 查看当前支持的命令。"
+	if command, ok := lookupSlashCommand(fields[0]); ok {
+		return command.run(s, ctx, text, msg)
 	}
+	return "暂不支持这个命令。发送 /help 查看当前支持的命令。"
+}
+
+func lookupSlashCommand(name string) (slashCommandSpec, bool) {
+	name = strings.TrimSpace(name)
+	for _, command := range slashCommandTable {
+		if command.name == name {
+			return command, true
+		}
+	}
+	return slashCommandSpec{}, false
+}
+
+func lookupSlashCommandHelp(name string) string {
+	command, ok := lookupSlashCommandIn(slashCommandTable, name)
+	if !ok {
+		return ""
+	}
+	return strings.Join(command.helpLines, "\n")
+}
+
+func lookupSlashCommandHelpIn(commands []slashCommandSpec, name string) string {
+	command, ok := lookupSlashCommandIn(commands, name)
+	if !ok {
+		return ""
+	}
+	return strings.Join(command.helpLines, "\n")
+}
+
+func lookupSlashCommandIn(commands []slashCommandSpec, name string) (slashCommandSpec, bool) {
+	name = strings.TrimSpace(name)
+	for _, command := range commands {
+		if command.name == name {
+			return command, true
+		}
+	}
+	return slashCommandSpec{}, false
+}
+
+func (s *Service) handleHelpCommand() string {
+	lines := []string{
+		"当前支持的命令：",
+		slashHelpCommandHelp,
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/new"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/agent"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/session"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/wiki"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/loop"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/queue"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/cmds"),
+		"//command [args] - 透传执行 ACP slash command 的简写",
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/config"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/model"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/mode"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/usage"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/show"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/at"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/debug"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/restart"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/status"),
+		"",
+		"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Service) handleDebugCommand(ctx context.Context, text string) string {
@@ -240,8 +402,96 @@ func (s *Service) status(msg feishu.Message) string {
 			"cwd："+session.Cwd,
 			"session："+session.ACPSessionID,
 		)
+		status := s.sessionRuntimeStatusSnapshot(session.Key)
+		wikiStatus := s.wikiStatusSnapshot(session.Key)
+		loopStatus, hasLoopStatus := s.loopStatusSnapshot(session.Key)
+		acpError, hasACPError := s.acpErrorSnapshot(session)
+		lines = append(lines,
+			"运行态："+formatSessionBusyStatus(status),
+			"队列："+formatSessionQueueStatus(status),
+			"wiki："+formatSessionWikiStatus(wikiStatus),
+			"loop："+formatSessionLoopStatus(loopStatus, hasLoopStatus),
+			"ACP错误："+formatACPErrorStatus(acpError, hasACPError),
+		)
 	} else {
 		lines = append(lines, sessionLabel(msg)+"还没有会话映射；发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatSessionBusyStatus(status sessionRuntimeStatus) string {
+	if !status.Busy {
+		return "空闲"
+	}
+	switch status.RunningKind {
+	case taskKindUser:
+		return "忙碌（user）"
+	case taskKindWiki:
+		return "忙碌（wiki）"
+	case taskKindLoop:
+		return "忙碌（loop）"
+	default:
+		return "忙碌"
+	}
+}
+
+func formatSessionQueueStatus(status sessionRuntimeStatus) string {
+	draining := ""
+	if status.QueueDraining {
+		draining = "，正在执行"
+	}
+	return "待执行 " + strconv.Itoa(status.QueueLen) + " 条" + draining
+}
+
+func formatSessionWikiStatus(snapshot wikiStatusSnapshot) string {
+	if snapshot.timerSet {
+		return "等待定时触发"
+	}
+	if snapshot.status.running || snapshot.backgroundTask || (snapshot.foregroundTask != nil && snapshot.foregroundTask.kind == taskKindWiki) {
+		return "正在反思"
+	}
+	if !snapshot.status.lastStarted.IsZero() {
+		if snapshot.status.lastSuccess {
+			return "最近一次成功"
+		}
+		return "最近一次失败"
+	}
+	return "尚未触发"
+}
+
+func formatSessionLoopStatus(status loopRunStatus, ok bool) string {
+	if !ok || status.started.IsZero() {
+		return "尚无状态"
+	}
+	parts := make([]string, 0, 4)
+	if status.running {
+		parts = append(parts, "运行中")
+	} else {
+		parts = append(parts, "已结束")
+	}
+	if status.round > 0 {
+		parts = append(parts, "第 "+strconv.Itoa(status.round)+" 轮")
+	}
+	if status.reason != "" {
+		parts = append(parts, "原因："+status.reason)
+	}
+	if strings.TrimSpace(status.pendingAdd) != "" {
+		parts = append(parts, "有待处理补充消息")
+	}
+	return strings.Join(parts, "，")
+}
+
+func formatACPErrorStatus(snapshot acpErrorSnapshot, ok bool) string {
+	if !ok || snapshot.occurred.IsZero() {
+		return "无"
+	}
+	operation := strings.TrimSpace(snapshot.operation)
+	if operation == "" {
+		operation = "unknown"
+	}
+	message := strings.TrimSpace(snapshot.message)
+	if message == "" {
+		message = "无错误摘要"
+	}
+	return snapshot.occurred.Format("15:04:05") + "，" + operation + "：" + message
 }

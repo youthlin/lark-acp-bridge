@@ -32,12 +32,7 @@ type promptCardStream struct {
 	showUsageDetail   bool
 	text              string
 	process           []string
-	processPending    string
-	processDirty      bool
-	processLastFlush  time.Time
-	processTimer      *time.Timer
-	processTimerGen   int64
-	processFlushing   sync.WaitGroup
+	processUpdates    promptProcessUpdateThrottler
 	streaming         bool
 	activeStreamClass promptProcessClass
 	tools             []promptToolRow
@@ -67,6 +62,7 @@ func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message
 		showTools:        !show.HideTools,
 		showStatusBar:    !show.HideStatusBar,
 		showUsageDetail:  !show.HideUsageDetail,
+		processUpdates:   promptProcessUpdateThrottler{interval: promptProcessFlushInterval},
 		status:           promptStatusBar{state: promptStatusRunning, prefix: strings.TrimSpace(statusPrefix), startedAt: time.Now()},
 	}
 }
@@ -574,6 +570,76 @@ const (
 	maxPromptProcessRunes      = 6000
 )
 
+type promptProcessUpdateThrottler struct {
+	interval  time.Duration
+	pending   string
+	dirty     bool
+	lastFlush time.Time
+	timer     *time.Timer
+	timerGen  int64
+	flushing  sync.WaitGroup
+}
+
+func (t *promptProcessUpdateThrottler) queueLocked(now time.Time, text string, force bool, onTimer func(int64)) (string, bool) {
+	t.pending = text
+	t.dirty = true
+	interval := t.interval
+	if interval <= 0 {
+		interval = promptProcessFlushInterval
+	}
+	if force || t.lastFlush.IsZero() || !now.Before(t.lastFlush.Add(interval)) {
+		flushText, flushNow := t.takeLocked(now)
+		t.stopTimerLocked()
+		return flushText, flushNow
+	}
+	t.scheduleLocked(t.lastFlush.Add(interval).Sub(now), onTimer)
+	return "", false
+}
+
+func (t *promptProcessUpdateThrottler) scheduleLocked(delay time.Duration, onTimer func(int64)) {
+	if t.timer != nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	t.timerGen++
+	generation := t.timerGen
+	t.flushing.Add(1)
+	t.timer = time.AfterFunc(delay, func() {
+		defer t.flushing.Done()
+		if onTimer != nil {
+			onTimer(generation)
+		}
+	})
+}
+
+func (t *promptProcessUpdateThrottler) stopTimerLocked() {
+	t.timerGen++
+	if t.timer == nil {
+		return
+	}
+	if t.timer.Stop() {
+		t.flushing.Done()
+	}
+	t.timer = nil
+}
+
+func (t *promptProcessUpdateThrottler) takeLocked(now time.Time) (string, bool) {
+	if !t.dirty {
+		return "", false
+	}
+	text := t.pending
+	t.pending = ""
+	t.dirty = false
+	t.lastFlush = now
+	return text, true
+}
+
+func (t *promptProcessUpdateThrottler) wait() {
+	t.flushing.Wait()
+}
+
 func (s *promptCardStream) close() {
 	s.closeWithContext(s.ctx)
 }
@@ -603,14 +669,9 @@ func (s *promptCardStream) queueProcessUpdateWithContext(ctx context.Context, ca
 	var flushText string
 	flushNow := false
 	s.mu.Lock()
-	s.processPending = text
-	s.processDirty = true
-	if force || s.processLastFlush.IsZero() || !now.Before(s.processLastFlush.Add(promptProcessFlushInterval)) {
-		flushText, flushNow = s.takePendingProcessUpdateLocked(now)
-		s.stopProcessFlushTimerLocked()
-	} else {
-		s.scheduleProcessFlushLocked(s.processLastFlush.Add(promptProcessFlushInterval).Sub(now))
-	}
+	flushText, flushNow = s.processUpdates.queueLocked(now, text, force, func(generation int64) {
+		s.flushProcessUpdateTimer(generation)
+	})
 	s.mu.Unlock()
 	if flushNow {
 		s.applyProcessUpdateWithContext(ctx, card, flushText)
@@ -629,67 +690,33 @@ func (s *promptCardStream) flushPendingProcessUpdateWithContext(ctx context.Cont
 	)
 	s.mu.Lock()
 	card = s.card
-	s.stopProcessFlushTimerLocked()
-	flushText, flushNow = s.takePendingProcessUpdateLocked(time.Now())
+	s.processUpdates.stopTimerLocked()
+	flushText, flushNow = s.processUpdates.takeLocked(time.Now())
 	s.mu.Unlock()
 	if flushNow && card != nil {
 		s.applyProcessUpdateWithContext(ctx, card, flushText)
 	}
-	s.processFlushing.Wait()
+	s.processUpdates.wait()
 }
 
-func (s *promptCardStream) scheduleProcessFlushLocked(delay time.Duration) {
-	if s.processTimer != nil {
-		return
-	}
-	if delay < 0 {
-		delay = 0
-	}
-	s.processTimerGen++
-	generation := s.processTimerGen
-	s.processFlushing.Add(1)
-	s.processTimer = time.AfterFunc(delay, func() {
-		defer s.processFlushing.Done()
-		var (
-			card      feishu.StreamCard
-			flushText string
-			flushNow  bool
-		)
-		s.mu.Lock()
-		if s.processTimerGen != generation {
-			s.mu.Unlock()
-			return
-		}
-		s.processTimer = nil
-		card = s.card
-		flushText, flushNow = s.takePendingProcessUpdateLocked(time.Now())
+func (s *promptCardStream) flushProcessUpdateTimer(generation int64) {
+	var (
+		card      feishu.StreamCard
+		flushText string
+		flushNow  bool
+	)
+	s.mu.Lock()
+	if s.processUpdates.timerGen != generation {
 		s.mu.Unlock()
-		if flushNow && card != nil {
-			s.applyProcessUpdate(card, flushText)
-		}
-	})
-}
-
-func (s *promptCardStream) stopProcessFlushTimerLocked() {
-	s.processTimerGen++
-	if s.processTimer == nil {
 		return
 	}
-	if s.processTimer.Stop() {
-		s.processFlushing.Done()
+	s.processUpdates.timer = nil
+	card = s.card
+	flushText, flushNow = s.processUpdates.takeLocked(time.Now())
+	s.mu.Unlock()
+	if flushNow && card != nil {
+		s.applyProcessUpdate(card, flushText)
 	}
-	s.processTimer = nil
-}
-
-func (s *promptCardStream) takePendingProcessUpdateLocked(now time.Time) (string, bool) {
-	if !s.processDirty {
-		return "", false
-	}
-	text := s.processPending
-	s.processPending = ""
-	s.processDirty = false
-	s.processLastFlush = now
-	return text, true
 }
 
 func (s *promptCardStream) applyProcessUpdate(card feishu.StreamCard, text string) {
