@@ -17,6 +17,8 @@ type driveCommentReplyRecorder struct {
 	texts    []string
 }
 
+func (r *driveCommentReplyRecorder) Outbound() {}
+
 func (r *driveCommentReplyRecorder) send(ctx context.Context, comment feishu.DriveComment, text string) error {
 	return r.ReplyDriveComment(ctx, comment, text)
 }

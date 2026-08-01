@@ -14,22 +14,36 @@ import (
 
 // Service 本项目核心服务
 type Service struct {
-	cfg                    config.Config            // 配置文件
-	configPath             string                   // 配置文件路径，用于内置后台重启
-	registry               *acp.Registry            // 对接的 acp, 比如 traex -> "traex acp serve"
-	runtime                acpRuntime               // acp client 运行时
-	feishu                 []*feishu.Adapter        // Bots 实例
+	cfg            config.Config     // 配置文件
+	configPath     string            // 配置文件路径，用于内置后台重启
+	registry       *acp.Registry     // 对接的 acp, 比如 traex -> "traex acp serve"
+	runtime        acpRuntime        // acp client 运行时
+	feishu         []*feishu.Adapter // Bots 实例
+	restartCommand func(context.Context) error
+	builtinRestart bool // 是否允许使用内置后台 restart
+
+	serviceStores
+	serviceOutbounds
+	serviceTasks
+	serviceScheduleRuns
+	serviceACPUpdates
+}
+
+type serviceStores struct {
 	stores                 map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
 	scheduleStores         map[string]*ScheduledTaskStore
 	scheduleSenders        map[string]scheduledTaskIMSender
 	scheduleMessageSenders map[string]scheduledTaskMessageSender
 	scheduleStreams        map[string]scheduledTaskStreamStarter
 	usageStores            map[string]*TokenUsageStore
-	outboundMu             sync.Mutex
-	outbounds              map[string]feishu.Outbound
-	restartCommand         func(context.Context) error
-	builtinRestart         bool // 是否允许使用内置后台 restart
+}
 
+type serviceOutbounds struct {
+	outboundMu sync.Mutex
+	outbounds  map[string]feishu.Outbound
+}
+
+type serviceTasks struct {
 	taskMu          sync.Mutex
 	tasks           map[SessionKey]*runningTask
 	wikiTasks       map[runtimeKey]*runningTask
@@ -38,12 +52,17 @@ type Service struct {
 	wikiStatuses    map[SessionKey]wikiRunStatus
 	loopStatuses    map[SessionKey]loopRunStatus
 	acpErrors       map[SessionKey]acpErrorSnapshot
-	scheduleRuns    map[string]scheduleRunStatus
-	scheduleJobs    map[string]*scheduledTaskJob
 	pendingAtTexts  map[ChatKey][]pendingAtMessage
 	pendingAtAuto   map[SessionKey][]pendingAtMessage
 	promptQueues    map[SessionKey]*promptQueue
+}
 
+type serviceScheduleRuns struct {
+	scheduleRuns map[string]scheduleRunStatus
+	scheduleJobs map[string]*scheduledTaskJob
+}
+
+type serviceACPUpdates struct {
 	acpUpdateMu    sync.Mutex
 	acpUpdateUnsub map[SessionKey]func()
 }
@@ -54,29 +73,39 @@ type Service struct {
 //	@param store 会话储存, 实际使用传nil即可, 单元测试可传 [NewSessionStore] 实例进来避免污染真实会话
 func NewService(cfg config.Config, store *SessionStore) *Service {
 	s := &Service{
-		cfg:                    cfg,
-		registry:               acp.NewRegistry(cfg),
-		stores:                 make(map[string]*SessionStore),
-		scheduleStores:         make(map[string]*ScheduledTaskStore),
-		scheduleSenders:        make(map[string]scheduledTaskIMSender),
-		scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
-		scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
-		usageStores:            make(map[string]*TokenUsageStore),
-		outbounds:              make(map[string]feishu.Outbound),
-		runtime:                newRuntimeManager(),
-		tasks:                  make(map[SessionKey]*runningTask),
-		wikiTasks:              make(map[runtimeKey]*runningTask),
-		wikiTimers:             make(map[SessionKey]*pendingWikiRun),
-		wikiGenerations:        make(map[SessionKey]int64),
-		wikiStatuses:           make(map[SessionKey]wikiRunStatus),
-		loopStatuses:           make(map[SessionKey]loopRunStatus),
-		acpErrors:              make(map[SessionKey]acpErrorSnapshot),
-		scheduleRuns:           make(map[string]scheduleRunStatus),
-		scheduleJobs:           make(map[string]*scheduledTaskJob),
-		pendingAtTexts:         make(map[ChatKey][]pendingAtMessage),
-		pendingAtAuto:          make(map[SessionKey][]pendingAtMessage),
-		promptQueues:           make(map[SessionKey]*promptQueue),
-		acpUpdateUnsub:         make(map[SessionKey]func()),
+		cfg:      cfg,
+		registry: acp.NewRegistry(cfg),
+		runtime:  newRuntimeManager(),
+		serviceStores: serviceStores{
+			stores:                 make(map[string]*SessionStore),
+			scheduleStores:         make(map[string]*ScheduledTaskStore),
+			scheduleSenders:        make(map[string]scheduledTaskIMSender),
+			scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
+			scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
+			usageStores:            make(map[string]*TokenUsageStore),
+		},
+		serviceOutbounds: serviceOutbounds{
+			outbounds: make(map[string]feishu.Outbound),
+		},
+		serviceTasks: serviceTasks{
+			tasks:           make(map[SessionKey]*runningTask),
+			wikiTasks:       make(map[runtimeKey]*runningTask),
+			wikiTimers:      make(map[SessionKey]*pendingWikiRun),
+			wikiGenerations: make(map[SessionKey]int64),
+			wikiStatuses:    make(map[SessionKey]wikiRunStatus),
+			loopStatuses:    make(map[SessionKey]loopRunStatus),
+			acpErrors:       make(map[SessionKey]acpErrorSnapshot),
+			pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
+			pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
+			promptQueues:    make(map[SessionKey]*promptQueue),
+		},
+		serviceScheduleRuns: serviceScheduleRuns{
+			scheduleRuns: make(map[string]scheduleRunStatus),
+			scheduleJobs: make(map[string]*scheduledTaskJob),
+		},
+		serviceACPUpdates: serviceACPUpdates{
+			acpUpdateUnsub: make(map[SessionKey]func()),
+		},
 	}
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
@@ -134,9 +163,37 @@ const maxSessionHistoryPerChat = 10
 
 const mentionOnlyPromptText = "（用户提及你，但本次无消息内容，请按历史消息，引用上下文回复）"
 
+type incomingPromptMessage struct {
+	msg        feishu.Message
+	text       string
+	promptText string
+}
+
 // HandleFeishuMessage 消息处理
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
+	incoming := s.normalizeIncomingMessage(msg)
+	slog.DebugContext(ctx, "处理解析后的消息", "text", incoming.text, "prompt_text", incoming.promptText)
+
+	if s.shouldSkipIncomingMessage(ctx, incoming) {
+		return "", nil
+	}
+	if cleanup, ok := s.startIncomingProcessingReaction(ctx, incoming.msg); ok {
+		defer cleanup()
+	}
+	if errText := s.ensureIncomingWorkspace(ctx, incoming.msg); errText != "" {
+		return errText, nil
+	}
+	if incoming.promptText == "" {
+		return "暂不支持的消息类型。", nil
+	}
+	if strings.HasPrefix(incoming.text, "/") {
+		return s.handleSlashCommandMessage(ctx, incoming.msg, incoming.text), nil
+	}
+	return s.handlePromptMessage(ctx, incoming)
+}
+
+func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMessage {
 	if strings.TrimSpace(msg.BotOpenID) == "" {
 		msg.BotOpenID = s.botOpenID(msg.BotID)
 	}
@@ -147,47 +204,52 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	if promptText == "" && messageMentionsBot(msg) {
 		promptText = mentionOnlyPromptText
 	}
-	slog.DebugContext(ctx, "处理解析后的消息", "text", text, "prompt_text", promptText)
+	return incomingPromptMessage{msg: msg, text: text, promptText: promptText}
+}
 
-	if s.shouldIgnoreMessage(msg, text) {
-		if !strings.HasPrefix(text, "/") {
-			s.cachePendingAtText(msg)
+func (s *Service) shouldSkipIncomingMessage(ctx context.Context, incoming incomingPromptMessage) bool {
+	if s.shouldIgnoreMessage(incoming.msg, incoming.text) {
+		if !strings.HasPrefix(incoming.text, "/") {
+			s.cachePendingAtText(incoming.msg)
 		}
 		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
-		return "", nil
+		return true
 	}
-	if s.shouldStartProcessingReaction(msg) {
-		if cleanup, ok := s.startProcessingReaction(ctx, msg); ok {
-			defer cleanup()
-		}
-	}
+	return false
+}
 
-	_, err := ensureWorkspace(msg.Workspace, msg.BotID)
-	if err != nil {
+func (s *Service) startIncomingProcessingReaction(ctx context.Context, msg feishu.Message) (func(), bool) {
+	if !s.shouldStartProcessingReaction(msg) {
+		return nil, false
+	}
+	return s.startProcessingReaction(ctx, msg)
+}
+
+func (s *Service) ensureIncomingWorkspace(ctx context.Context, msg feishu.Message) string {
+	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
-		return "初始化 workspace 失败：" + err.Error(), nil
+		return "初始化 workspace 失败：" + err.Error()
 	}
-	if promptText == "" {
-		return "暂不支持的消息类型。", nil
-	}
+	return ""
+}
 
-	// 斜杠命令
-	if strings.HasPrefix(text, "/") {
-		if !s.slashCommandAllowed(msg) {
-			if len(s.ownerOpenIDs(msg.BotID)) == 0 {
-				return "未配置 bot owner，不能执行斜杠命令。", nil
-			}
-			return "只有 bot owner 可以执行斜杠命令。", nil
+func (s *Service) handleSlashCommandMessage(ctx context.Context, msg feishu.Message, text string) string {
+	if !s.slashCommandAllowed(msg) {
+		if len(s.ownerOpenIDs(msg.BotID)) == 0 {
+			return "未配置 bot owner，不能执行斜杠命令。"
 		}
-		return s.handleCommand(ctx, text, msg), nil
+		return "只有 bot owner 可以执行斜杠命令。"
 	}
-	// 普通消息
-	promptText = s.promptTextWithPendingAtTexts(msg, promptText)
-	if s.shouldQueueAtAutoMessage(msg) {
-		if s.queueAtAutoMessageIfBusy(msg) {
+	return s.handleCommand(ctx, text, msg)
+}
+
+func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingPromptMessage) (string, error) {
+	promptText := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
+	if s.shouldQueueAtAutoMessage(incoming.msg) {
+		if s.queueAtAutoMessageIfBusy(incoming.msg) {
 			return "", nil
 		}
-		promptText = s.promptTextWithAtAuto(msg, promptText)
+		promptText = s.promptTextWithAtAuto(incoming.msg, promptText)
 	}
-	return s.prompt(ctx, msg, promptText)
+	return s.prompt(ctx, incoming.msg, promptText)
 }

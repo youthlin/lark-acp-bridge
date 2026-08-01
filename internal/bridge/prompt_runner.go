@@ -30,6 +30,15 @@ type preparedPrompt struct {
 	errText string
 }
 
+type promptStreamRun struct {
+	stream        *promptCardStream
+	chunks        *promptChunkAccumulator
+	result        acp.PromptResult
+	rawResult     acp.PromptResult
+	streamedReply string
+	err           error
+}
+
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
 	return s.promptWithOptions(ctx, msg, text, promptSessionOptions{})
 }
@@ -224,64 +233,73 @@ func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.M
 
 func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
 	if s.shouldDelayAtAutoProgress(msg) {
-		stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
-		stream.delayCardCreation()
-		chunks := newPromptChunkAccumulator(stream)
-		flushStreams := func() {
-			chunks.finishStream()
+		run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, true)
+		result := run.result
+		if strings.TrimSpace(run.streamedReply) != "" && (run.chunks.hasToolBoundary() || strings.TrimSpace(result.Text) == "") {
+			result.Text = run.streamedReply
 		}
-		opts := acp.PromptOptions{
-			OnUpdate: func(update acp.PromptUpdate) {
-				stream.updatePromptStatusFromUpdate(update)
-				if chunk, ok := promptUpdateChunk(update); ok {
-					if chunk.ToolBoundary {
-						chunks.markToolBoundary()
-					}
-					chunks.add(chunk)
-					return
-				}
-				if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
-					chunks.markToolBoundary()
-				} else {
-					flushStreams()
-				}
-				stream.updatePromptUpdate(update)
-			},
-			OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
-				outcome, ok, err := s.requestPermission(reqCtx, msg, req)
-				if err != nil {
-					return acp.PermissionOutcome{}, err
-				}
-				if ok {
-					return outcome, nil
-				}
-				return defaultPermissionOutcome(req), nil
-			},
-		}
-		result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
-		chunks.close()
-		streamedReply := chunks.finalText()
-		if strings.TrimSpace(streamedReply) != "" && (chunks.hasToolBoundary() || strings.TrimSpace(result.Text) == "") {
-			result.Text = streamedReply
-		}
-		if err == nil && strings.TrimSpace(result.Text) != "" && !s.shouldSuppressAtAutoReply(msg, result.Text) {
+		if run.err == nil && strings.TrimSpace(result.Text) != "" && !s.shouldSuppressAtAutoReply(msg, result.Text) {
 			finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
 			defer finalCancel()
-			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() {
-				stream.setFinalTextWithContext(finalCtx, finalReply)
+			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !run.chunks.hasToolBoundary() {
+				run.stream.setFinalTextWithContext(finalCtx, finalReply)
 			}
-			stream.flushDelayedWithContext(finalCtx, result, result.StopReason)
+			run.stream.flushDelayedWithContext(finalCtx, result, result.StopReason)
 		}
-		return result, stream.hasStarted(), result, streamedReply, err
+		return result, run.stream.hasStarted(), result, run.streamedReply, run.err
 	}
+
+	run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, false)
+	result := run.result
+	if run.stream.hasStarted() {
+		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
+		defer finalCancel()
+		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !run.chunks.hasToolBoundary() {
+			run.stream.setFinalTextWithContext(finalCtx, finalReply)
+		}
+		if run.err != nil {
+			if errors.Is(run.err, context.Canceled) {
+				run.stream.updateProcessMessageWithContext(finalCtx, "已取消")
+				run.stream.finishPromptStatusWithContext(finalCtx, "cancelled")
+			} else {
+				run.stream.updateProcessMessageWithContext(finalCtx, "执行失败："+run.err.Error())
+				run.stream.failPromptStatusWithContext(finalCtx)
+			}
+		} else {
+			run.stream.updatePromptStatusFromResultWithContext(finalCtx, result)
+			run.stream.updatePromptResult(result)
+			run.stream.finishPromptStatusWithContext(finalCtx, result.StopReason)
+		}
+		run.stream.closeWithContext(finalCtx)
+	}
+	if run.stream.hasStarted() {
+		result.Text = ""
+	}
+	return result, run.stream.hasStarted(), run.rawResult, run.streamedReply, run.err
+}
+
+func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string, delayed bool) promptStreamRun {
 	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
-	chunks := newPromptChunkAccumulator(stream)
-	flushStreams := func() {
-		chunks.finishStream()
+	if delayed {
+		stream.delayCardCreation()
 	}
-	opts := acp.PromptOptions{
+	chunks := newPromptChunkAccumulator(stream)
+	result, err := s.runtime.Prompt(ctx, session, agent, text, s.promptStreamOptions(msg, stream, chunks))
+	rawResult := result
+	chunks.close()
+	return promptStreamRun{
+		stream:        stream,
+		chunks:        chunks,
+		result:        result,
+		rawResult:     rawResult,
+		streamedReply: chunks.finalText(),
+		err:           err,
+	}
+}
+
+func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStream, chunks *promptChunkAccumulator) acp.PromptOptions {
+	return acp.PromptOptions{
 		OnUpdate: func(update acp.PromptUpdate) {
-			// slog.InfoContext(ctx, "ACP|OnUpdate", "update", update)
 			stream.updatePromptStatusFromUpdate(update)
 			if chunk, ok := promptUpdateChunk(update); ok {
 				if chunk.ToolBoundary {
@@ -293,7 +311,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 			if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
 				chunks.markToolBoundary()
 			} else {
-				flushStreams()
+				chunks.finishStream()
 			}
 			stream.updatePromptUpdate(update)
 		},
@@ -308,35 +326,6 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 			return defaultPermissionOutcome(req), nil
 		},
 	}
-	result, err := s.runtime.Prompt(ctx, session, agent, text, opts)
-	rawResult := result
-	chunks.close()
-	streamedReply := chunks.finalText()
-	if stream.hasStarted() {
-		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
-		defer finalCancel()
-		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !chunks.hasToolBoundary() {
-			stream.setFinalTextWithContext(finalCtx, finalReply)
-		}
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				stream.updateProcessMessageWithContext(finalCtx, "已取消")
-				stream.finishPromptStatusWithContext(finalCtx, "cancelled")
-			} else {
-				stream.updateProcessMessageWithContext(finalCtx, "执行失败："+err.Error())
-				stream.failPromptStatusWithContext(finalCtx)
-			}
-		} else {
-			stream.updatePromptStatusFromResultWithContext(finalCtx, result)
-			stream.updatePromptResult(result)
-			stream.finishPromptStatusWithContext(finalCtx, result.StopReason)
-		}
-		stream.closeWithContext(finalCtx)
-	}
-	if stream.hasStarted() {
-		result.Text = ""
-	}
-	return result, stream.hasStarted(), rawResult, streamedReply, err
 }
 
 func defaultPermissionOutcome(req acp.PermissionRequest) acp.PermissionOutcome {

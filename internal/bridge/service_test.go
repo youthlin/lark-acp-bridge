@@ -112,6 +112,8 @@ func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
 	return &fakeSentMessageClient{nextID: nextID}
 }
 
+func (f *fakeSentMessageClient) Outbound() {}
+
 func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, error) {
 	return f.SendTextMessage(ctx, msg, text)
 }

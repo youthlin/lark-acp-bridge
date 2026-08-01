@@ -4,7 +4,9 @@ import "context"
 
 // Outbound 表示飞书侧可用的出站能力。具体能力由 bridge 侧按需做小接口断言，
 // 避免把函数通过 context.WithValue 隐式传递到业务层。
-type Outbound interface{}
+type Outbound interface {
+	Outbound()
+}
 
 type OutboundHandler interface {
 	HandleFeishuMessageWithOutbound(context.Context, Message, Outbound) (string, error)

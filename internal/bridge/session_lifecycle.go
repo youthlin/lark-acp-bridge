@@ -19,6 +19,21 @@ const (
 	newSessionPartialStateWait = 120 * time.Millisecond
 )
 
+type newSessionPlan struct {
+	Req             newSessionRequest
+	Source          string
+	UseDefaultTitle bool
+	Cwd             string
+	AgentName       string
+	Agent           config.AgentConfig
+}
+
+type sessionTransition struct {
+	Key            SessionKey
+	PendingWiki    pendingWikiRun
+	HasPendingWiki bool
+}
+
 func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
 	session, _, source, errText := s.createSession(ctx, fields, msg)
 	if errText != "" {
@@ -34,87 +49,117 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if store == nil {
 		return Session{}, config.AgentConfig{}, "", "会话持久化未初始化。"
 	}
-	req, source, errText := s.resolveNewSessionRequest(fields, msg)
+	plan, errText := s.resolveNewSessionPlan(fields, msg)
 	if errText != "" {
 		return Session{}, config.AgentConfig{}, "", errText
-	}
-	useDefaultTitle := req.Title == ""
-	cwd := req.Cwd
-	if !filepath.IsAbs(cwd) {
-		return Session{}, config.AgentConfig{}, "", "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
-	}
-	if info, err := os.Stat(cwd); err != nil {
-		return Session{}, config.AgentConfig{}, "", "工作目录不可访问：" + err.Error()
-	} else if !info.IsDir() {
-		return Session{}, config.AgentConfig{}, "", "工作目录不是目录：" + cwd
-	}
-	agentName := s.chatAgentName(msg)
-	agent, ok := s.registry.Get(agentName)
-	if !ok {
-		return Session{}, config.AgentConfig{}, "", "未找到当前聊天选择的 agent 配置：" + agentName
 	}
 	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
 	}
+	transition := s.prepareSessionTransition(ctx, msg)
+	candidate, err := s.startACPSessionCandidate(ctx, transition.Key, msg, plan)
+	if err != nil {
+		s.restoreSessionTransition(transition)
+		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", plan.AgentName, "cwd", plan.Cwd, "错误", err)
+		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
+	}
+	defer candidate.Abort()
+	session := newSessionFromCandidate(transition.Key, msg, plan, candidate)
+	if err := commitNewSessionCandidate(candidate, store, plan, &session); err != nil {
+		s.restoreSessionTransition(transition)
+		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
+		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
+	}
+	s.afterSessionCommitted(transition, session)
+	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", plan.AgentName, "cwd", plan.Cwd)
+	return session, plan.Agent, plan.Source, ""
+}
+
+func (s *Service) resolveNewSessionPlan(fields []string, msg feishu.Message) (newSessionPlan, string) {
+	req, source, errText := s.resolveNewSessionRequest(fields, msg)
+	if errText != "" {
+		return newSessionPlan{}, errText
+	}
+	cwd := req.Cwd
+	if !filepath.IsAbs(cwd) {
+		return newSessionPlan{}, "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
+	}
+	if info, err := os.Stat(cwd); err != nil {
+		return newSessionPlan{}, "工作目录不可访问：" + err.Error()
+	} else if !info.IsDir() {
+		return newSessionPlan{}, "工作目录不是目录：" + cwd
+	}
+	agentName := s.chatAgentName(msg)
+	agent, ok := s.registry.Get(agentName)
+	if !ok {
+		return newSessionPlan{}, "未找到当前聊天选择的 agent 配置：" + agentName
+	}
+	return newSessionPlan{
+		Req:             req,
+		Source:          source,
+		UseDefaultTitle: req.Title == "",
+		Cwd:             cwd,
+		AgentName:       agentName,
+		Agent:           agent,
+	}, ""
+}
+
+func (s *Service) prepareSessionTransition(ctx context.Context, msg feishu.Message) sessionTransition {
 	key := sessionKeyFromMessage(msg)
 	s.migrateSessionShowConfigToChat(ctx, msg)
 	pendingWiki, hasPendingWiki := s.takePendingWiki(key)
 	s.cancelRunningSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
-	candidate, err := s.runtime.NewSession(ctx, key, agentName, agent, filepath.Clean(cwd), msg.Workspace)
-	if err != nil {
-		if hasPendingWiki {
-			s.restorePendingWiki(pendingWiki)
-		}
-		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", agentName, "cwd", cwd, "错误", err)
-		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
+	return sessionTransition{Key: key, PendingWiki: pendingWiki, HasPendingWiki: hasPendingWiki}
+}
+
+func (s *Service) restoreSessionTransition(transition sessionTransition) {
+	if transition.HasPendingWiki {
+		s.restorePendingWiki(transition.PendingWiki)
 	}
-	defer candidate.Abort()
+}
+
+func (s *Service) startACPSessionCandidate(ctx context.Context, key SessionKey, msg feishu.Message, plan newSessionPlan) (acpSessionCandidate, error) {
+	return s.runtime.NewSession(ctx, key, plan.AgentName, plan.Agent, filepath.Clean(plan.Cwd), msg.Workspace)
+}
+
+func newSessionFromCandidate(key SessionKey, msg feishu.Message, plan newSessionPlan, candidate acpSessionCandidate) Session {
 	sessionInfo := candidate.Info()
-	session := Session{
+	return Session{
 		Key:               key,
-		Title:             req.Title,
-		ManualTitle:       req.ManualTitle,
-		AgentName:         agentName,
+		Title:             plan.Req.Title,
+		ManualTitle:       plan.Req.ManualTitle,
+		AgentName:         plan.AgentName,
 		ACPSessionID:      sessionInfo.SessionID,
 		ACPMeta:           maps.Clone(sessionInfo.Meta),
-		Cwd:               filepath.Clean(cwd),
+		Cwd:               filepath.Clean(plan.Cwd),
 		Workspace:         msg.Workspace,
 		AvailableCommands: sessionInfo.AvailableCommands,
 		ConfigOptions:     sessionInfo.ConfigOptions,
 		Models:            sessionInfo.Models,
 		Mode:              sessionInfo.Mode,
 	}
-	if useDefaultTitle {
-		if err := candidate.Commit(func() error {
+}
+
+func commitNewSessionCandidate(candidate acpSessionCandidate, store *SessionStore, plan newSessionPlan, session *Session) error {
+	if plan.UseDefaultTitle {
+		return candidate.Commit(func() error {
 			var persistErr error
-			session, persistErr = store.UpsertWithDefaultTitle(session)
+			*session, persistErr = store.UpsertWithDefaultTitle(*session)
 			return persistErr
-		}); err != nil {
-			if hasPendingWiki {
-				s.restorePendingWiki(pendingWiki)
-			}
-			slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
-			return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
-		}
-	} else {
-		if err := candidate.Commit(func() error {
-			return store.Upsert(session)
-		}); err != nil {
-			if hasPendingWiki {
-				s.restorePendingWiki(pendingWiki)
-			}
-			slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
-			return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
-		}
+		})
 	}
-	if hasPendingWiki {
-		s.runPendingWikiAsync(pendingWiki)
+	return candidate.Commit(func() error {
+		return store.Upsert(*session)
+	})
+}
+
+func (s *Service) afterSessionCommitted(transition sessionTransition, session Session) {
+	if transition.HasPendingWiki {
+		s.runPendingWikiAsync(transition.PendingWiki)
 	}
 	s.clearACPError(session)
-	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", agentName, "cwd", cwd)
-	return session, agent, source, ""
 }
 
 func (s *Service) waitForNewSessionState(ctx context.Context, msg feishu.Message, key SessionKey, session Session) Session {

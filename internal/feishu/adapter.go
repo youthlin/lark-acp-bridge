@@ -61,6 +61,8 @@ type Adapter struct {
 	chatInfoCache   *chatInfoCache          // 群信息缓存
 }
 
+var _ Outbound = (*Adapter)(nil)
+
 type reactionClient interface {
 	AddReaction(ctx context.Context, messageID string) (string, error)
 	DeleteReaction(ctx context.Context, messageID string, reactionID string) error
@@ -148,6 +150,8 @@ func (a *Adapter) OwnerOpenIDs() []string {
 	}
 	return out
 }
+
+func (a *Adapter) Outbound() {}
 
 // Start 启动Bot监听
 func (a *Adapter) Start(ctx context.Context) error {
