@@ -730,6 +730,19 @@ func (s *promptCardStream) applyProcessUpdateWithContext(ctx context.Context, ca
 	if err := card.UpdateProcess(ctx, text); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片过程失败", "session", s.session.ACPSessionID, "错误", err)
 	}
+	s.refreshPromptStatusWithContext(ctx, card)
+}
+
+func (s *promptCardStream) refreshPromptStatusWithContext(ctx context.Context, card feishu.StreamCard) {
+	if !s.showStatusBar || card == nil {
+		return
+	}
+	s.mu.Lock()
+	statusText := s.status.text()
+	s.mu.Unlock()
+	if err := card.UpdateStatus(ctx, statusText); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
+	}
 }
 
 func (s *promptCardStream) ensureCard() feishu.StreamCard {

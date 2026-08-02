@@ -137,6 +137,37 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	}
 }
 
+func TestPromptCardStreamRefreshesStatusWhenProcessUpdates(t *testing.T) {
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	})
+	stream := newPromptCardStream(ctx, feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+	}, Session{ACPSessionID: "acp-session-1"}, ChatConfig{}, starter)
+
+	stream.updateProcess("tool started")
+
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "tool started" {
+		t.Fatalf("processUpdates = %+v, want process update", got)
+	}
+	status := cards[0].statusUpdatesSnapshot()
+	if len(status) != 1 {
+		t.Fatalf("statusUpdates = %+v, want status refreshed with process update", status)
+	}
+	if !strings.HasPrefix(status[0], "⏳ ") {
+		t.Fatalf("statusUpdates[0] = %q, want running elapsed status", status[0])
+	}
+}
+
 func TestPromptProcessUpdateThrottlerBoundaries(t *testing.T) {
 	now := time.Unix(100, 0)
 	throttler := promptProcessUpdateThrottler{interval: time.Second}
