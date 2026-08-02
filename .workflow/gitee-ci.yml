@@ -19,7 +19,7 @@ stages:
     - mkdir -p golang-report
     - '# 未使用Go Mod的用户需要打开一下注释'
     - '# export GOFLAGS=-mod=vendor'
-    - go test -v -json -cover -coverprofile cover.out ./... &gt; golang-report/report.jsonl
+    - go test -v -json -cover -coverprofile cover.out ./... > golang-report/report.jsonl
     - go tool cover -html=cover.out -o golang-report/index.html
     report:
       path: golang-report
@@ -69,10 +69,8 @@ triggers:
   trigger: auto
   push:
     branches:
-      prefix: []
-      precise: []
       include:
-      - .*
+      - main
 notify: []
 strategy:
   blocking: true
