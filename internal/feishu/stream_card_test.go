@@ -1265,6 +1265,8 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		Cwd:                 "/repo",
 		Model:               "gpt-5.5",
 		Mode:                "default",
+		ContextUsage:        "160K/200K",
+		CompactStatus:       "开启，阈值 80%",
 		RuntimeStatus:       "空闲",
 		QueueStatus:         "待执行 0 条",
 		WikiStatus:          "开启",
@@ -1292,6 +1294,7 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"gpt-5.5",
 		"模型",
 		"旧会话",
+		"compact",
 	} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("overview card does not contain %q: %#v", want, card)
@@ -1309,6 +1312,21 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 	} {
 		if !jsonContainsValue(card, want) {
 			t.Fatalf("overview card callback does not contain %q: %#v", want, card)
+		}
+	}
+	for _, unexpected := range []string{"**聊天配置**", "上下文：", "过程 开启", "计划 关闭"} {
+		if jsonContainsSubstring(card, unexpected) {
+			t.Fatalf("overview card should not contain %q: %#v", unexpected, card)
+		}
+	}
+	for text, wantType := range map[string]string{
+		"过程":  "primary",
+		"计划":  "primary",
+		"思考":  "default",
+		"状态栏": "primary",
+	} {
+		if got := jsonButtonTypeByText(card, text); got != wantType {
+			t.Fatalf("button %q type = %q, want %q", text, got, wantType)
 		}
 	}
 	cardData, err := json.Marshal(card)
@@ -1842,6 +1860,42 @@ func jsonElementFieldEquals(v any, elementID string, field string, want string) 
 		}
 	}
 	return false
+}
+
+func jsonButtonTypeByText(v any, text string) string {
+	switch value := v.(type) {
+	case cardJSON:
+		if value["tag"] == "button" && plainTextContent(value["text"]) == text {
+			if buttonType, ok := value["type"].(string); ok {
+				return buttonType
+			}
+			return ""
+		}
+		for _, child := range value {
+			if buttonType := jsonButtonTypeByText(child, text); buttonType != "" {
+				return buttonType
+			}
+		}
+	case map[string]any:
+		if value["tag"] == "button" && plainTextContent(value["text"]) == text {
+			if buttonType, ok := value["type"].(string); ok {
+				return buttonType
+			}
+			return ""
+		}
+		for _, child := range value {
+			if buttonType := jsonButtonTypeByText(child, text); buttonType != "" {
+				return buttonType
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if buttonType := jsonButtonTypeByText(child, text); buttonType != "" {
+				return buttonType
+			}
+		}
+	}
+	return ""
 }
 
 func assertCardElementIDFormat(t *testing.T, v any) {

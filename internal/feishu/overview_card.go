@@ -105,7 +105,6 @@ func newOverviewCardJSON(card OverviewCard) string {
 	elements := []any{
 		overviewSessionElement(card),
 		overviewRuntimeElement(card),
-		overviewChatConfigElement(card),
 	}
 	if agentSelect := overviewAgentSelectElement(card); agentSelect != nil {
 		elements = append(elements, agentSelect)
@@ -162,9 +161,6 @@ func overviewSessionElement(card OverviewCard) cardJSON {
 			"model："+overviewInline(defaultString(card.Model, "未知")),
 			"mode："+overviewInline(defaultString(card.Mode, "未知")),
 		)
-		if strings.TrimSpace(card.ContextUsage) != "" {
-			lines = append(lines, "上下文："+overviewInline(card.ContextUsage))
-		}
 		if strings.TrimSpace(card.CompactStatus) != "" {
 			lines = append(lines, "compact："+overviewInline(card.CompactStatus))
 		}
@@ -180,23 +176,6 @@ func overviewRuntimeElement(card OverviewCard) cardJSON {
 		"wiki：" + overviewInline(defaultString(card.WikiStatus, "未知")),
 		"loop：" + overviewInline(defaultString(card.LoopStatus, "未知")),
 		"ACP错误：" + overviewInline(defaultString(card.ACPErrorStatus, "无")),
-	}
-	return overviewContainer("grey-200", "grey-50", strings.Join(lines, "\n"))
-}
-
-func overviewChatConfigElement(card OverviewCard) cardJSON {
-	lines := []string{
-		"**聊天配置**",
-		"默认 agent：" + overviewInline(defaultString(card.ChatAgentName, "未知")),
-		"at：" + overviewInline(defaultString(card.AtStatus, "未知")),
-		"展示：" + strings.Join([]string{
-			"过程 " + overviewOnOff(card.Show.Step),
-			"计划 " + overviewOnOff(card.Show.Plan),
-			"思考 " + overviewOnOff(card.Show.Thought),
-			"工具 " + overviewOnOff(card.Show.Tool),
-			"状态栏 " + overviewOnOff(card.Show.Status),
-			"用量 " + overviewOnOff(card.Show.Used),
-		}, " / "),
 	}
 	return overviewContainer("grey-200", "grey-50", strings.Join(lines, "\n"))
 }
@@ -286,21 +265,29 @@ func overviewOpenActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
 		overviewButton("模型", overviewActionValue(card, "open_model", "", ""), "default"),
 		overviewButton("模式", overviewActionValue(card, "open_mode", "", ""), "default"),
-		overviewButton("wiki "+overviewNextLabel(card.WikiEnabled), overviewActionValue(card, "toggle_wiki", "wiki", overviewNextSwitch(card.WikiEnabled)), "default"),
+		overviewButton("wiki "+overviewToggleLabel(card.WikiEnabled), overviewActionValue(card, "toggle_wiki", "wiki", overviewNextSwitch(card.WikiEnabled)), "default"),
 	}
 	return overviewButtonRows(buttons, 2)
 }
 
 func overviewShowActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
-		overviewButton("过程 "+overviewNextLabel(card.Show.Step), overviewActionValue(card, "toggle_show", "step", overviewNextSwitch(card.Show.Step)), "default"),
-		overviewButton("计划 "+overviewNextLabel(card.Show.Plan), overviewActionValue(card, "toggle_show", "plan", overviewNextSwitch(card.Show.Plan)), "default"),
-		overviewButton("思考 "+overviewNextLabel(card.Show.Thought), overviewActionValue(card, "toggle_show", "thought", overviewNextSwitch(card.Show.Thought)), "default"),
-		overviewButton("工具 "+overviewNextLabel(card.Show.Tool), overviewActionValue(card, "toggle_show", "tool", overviewNextSwitch(card.Show.Tool)), "default"),
-		overviewButton("状态栏 "+overviewNextLabel(card.Show.Status), overviewActionValue(card, "toggle_show", "status", overviewNextSwitch(card.Show.Status)), "default"),
-		overviewButton("用量 "+overviewNextLabel(card.Show.Used), overviewActionValue(card, "toggle_show", "used", overviewNextSwitch(card.Show.Used)), "default"),
+		overviewShowButton(card, "过程", "step", card.Show.Step),
+		overviewShowButton(card, "计划", "plan", card.Show.Plan),
+		overviewShowButton(card, "思考", "thought", card.Show.Thought),
+		overviewShowButton(card, "工具", "tool", card.Show.Tool),
+		overviewShowButton(card, "状态栏", "status", card.Show.Status),
+		overviewShowButton(card, "用量", "used", card.Show.Used),
 	}
 	return overviewButtonRows(buttons, 2)
+}
+
+func overviewShowButton(card OverviewCard, text string, target string, current bool) cardJSON {
+	buttonType := "default"
+	if current {
+		buttonType = "primary"
+	}
+	return overviewButton(text, overviewActionValue(card, "toggle_show", target, overviewNextSwitch(current)), buttonType)
 }
 
 func overviewCommandHintsElement(hints []string) cardJSON {
@@ -390,13 +377,6 @@ func overviewContainer(border string, background string, content string) cardJSO
 	}
 }
 
-func overviewOnOff(value bool) string {
-	if value {
-		return "开"
-	}
-	return "关"
-}
-
 func overviewNextSwitch(current bool) string {
 	if current {
 		return "off"
@@ -404,7 +384,7 @@ func overviewNextSwitch(current bool) string {
 	return "on"
 }
 
-func overviewNextLabel(current bool) string {
+func overviewToggleLabel(current bool) string {
 	if current {
 		return "关闭"
 	}
