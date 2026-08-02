@@ -1,6 +1,14 @@
 .env
 .local/
 *.local.*
+config.json
+*.appsecret
+*.key
+sessions.json
+processed_messages.json
+scheduled_tasks.json
+restart_ack.json
+token_usage.json
 /dist/
 /tmp/
 /bin/

@@ -270,6 +270,7 @@ github.com/larksuite/oapi-sdk-go/v3
 
 - `/help`：查看命令。
 - `/status`：查看服务和当前会话映射。
+- `/card`：打开当前聊天全览卡，在一张飞书 Card 2.0 中查看当前会话、运行状态、历史会话、agent/model/mode、at 响应策略、知识沉淀和展示配置，并提供新会话、用量、帮助等快捷按钮。
 - `/agent`：查看当前聊天默认使用的 ACP agent 和可用 agent 列表。
 - `/agent <name>`：把当前聊天默认 ACP agent 切换为 `agent_list[].name`。切换后 `/new` 会使用新的默认 agent；如果当前已有会话仍属于旧 agent，下一条普通消息也会自动基于当前 `cwd` 创建新 agent 的 ACP session。
 - `/session list`：列出当前聊天里的历史 ACP 会话，序号从 1 开始，`*` 表示当前会话。
