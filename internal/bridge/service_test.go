@@ -2246,6 +2246,16 @@ func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	oldSession := session
+	oldSession.Title = "old session"
+	oldSession.ACPSessionID = "acp-session-old"
+	oldSession.Cwd = t.TempDir()
+	if err := store.Upsert(oldSession); err != nil {
+		t.Fatalf("Upsert(old session) error = %v", err)
+	}
+	if _, restored, err := store.ResumeSessionIfCurrent(session.Key, oldSession.ACPSessionID, session.ACPSessionID); err != nil || !restored {
+		t.Fatalf("ResumeSessionIfCurrent(current) restored=%v err=%v", restored, err)
+	}
 	svc := newTestService(config.Default(), store)
 	client := newFakeSentMessageClient("")
 	var gotMsg feishu.Message
@@ -2287,6 +2297,9 @@ func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	}
 	if len(gotCard.AgentOptions) == 0 || gotCard.AgentOptions[0].Value != "traex" || !gotCard.AgentOptions[0].Current {
 		t.Fatalf("agent options = %+v, want current traex option", gotCard.AgentOptions)
+	}
+	if len(gotCard.SessionOptions) != 2 || gotCard.SessionOptions[0].ACPSessionID != session.ACPSessionID || gotCard.SessionOptions[1].ACPSessionID != oldSession.ACPSessionID {
+		t.Fatalf("session options = %+v, want current and historical sessions", gotCard.SessionOptions)
 	}
 }
 
@@ -2371,6 +2384,45 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
 	if !ok || chat.AgentName != "codex" {
 		t.Fatalf("chat config = %+v, %v; want codex agent", chat, ok)
+	}
+}
+
+func TestHandleOverviewActionSetSessionRestoresAndRefreshesCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	current := testReadySession(t, store)
+	old := current
+	old.Title = "old session"
+	old.ACPSessionID = "acp-session-old"
+	old.Cwd = t.TempDir()
+	if err := store.Upsert(old); err != nil {
+		t.Fatalf("Upsert(old session) error = %v", err)
+	}
+	if _, restored, err := store.ResumeSessionIfCurrent(current.Key, old.ACPSessionID, current.ACPSessionID); err != nil || !restored {
+		t.Fatalf("ResumeSessionIfCurrent(current) restored=%v err=%v", restored, err)
+	}
+	svc := newTestService(config.Default(), store)
+
+	result, err := svc.HandleOverviewAction(context.Background(), feishu.OverviewAction{
+		BotID:               current.Key.BotID,
+		ChatID:              current.Key.ChatID,
+		ChatType:            "topic_group",
+		ThreadID:            current.Key.SubID,
+		GroupMessageType:    "thread",
+		RequesterID:         testOwnerOpenID,
+		OperatorID:          testOwnerOpenID,
+		CurrentACPSessionID: current.ACPSessionID,
+		Action:              overviewActionSetSession,
+		Value:               old.ACPSessionID,
+	})
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(set session) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.CurrentACPSessionID != old.ACPSessionID || result.Overview.SessionTitle != "old session" {
+		t.Fatalf("overview result = %+v, want old session refreshed", result.Overview)
+	}
+	got, ok := store.Get(current.Key)
+	if !ok || got.ACPSessionID != old.ACPSessionID {
+		t.Fatalf("current session = %+v, %v; want old session restored", got, ok)
 	}
 }
 

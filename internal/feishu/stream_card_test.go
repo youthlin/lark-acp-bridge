@@ -1277,6 +1277,10 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 			{Value: "traex", Text: "traex", Current: true},
 			{Value: "codex", Text: "codex"},
 		},
+		SessionOptions: []SessionOption{
+			{ACPSessionID: "session-1", Title: "当前会话", Cwd: "/repo"},
+			{ACPSessionID: "session-2", Title: "旧会话", Cwd: "/old"},
+		},
 		CommandHints: []string{"/new [cwd] [title]"},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
@@ -1287,7 +1291,7 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"当前会话",
 		"gpt-5.5",
 		"模型",
-		"历史会话",
+		"旧会话",
 	} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("overview card does not contain %q: %#v", want, card)
@@ -1298,7 +1302,9 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"open_model",
 		"toggle_show",
 		"set_agent",
+		"set_session",
 		"session-1",
+		"session-2",
 		"ou_requester",
 	} {
 		if !jsonContainsValue(card, want) {
@@ -1323,12 +1329,17 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 	var card any
 	if err := json.Unmarshal([]byte(newOverviewCardJSON(OverviewCard{
-		BotID:       "default",
-		ChatID:      "oc_chat",
-		RequesterID: "ou_requester",
+		BotID:               "default",
+		ChatID:              "oc_chat",
+		RequesterID:         "ou_requester",
+		CurrentACPSessionID: "session-1",
 		AgentOptions: []OverviewOption{
 			{Value: "traex", Text: "traex", Current: true},
 			{Value: "codex", Text: "codex"},
+		},
+		SessionOptions: []SessionOption{
+			{ACPSessionID: "session-1", Title: "当前会话", Cwd: "/repo"},
+			{ACPSessionID: "session-2", Title: "旧会话", Cwd: "/old"},
 		},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
@@ -1340,6 +1351,9 @@ func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 	}
 	if jsonContainsValue(card, "overview_agent_select") {
 		t.Fatalf("overview card contains invalid old agent select element id: %#v", card)
+	}
+	if !jsonContainsValue(card, "overview_session") {
+		t.Fatalf("overview card does not contain session select element id: %#v", card)
 	}
 }
 
@@ -1403,6 +1417,72 @@ func TestOverviewCardActionUpdatesAndReplacesCard(t *testing.T) {
 	}
 	if !jsonContainsValue(resp.Card.Data, "当前聊天全览") || !jsonContainsValue(resp.Card.Data, overviewCardAction) {
 		t.Fatalf("replacement card = %#v, want overview card", resp.Card.Data)
+	}
+}
+
+func TestOverviewCardSessionDropdownUpdatesAndReplacesCard(t *testing.T) {
+	handler := &fakeOverviewActionHandler{
+		result: OverviewActionResult{
+			ToastType: "success",
+			Toast:     "会话已恢复",
+			Overview: &OverviewCard{
+				BotID:               "default",
+				ChatID:              "oc_chat",
+				ChatType:            "topic_group",
+				ThreadID:            "omt_thread",
+				GroupMessageType:    "thread",
+				RequesterID:         "ou_requester",
+				CurrentACPSessionID: "session-1",
+				HasSession:          true,
+				SessionTitle:        "旧会话",
+				ChatAgentName:       "traex",
+				RuntimeStatus:       "空闲",
+				QueueStatus:         "待执行 0 条",
+				WikiStatus:          "开启",
+				LoopStatus:          "尚无状态",
+				ACPErrorStatus:      "无",
+				AtStatus:            "需要 at",
+				Show:                OverviewShowOptions{Plan: true, Tool: true, Status: true, Used: true},
+				WikiEnabled:         true,
+			},
+		},
+	}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_requester"},
+			Action: &callback.CallBackAction{
+				Tag:    "select_static",
+				Option: "session-1",
+				Value: map[string]interface{}{
+					"action":                 overviewCardAction,
+					"overview_action":        "set_session",
+					"bot_id":                 "default",
+					"chat_id":                "oc_chat",
+					"chat_type":              "topic_group",
+					"thread_id":              "omt_thread",
+					"group_message_type":     "thread",
+					"requester_id":           "ou_requester",
+					"current_acp_session_id": "session-2",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "会话已恢复" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success overview card replacement", resp)
+	}
+	if handler.action.Action != "set_session" ||
+		handler.action.Value != "session-1" ||
+		handler.action.CurrentACPSessionID != "session-2" ||
+		handler.action.ChatType != "topic_group" ||
+		handler.action.OperatorID != "ou_requester" {
+		t.Fatalf("overview action = %+v, want session dropdown context", handler.action)
+	}
+	if !jsonContainsValue(resp.Card.Data, "当前聊天全览") || !jsonContainsSubstring(resp.Card.Data, "旧会话") {
+		t.Fatalf("replacement card = %#v, want refreshed overview card", resp.Card.Data)
 	}
 }
 

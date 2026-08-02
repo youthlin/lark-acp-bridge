@@ -174,6 +174,7 @@ type OverviewCard struct {
 	Show                OverviewShowOptions
 	WikiEnabled         bool
 	AgentOptions        []OverviewOption
+	SessionOptions      []SessionOption
 	CommandHints        []string
 }
 

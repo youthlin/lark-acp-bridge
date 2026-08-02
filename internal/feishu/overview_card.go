@@ -110,11 +110,12 @@ func newOverviewCardJSON(card OverviewCard) string {
 	if agentSelect := overviewAgentSelectElement(card); agentSelect != nil {
 		elements = append(elements, agentSelect)
 	}
-	elements = append(elements,
-		overviewOpenActionsElement(card),
-		overviewShowActionsElement(card),
-		overviewCommandHintsElement(card.CommandHints),
-	)
+	if sessionSelect := overviewSessionSelectElement(card); sessionSelect != nil {
+		elements = append(elements, sessionSelect)
+	}
+	elements = append(elements, overviewOpenActionElements(card)...)
+	elements = append(elements, overviewShowActionElements(card)...)
+	elements = append(elements, overviewCommandHintsElement(card.CommandHints))
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
 		"config": cardJSON{
@@ -242,17 +243,55 @@ func overviewAgentSelectElement(card OverviewCard) any {
 	return selectElement
 }
 
-func overviewOpenActionsElement(card OverviewCard) any {
+func overviewSessionSelectElement(card OverviewCard) any {
+	options := make([]any, 0, len(card.SessionOptions))
+	currentSessionID := strings.TrimSpace(card.CurrentACPSessionID)
+	hasCurrent := false
+	for _, option := range card.SessionOptions {
+		value := strings.TrimSpace(option.ACPSessionID)
+		if value == "" {
+			continue
+		}
+		if value == currentSessionID {
+			hasCurrent = true
+		}
+		options = append(options, cardJSON{
+			"text":  cardJSON{"tag": "plain_text", "content": sessionOptionDisplayName(option)},
+			"value": value,
+		})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	selectElement := cardJSON{
+		"tag":         "select_static",
+		"element_id":  "overview_session",
+		"width":       "fill",
+		"placeholder": cardJSON{"tag": "plain_text", "content": "切换历史会话"},
+		"options":     options,
+		"behaviors": []any{
+			cardJSON{
+				"type":  "callback",
+				"value": overviewActionValue(card, "set_session", "", ""),
+			},
+		},
+	}
+	if hasCurrent {
+		selectElement["initial_option"] = currentSessionID
+	}
+	return selectElement
+}
+
+func overviewOpenActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
 		overviewButton("模型", overviewActionValue(card, "open_model", "", ""), "default"),
 		overviewButton("模式", overviewActionValue(card, "open_mode", "", ""), "default"),
-		overviewButton("历史会话", overviewActionValue(card, "open_session", "", ""), "default"),
 		overviewButton("wiki "+overviewNextLabel(card.WikiEnabled), overviewActionValue(card, "toggle_wiki", "wiki", overviewNextSwitch(card.WikiEnabled)), "default"),
 	}
-	return overviewButtonColumns(buttons)
+	return overviewButtonRows(buttons, 2)
 }
 
-func overviewShowActionsElement(card OverviewCard) any {
+func overviewShowActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
 		overviewButton("过程 "+overviewNextLabel(card.Show.Step), overviewActionValue(card, "toggle_show", "step", overviewNextSwitch(card.Show.Step)), "default"),
 		overviewButton("计划 "+overviewNextLabel(card.Show.Plan), overviewActionValue(card, "toggle_show", "plan", overviewNextSwitch(card.Show.Plan)), "default"),
@@ -261,7 +300,7 @@ func overviewShowActionsElement(card OverviewCard) any {
 		overviewButton("状态栏 "+overviewNextLabel(card.Show.Status), overviewActionValue(card, "toggle_show", "status", overviewNextSwitch(card.Show.Status)), "default"),
 		overviewButton("用量 "+overviewNextLabel(card.Show.Used), overviewActionValue(card, "toggle_show", "used", overviewNextSwitch(card.Show.Used)), "default"),
 	}
-	return overviewButtonColumns(buttons)
+	return overviewButtonRows(buttons, 2)
 }
 
 func overviewCommandHintsElement(hints []string) cardJSON {
@@ -294,9 +333,10 @@ func overviewActionValue(card OverviewCard, action string, target string, value 
 
 func overviewButton(text string, value cardJSON, buttonType string) cardJSON {
 	return cardJSON{
-		"tag":  "button",
-		"type": buttonType,
-		"text": cardJSON{"tag": "plain_text", "content": text},
+		"tag":   "button",
+		"type":  buttonType,
+		"width": "fill",
+		"text":  cardJSON{"tag": "plain_text", "content": text},
 		"behaviors": []any{
 			cardJSON{
 				"type":  "callback",
@@ -306,21 +346,32 @@ func overviewButton(text string, value cardJSON, buttonType string) cardJSON {
 	}
 }
 
-func overviewButtonColumns(buttons []cardJSON) cardJSON {
-	columns := make([]any, 0, len(buttons))
-	for _, button := range buttons {
-		columns = append(columns, cardJSON{
-			"tag":      "column",
-			"width":    "auto",
-			"elements": []any{button},
+func overviewButtonRows(buttons []cardJSON, perRow int) []any {
+	if perRow <= 0 {
+		perRow = 1
+	}
+	rows := make([]any, 0, (len(buttons)+perRow-1)/perRow)
+	for start := 0; start < len(buttons); start += perRow {
+		end := start + perRow
+		if end > len(buttons) {
+			end = len(buttons)
+		}
+		columns := make([]any, 0, end-start)
+		for _, button := range buttons[start:end] {
+			columns = append(columns, cardJSON{
+				"tag":      "column",
+				"width":    "auto",
+				"elements": []any{button},
+			})
+		}
+		rows = append(rows, cardJSON{
+			"tag":                "column_set",
+			"flex_mode":          "none",
+			"horizontal_spacing": "8px",
+			"columns":            columns,
 		})
 	}
-	return cardJSON{
-		"tag":                "column_set",
-		"flex_mode":          "none",
-		"horizontal_spacing": "8px",
-		"columns":            columns,
-	}
+	return rows
 }
 
 func overviewContainer(border string, background string, content string) cardJSON {

@@ -13,6 +13,7 @@ const (
 	overviewActionOpenModel   = "open_model"
 	overviewActionOpenMode    = "open_mode"
 	overviewActionOpenSession = "open_session"
+	overviewActionSetSession  = "set_session"
 	overviewActionToggleShow  = "toggle_show"
 	overviewActionToggleWiki  = "toggle_wiki"
 	overviewActionSetAgent    = "set_agent"
@@ -53,8 +54,9 @@ func (s *Service) buildOverviewCard(msg feishu.Message) feishu.OverviewCard {
 			Status:  !chat.HideStatusBar,
 			Used:    !chat.HideUsageDetail,
 		},
-		WikiEnabled:  !chat.WikiDisabled,
-		AgentOptions: s.overviewAgentOptions(msg),
+		WikiEnabled:    !chat.WikiDisabled,
+		AgentOptions:   s.overviewAgentOptions(msg),
+		SessionOptions: s.overviewSessionOptions(msg),
 		CommandHints: []string{
 			"/new [cwd] [title]",
 			"/schedule add <spec> <prompt>",
@@ -153,6 +155,15 @@ func (s *Service) overviewAgentOptions(msg feishu.Message) []feishu.OverviewOpti
 	return options
 }
 
+func (s *Service) overviewSessionOptions(msg feishu.Message) []feishu.SessionOption {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return nil
+	}
+	items := store.ListByMain(sessionKeyFromMessage(msg))
+	return sessionSelectionOptions(items, maxSessionHistoryPerChat)
+}
+
 func (s *Service) formatOverviewText(card feishu.OverviewCard) string {
 	lines := []string{
 		"当前聊天全览：",
@@ -206,6 +217,12 @@ func (s *Service) HandleOverviewAction(ctx context.Context, action feishu.Overvi
 		return s.overviewModeSelection(action)
 	case overviewActionOpenSession:
 		return s.overviewSessionSelection(msg, action)
+	case overviewActionSetSession:
+		if err := s.applyOverviewSession(ctx, msg, action.CurrentACPSessionID, action.Value); err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "会话已恢复", Overview: &card}, nil
 	case overviewActionToggleShow:
 		if err := s.applyOverviewShowToggle(ctx, msg, action.Target, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
@@ -380,6 +397,14 @@ func (s *Service) applyOverviewAgent(ctx context.Context, msg feishu.Message, ag
 	if err != nil {
 		slog.ErrorContext(ctx, "保存全览卡 agent 配置失败", "agent", agentName, "错误", err)
 		return fmt.Errorf("保存聊天 agent 配置失败：%w", err)
+	}
+	return nil
+}
+
+func (s *Service) applyOverviewSession(ctx context.Context, msg feishu.Message, currentACPSessionID string, acpSessionID string) error {
+	_, errText := s.resumeSessionByID(ctx, msg, acpSessionID, &currentACPSessionID)
+	if errText != "" {
+		return fmt.Errorf("%s", strings.TrimSuffix(errText, "。"))
 	}
 	return nil
 }
