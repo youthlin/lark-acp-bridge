@@ -65,47 +65,14 @@ stages:
       resource:
         cpu: "1"
         memory: "2"
-- name: 上传
-  displayName: 上传
-  strategy: naturally
-  trigger: auto
-  steps:
-  - step: publish@general_artifacts
-    name: ""
-    displayName: 上传制品
-    dependArtifact: BUILD_ARTIFACT
-    artifactName: output
-    notify: []
-    strategy:
-      retry: "0"
-      resource:
-        cpu: "1"
-        memory: "2"
-- name: 发布
-  displayName: 发布
-  strategy: naturally
-  trigger: auto
-  steps:
-  - step: publish@release_artifacts
-    name: ""
-    displayName: 发布
-    dependArtifact: output
-    version: 1.0.0.0
-    autoIncrement: true
-    notify: []
-    strategy:
-      retry: "0"
-      resource:
-        cpu: "1"
-        memory: "2"
 triggers:
   trigger: auto
   push:
-    tags:
-      prefix:
-      - v
+    branches:
+      prefix: []
       precise: []
-      include: []
+      include:
+      - .*
 notify: []
 strategy:
   blocking: true
