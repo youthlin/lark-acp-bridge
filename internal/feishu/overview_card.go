@@ -112,6 +112,9 @@ func newOverviewCardJSON(card OverviewCard) string {
 	if sessionSelect := overviewSessionSelectElement(card); sessionSelect != nil {
 		elements = append(elements, sessionSelect)
 	}
+	if atSelect := overviewAtSelectElement(card); atSelect != nil {
+		elements = append(elements, atSelect)
+	}
 	if modelSelect := overviewModelSelectElement(card); modelSelect != nil {
 		elements = append(elements, modelSelect)
 	}
@@ -120,7 +123,7 @@ func newOverviewCardJSON(card OverviewCard) string {
 	}
 	elements = append(elements, overviewOpenActionElements(card)...)
 	elements = append(elements, overviewShowActionElements(card)...)
-	elements = append(elements, overviewCommandHintsElement(card.CommandHints))
+	elements = append(elements, overviewCommandHintsElement(card.CommandHints, card.CommandNotes))
 	elements = append(elements, overviewCommandActionElements(card)...)
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
@@ -268,6 +271,48 @@ func overviewSessionSelectElement(card OverviewCard) any {
 	return selectElement
 }
 
+func overviewAtSelectElement(card OverviewCard) any {
+	options := make([]any, 0, len(card.AtOptions))
+	current := ""
+	for _, option := range card.AtOptions {
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		if option.Current {
+			current = value
+		}
+		text := strings.TrimSpace(option.Text)
+		if text == "" {
+			text = value
+		}
+		options = append(options, cardJSON{
+			"text":  cardJSON{"tag": "plain_text", "content": text},
+			"value": value,
+		})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	selectElement := cardJSON{
+		"tag":         "select_static",
+		"element_id":  "overview_at",
+		"width":       "fill",
+		"placeholder": cardJSON{"tag": "plain_text", "content": "切换群聊响应策略"},
+		"options":     options,
+		"behaviors": []any{
+			cardJSON{
+				"type":  "callback",
+				"value": overviewActionValue(card, "set_at", "", ""),
+			},
+		},
+	}
+	if current != "" {
+		selectElement["initial_option"] = current
+	}
+	return selectElement
+}
+
 func overviewModelSelectElement(card OverviewCard) any {
 	options := make([]any, 0, len(card.ModelOptions))
 	current := strings.TrimSpace(card.Model)
@@ -379,7 +424,7 @@ func overviewShowButton(card OverviewCard, text string, target string, current b
 	return overviewButton(text, overviewActionValue(card, "toggle_show", target, overviewNextSwitch(current)), buttonType)
 }
 
-func overviewCommandHintsElement(hints []string) cardJSON {
+func overviewCommandHintsElement(hints []string, notes []string) cardJSON {
 	lines := []string{"**命令入口**"}
 	for _, hint := range hints {
 		hint = strings.TrimSpace(hint)
@@ -388,15 +433,23 @@ func overviewCommandHintsElement(hints []string) cardJSON {
 		}
 		lines = append(lines, "`"+overviewInline(hint)+"`")
 	}
+	for _, note := range notes {
+		note = strings.TrimSpace(note)
+		if note == "" {
+			continue
+		}
+		lines = append(lines, overviewInline(note))
+	}
 	return overviewContainer("grey-200", "grey-50", strings.Join(lines, "\n"))
 }
 
 func overviewCommandActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
-		overviewButton("新的会话", overviewActionValue(card, "new_session", "", ""), "default"),
-		overviewButton("查看帮助", overviewActionValue(card, "show_help", "", ""), "default"),
+		overviewButton("新会话", overviewActionValue(card, "new_session", "", ""), "default"),
+		overviewButton("用量", overviewActionValue(card, "show_usage", "", ""), "default"),
+		overviewButton("帮助", overviewActionValue(card, "show_help", "", ""), "default"),
 	}
-	return overviewButtonRows(buttons, 2)
+	return overviewButtonRows(buttons, 3)
 }
 
 func overviewActionValue(card OverviewCard, action string, target string, value string) cardJSON {

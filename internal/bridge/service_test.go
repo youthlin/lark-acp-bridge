@@ -2328,6 +2328,9 @@ func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	if len(gotCard.SessionOptions) != 2 || gotCard.SessionOptions[0].ACPSessionID != session.ACPSessionID || gotCard.SessionOptions[1].ACPSessionID != oldSession.ACPSessionID {
 		t.Fatalf("session options = %+v, want current and historical sessions", gotCard.SessionOptions)
 	}
+	if len(gotCard.AtOptions) != 4 || gotCard.AtOptions[0].Value != "on" || !gotCard.AtOptions[0].Current || gotCard.AtOptions[3].Value != atModeAutoReaction {
+		t.Fatalf("at options = %+v, want current /at on plus available at modes", gotCard.AtOptions)
+	}
 	if len(gotCard.ModelOptions) != 2 || gotCard.ModelOptions[1].Value != "gpt-5.6" {
 		t.Fatalf("model options = %+v, want available models", gotCard.ModelOptions)
 	}
@@ -2417,6 +2420,22 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
 	if !ok || chat.AgentName != "codex" {
 		t.Fatalf("chat config = %+v, %v; want codex agent", chat, ok)
+	}
+
+	atAction := action
+	atAction.ChatType = "topic_group"
+	atAction.Action = overviewActionSetAt
+	atAction.Value = atModeAutoReaction
+	result, err = svc.HandleOverviewAction(context.Background(), atAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(set at) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.AtStatus != "自动判断 + 处理中表情" {
+		t.Fatalf("overview result = %+v, want auto-reaction at status", result.Overview)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	if !ok || !chat.MentionOptional || chat.AtMode != atModeAutoReaction {
+		t.Fatalf("chat config = %+v, %v; want auto-reaction at mode", chat, ok)
 	}
 }
 
@@ -2553,6 +2572,39 @@ func TestHandleOverviewActionSetSessionRestoresAndRefreshesCard(t *testing.T) {
 	got, ok := store.Get(current.Key)
 	if !ok || got.ACPSessionID != old.ACPSessionID {
 		t.Fatalf("current session = %+v, %v; want old session restored", got, ok)
+	}
+}
+
+func TestHandleOverviewActionShowUsageSendsReportAndRefreshesCard(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Default()
+	cfg.Bots[0].Workspace = workspace
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := newTestService(cfg, store)
+	client := newFakeSentMessageClient("")
+	var sentText string
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
+		sentText = text
+		return nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	result, err := svc.HandleOverviewAction(context.Background(), feishu.OverviewAction{
+		BotID:       "bot-a",
+		ChatID:      "oc_card",
+		ChatType:    "p2p",
+		RequesterID: testOwnerOpenID,
+		OperatorID:  testOwnerOpenID,
+		Action:      overviewActionShowUsage,
+	})
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(show usage) error = %v", err)
+	}
+	if result.Overview == nil || result.Toast != "已发送用量" {
+		t.Fatalf("overview result = %+v, want refreshed overview and usage toast", result)
+	}
+	if !strings.Contains(sentText, "Token 用量报告") {
+		t.Fatalf("sent usage text = %q, want token usage report", sentText)
 	}
 }
 

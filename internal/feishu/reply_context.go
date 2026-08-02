@@ -175,9 +175,11 @@ type OverviewCard struct {
 	WikiEnabled         bool
 	AgentOptions        []OverviewOption
 	SessionOptions      []SessionOption
+	AtOptions           []OverviewOption
 	ModelOptions        []ModelOption
 	ModeOptions         []ModeOption
 	CommandHints        []string
+	CommandNotes        []string
 }
 
 type OverviewAction struct {

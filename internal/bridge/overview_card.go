@@ -15,9 +15,11 @@ const (
 	overviewActionOpenSession = "open_session"
 	overviewActionNewSession  = "new_session"
 	overviewActionShowHelp    = "show_help"
+	overviewActionShowUsage   = "show_usage"
 	overviewActionSetSession  = "set_session"
 	overviewActionSetModel    = "set_model"
 	overviewActionSetMode     = "set_mode"
+	overviewActionSetAt       = "set_at"
 	overviewActionToggleShow  = "toggle_show"
 	overviewActionToggleWiki  = "toggle_wiki"
 	overviewActionSetAgent    = "set_agent"
@@ -61,11 +63,16 @@ func (s *Service) buildOverviewCard(msg feishu.Message) feishu.OverviewCard {
 		WikiEnabled:    !chat.WikiDisabled,
 		AgentOptions:   s.overviewAgentOptions(msg),
 		SessionOptions: s.overviewSessionOptions(msg),
+		AtOptions:      s.overviewAtOptions(msg),
 		CommandHints: []string{
 			"/new [cwd] [title]",
 			"/schedule how 定时任务描述",
 			"/loop how 循环任务描述",
 			"/compact on 80%",
+			"/queue <下一轮执行>",
+		},
+		CommandNotes: []string{
+			"直接发消息即可打断当前执行轮次。",
 		},
 	}
 	card.WikiStatus = s.wikiStatusLine(msg, chat)
@@ -170,6 +177,39 @@ func (s *Service) overviewSessionOptions(msg feishu.Message) []feishu.SessionOpt
 	return sessionSelectionOptions(items, maxSessionHistoryPerChat)
 }
 
+func (s *Service) overviewAtOptions(msg feishu.Message) []feishu.OverviewOption {
+	if msg.IsPrivateChat() || !messageIsGroupChat(msg) {
+		return nil
+	}
+	current := overviewAtOptionValue(s, msg)
+	options := []feishu.OverviewOption{
+		{Value: "on", Text: "需要@才响应 /at on"},
+		{Value: atModeEvery, Text: "无需@每次响应 /at off every"},
+		{Value: atModeAuto, Text: "无需@且静默自动判断 /at off auto"},
+		{Value: atModeAutoReaction, Text: "无需@自动判断带表情 /at off auto-reaction"},
+	}
+	for i := range options {
+		options[i].Current = options[i].Value == current
+	}
+	return options
+}
+
+func overviewAtOptionValue(s *Service, msg feishu.Message) string {
+	switch s.chatAtMode(msg) {
+	case atModeAuto:
+		return atModeAuto
+	case atModeAutoReaction:
+		return atModeAutoReaction
+	case atModeEvery:
+		return atModeEvery
+	default:
+		if !s.chatRequiresMention(msg) {
+			return atModeEvery
+		}
+		return "on"
+	}
+}
+
 func overviewModelOptions(session Session) []feishu.ModelOption {
 	modelOpt, ok := findModelConfigOption(session)
 	if !ok {
@@ -252,6 +292,12 @@ func (s *Service) HandleOverviewAction(ctx context.Context, action feishu.Overvi
 		}
 		card := s.buildOverviewCard(msg)
 		return feishu.OverviewActionResult{ToastType: "success", Toast: "已发送帮助", Overview: &card}, nil
+	case overviewActionShowUsage:
+		if err := s.applyOverviewShowUsage(ctx, msg); err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "已发送用量", Overview: &card}, nil
 	case overviewActionSetSession:
 		if err := s.applyOverviewSession(ctx, msg, action.CurrentACPSessionID, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
@@ -272,6 +318,12 @@ func (s *Service) HandleOverviewAction(ctx context.Context, action feishu.Overvi
 		}
 		card := s.buildOverviewCard(msg)
 		return feishu.OverviewActionResult{ToastType: "success", Toast: "模式已设置：" + display, Overview: &card}, nil
+	case overviewActionSetAt:
+		if err := s.applyOverviewAt(ctx, msg, action.Value); err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "响应策略已更新", Overview: &card}, nil
 	case overviewActionToggleShow:
 		if err := s.applyOverviewShowToggle(ctx, msg, action.Target, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
@@ -430,6 +482,40 @@ func (s *Service) applyOverviewWikiToggle(ctx context.Context, msg feishu.Messag
 	return nil
 }
 
+func (s *Service) applyOverviewAt(ctx context.Context, msg feishu.Message, raw string) error {
+	if msg.IsPrivateChat() {
+		return fmt.Errorf("私聊不支持 /at 配置")
+	}
+	if !messageIsGroupChat(msg) {
+		return fmt.Errorf("当前会话类型不支持 /at 配置")
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return fmt.Errorf("会话持久化未初始化")
+	}
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	mentionOptional := false
+	atMode := ""
+	switch mode {
+	case "on":
+	case atModeEvery, atModeAuto, atModeAutoReaction:
+		mentionOptional = true
+		atMode = mode
+	default:
+		return fmt.Errorf("响应策略取值无效")
+	}
+	chat := s.chatConfigForMessage(msg)
+	_, err := store.UpdateChat(chat, func(current *ChatConfig) {
+		current.AtMode = atMode
+		current.MentionOptional = mentionOptional
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "保存全览卡 at 配置失败", "value", raw, "错误", err)
+		return fmt.Errorf("保存响应策略失败：%w", err)
+	}
+	return nil
+}
+
 func (s *Service) applyOverviewAgent(ctx context.Context, msg feishu.Message, agentName string) error {
 	store := s.storeForMessage(msg)
 	if store == nil {
@@ -504,6 +590,18 @@ func (s *Service) applyOverviewShowHelp(ctx context.Context, msg feishu.Message)
 	}
 	if !sent {
 		return fmt.Errorf("当前会话无法发送帮助消息，请直接发送 /help")
+	}
+	return nil
+}
+
+func (s *Service) applyOverviewShowUsage(ctx context.Context, msg feishu.Message) error {
+	sent, err := s.sendIntermediateReply(ctx, msg, s.handleUsageCommand("/usage", msg))
+	if err != nil {
+		slog.ErrorContext(ctx, "发送全览卡用量失败", "错误", err)
+		return fmt.Errorf("发送用量失败：%w", err)
+	}
+	if !sent {
+		return fmt.Errorf("当前会话无法发送用量消息，请直接发送 /usage")
 	}
 	return nil
 }

@@ -1283,6 +1283,12 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 			{ACPSessionID: "session-1", Title: "当前会话", Cwd: "/repo"},
 			{ACPSessionID: "session-2", Title: "旧会话", Cwd: "/old"},
 		},
+		AtOptions: []OverviewOption{
+			{Value: "on", Text: "需要@才响应 /at on", Current: true},
+			{Value: "every", Text: "无需@每次响应 /at off every"},
+			{Value: "auto", Text: "无需@且静默自动判断 /at off auto"},
+			{Value: "auto-reaction", Text: "无需@自动判断带表情 /at off auto-reaction"},
+		},
 		ModelOptions: []ModelOption{
 			{Value: "gpt-5.5", Name: "GPT-5.5"},
 			{Value: "gpt-5.6", Name: "GPT-5.6"},
@@ -1296,6 +1302,10 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 			"/schedule how 定时任务描述",
 			"/loop how 循环任务描述",
 			"/compact on 80%",
+			"/queue <下一轮执行>",
+		},
+		CommandNotes: []string{
+			"直接发消息即可打断当前执行轮次。",
 		},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
@@ -1307,6 +1317,9 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"gpt-5.5",
 		"切换当前会话模型",
 		"切换当前会话模式",
+		"切换群聊响应策略",
+		"需要@才响应 /at on",
+		"无需@自动判断带表情 /at off auto-reaction",
 		"旧会话",
 		"compact",
 		"知识库：开启",
@@ -1314,8 +1327,11 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"/schedule how 定时任务描述",
 		"/loop how 循环任务描述",
 		"/compact on 80%",
-		"新的会话",
-		"查看帮助",
+		"/queue <下一轮执行>",
+		"直接发消息即可打断当前执行轮次。",
+		"新会话",
+		"用量",
+		"帮助",
 	} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("overview card does not contain %q: %#v", want, card)
@@ -1325,9 +1341,11 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		overviewCardAction,
 		"set_model",
 		"set_mode",
+		"set_at",
 		"toggle_show",
 		"toggle_wiki",
 		"new_session",
+		"show_usage",
 		"show_help",
 		"set_agent",
 		"set_session",
@@ -1418,6 +1436,10 @@ func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 			{Value: "default", Name: "Default"},
 			{Value: "plan", Name: "Plan"},
 		},
+		AtOptions: []OverviewOption{
+			{Value: "on", Text: "需要@才响应 /at on", Current: true},
+			{Value: "auto", Text: "无需@且静默自动判断 /at off auto"},
+		},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
 	}
@@ -1431,6 +1453,9 @@ func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 	}
 	if !jsonContainsValue(card, "overview_session") {
 		t.Fatalf("overview card does not contain session select element id: %#v", card)
+	}
+	if !jsonContainsValue(card, "overview_at") {
+		t.Fatalf("overview card does not contain at select element id: %#v", card)
 	}
 	if !jsonContainsValue(card, "overview_model") {
 		t.Fatalf("overview card does not contain model select element id: %#v", card)
