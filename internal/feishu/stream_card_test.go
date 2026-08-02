@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1319,6 +1320,29 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 	}
 }
 
+func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newOverviewCardJSON(OverviewCard{
+		BotID:       "default",
+		ChatID:      "oc_chat",
+		RequesterID: "ou_requester",
+		AgentOptions: []OverviewOption{
+			{Value: "traex", Text: "traex", Current: true},
+			{Value: "codex", Text: "codex"},
+		},
+	})), &card); err != nil {
+		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
+	}
+
+	assertCardElementIDFormat(t, card)
+	if !jsonContainsValue(card, "overview_agent") {
+		t.Fatalf("overview card does not contain agent select element id: %#v", card)
+	}
+	if jsonContainsValue(card, "overview_agent_select") {
+		t.Fatalf("overview card contains invalid old agent select element id: %#v", card)
+	}
+}
+
 func TestOverviewCardActionUpdatesAndReplacesCard(t *testing.T) {
 	handler := &fakeOverviewActionHandler{
 		result: OverviewActionResult{
@@ -1738,6 +1762,36 @@ func jsonElementFieldEquals(v any, elementID string, field string, want string) 
 		}
 	}
 	return false
+}
+
+func assertCardElementIDFormat(t *testing.T, v any) {
+	t.Helper()
+
+	validElementID := regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,19}$`)
+	var walk func(any)
+	walk = func(node any) {
+		switch value := node.(type) {
+		case cardJSON:
+			if elementID, ok := value["element_id"].(string); ok && !validElementID.MatchString(elementID) {
+				t.Fatalf("invalid element_id %q, must match %s", elementID, validElementID.String())
+			}
+			for _, child := range value {
+				walk(child)
+			}
+		case map[string]any:
+			if elementID, ok := value["element_id"].(string); ok && !validElementID.MatchString(elementID) {
+				t.Fatalf("invalid element_id %q, must match %s", elementID, validElementID.String())
+			}
+			for _, child := range value {
+				walk(child)
+			}
+		case []any:
+			for _, child := range value {
+				walk(child)
+			}
+		}
+	}
+	walk(v)
 }
 
 func collectButtonTexts(v any) []string {

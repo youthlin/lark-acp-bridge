@@ -225,7 +225,7 @@ func overviewAgentSelectElement(card OverviewCard) any {
 	}
 	selectElement := cardJSON{
 		"tag":         "select_static",
-		"element_id":  "overview_agent_select",
+		"element_id":  "overview_agent",
 		"width":       "fill",
 		"placeholder": cardJSON{"tag": "plain_text", "content": "切换当前聊天默认 agent"},
 		"options":     options,
