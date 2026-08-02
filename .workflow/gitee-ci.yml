@@ -2,7 +2,7 @@ version: "1.0"
 name: gitee-ci
 displayName: gitee-ci
 stages:
-- name: 测试
+- name: Test
   displayName: 测试
   strategy: naturally
   trigger: auto
@@ -38,7 +38,7 @@ stages:
       resource:
         cpu: "1"
         memory: "2"
-- name: 构建
+- name: Build
   displayName: 构建
   strategy: naturally
   trigger: auto
