@@ -13,7 +13,11 @@ const (
 	overviewActionOpenModel   = "open_model"
 	overviewActionOpenMode    = "open_mode"
 	overviewActionOpenSession = "open_session"
+	overviewActionNewSession  = "new_session"
+	overviewActionShowHelp    = "show_help"
 	overviewActionSetSession  = "set_session"
+	overviewActionSetModel    = "set_model"
+	overviewActionSetMode     = "set_mode"
 	overviewActionToggleShow  = "toggle_show"
 	overviewActionToggleWiki  = "toggle_wiki"
 	overviewActionSetAgent    = "set_agent"
@@ -59,8 +63,8 @@ func (s *Service) buildOverviewCard(msg feishu.Message) feishu.OverviewCard {
 		SessionOptions: s.overviewSessionOptions(msg),
 		CommandHints: []string{
 			"/new [cwd] [title]",
-			"/schedule add <spec> <prompt>",
-			"/loop [-t 0] [-n 0] [-i 10s] <prompt>",
+			"/schedule how 定时任务描述",
+			"/loop how 循环任务描述",
 			"/compact on 80%",
 		},
 	}
@@ -81,6 +85,8 @@ func (s *Service) buildOverviewCard(msg feishu.Message) feishu.OverviewCard {
 	card.Cwd = session.Cwd
 	card.Model = currentModelDisplay(session)
 	card.Mode = currentModeDisplay(session)
+	card.ModelOptions = overviewModelOptions(session)
+	card.ModeOptions = overviewModeOptions(session)
 	if session.ContextWindow != nil {
 		card.ContextUsage = formatContextUsage(*session.ContextWindow)
 		if percent := contextUsagePercent(*session.ContextWindow); percent > 0 {
@@ -164,13 +170,29 @@ func (s *Service) overviewSessionOptions(msg feishu.Message) []feishu.SessionOpt
 	return sessionSelectionOptions(items, maxSessionHistoryPerChat)
 }
 
+func overviewModelOptions(session Session) []feishu.ModelOption {
+	modelOpt, ok := findModelConfigOption(session)
+	if !ok {
+		return nil
+	}
+	return modelSelectionOptions(session, modelOpt)
+}
+
+func overviewModeOptions(session Session) []feishu.ModeOption {
+	modeOpt, ok := findModeConfigOption(session)
+	if !ok && session.Mode == nil {
+		return nil
+	}
+	return modeSelectionOptions(session, modeOpt)
+}
+
 func (s *Service) formatOverviewText(card feishu.OverviewCard) string {
 	lines := []string{
 		"当前聊天全览：",
 		"默认 agent：" + defaultString(card.ChatAgentName, "未知"),
 		"at：" + defaultString(card.AtStatus, "未知"),
-		"wiki：" + defaultString(card.WikiStatus, "未知"),
-		"展示：过程 " + showState(card.Show.Step) + "，计划 " + showState(card.Show.Plan) + "，思考 " + showState(card.Show.Thought) + "，工具 " + showState(card.Show.Tool) + "，状态栏 " + showState(card.Show.Status) + "，用量 " + showState(card.Show.Used),
+		"知识库：" + defaultString(card.WikiStatus, "未知"),
+		"展示：计划 " + showState(card.Show.Plan) + "，思考 " + showState(card.Show.Thought) + "，工具 " + showState(card.Show.Tool) + "；过程 " + showState(card.Show.Step) + "，状态 " + showState(card.Show.Status) + "，用量 " + showState(card.Show.Used),
 	}
 	if card.HasSession {
 		lines = append(lines,
@@ -217,12 +239,39 @@ func (s *Service) HandleOverviewAction(ctx context.Context, action feishu.Overvi
 		return s.overviewModeSelection(action)
 	case overviewActionOpenSession:
 		return s.overviewSessionSelection(msg, action)
+	case overviewActionNewSession:
+		toast, err := s.applyOverviewNewSession(ctx, msg)
+		if err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: toast, Overview: &card}, nil
+	case overviewActionShowHelp:
+		if err := s.applyOverviewShowHelp(ctx, msg); err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "已发送帮助", Overview: &card}, nil
 	case overviewActionSetSession:
 		if err := s.applyOverviewSession(ctx, msg, action.CurrentACPSessionID, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
 		}
 		card := s.buildOverviewCard(msg)
 		return feishu.OverviewActionResult{ToastType: "success", Toast: "会话已恢复", Overview: &card}, nil
+	case overviewActionSetModel:
+		display, err := s.applyOverviewModel(ctx, msg, action.CurrentACPSessionID, action.Value)
+		if err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "模型已设置：" + display, Overview: &card}, nil
+	case overviewActionSetMode:
+		display, err := s.applyOverviewMode(ctx, msg, action.CurrentACPSessionID, action.Value)
+		if err != nil {
+			return feishu.OverviewActionResult{}, err
+		}
+		card := s.buildOverviewCard(msg)
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "模式已设置：" + display, Overview: &card}, nil
 	case overviewActionToggleShow:
 		if err := s.applyOverviewShowToggle(ctx, msg, action.Target, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
@@ -234,7 +283,7 @@ func (s *Service) HandleOverviewAction(ctx context.Context, action feishu.Overvi
 			return feishu.OverviewActionResult{}, err
 		}
 		card := s.buildOverviewCard(msg)
-		return feishu.OverviewActionResult{ToastType: "success", Toast: "wiki 配置已更新", Overview: &card}, nil
+		return feishu.OverviewActionResult{ToastType: "success", Toast: "知识沉淀配置已更新", Overview: &card}, nil
 	case overviewActionSetAgent:
 		if err := s.applyOverviewAgent(ctx, msg, action.Value); err != nil {
 			return feishu.OverviewActionResult{}, err
@@ -401,10 +450,60 @@ func (s *Service) applyOverviewAgent(ctx context.Context, msg feishu.Message, ag
 	return nil
 }
 
+func (s *Service) applyOverviewModel(ctx context.Context, msg feishu.Message, acpSessionID string, target string) (string, error) {
+	session, err := s.selectionSession(msg, acpSessionID, "该全览卡已过期，请重新发送 /card")
+	if err != nil {
+		return "", err
+	}
+	_, display, err := s.setSessionModel(ctx, msg, session, target)
+	if err != nil {
+		return "", err
+	}
+	return display, nil
+}
+
+func (s *Service) applyOverviewMode(ctx context.Context, msg feishu.Message, acpSessionID string, target string) (string, error) {
+	session, err := s.selectionSession(msg, acpSessionID, "该全览卡已过期，请重新发送 /card")
+	if err != nil {
+		return "", err
+	}
+	_, display, err := s.setSessionMode(ctx, msg, session, target)
+	if err != nil {
+		return "", err
+	}
+	return display, nil
+}
+
 func (s *Service) applyOverviewSession(ctx context.Context, msg feishu.Message, currentACPSessionID string, acpSessionID string) error {
 	_, errText := s.resumeSessionByID(ctx, msg, acpSessionID, &currentACPSessionID)
 	if errText != "" {
 		return fmt.Errorf("%s", strings.TrimSuffix(errText, "。"))
+	}
+	return nil
+}
+
+func (s *Service) applyOverviewNewSession(ctx context.Context, msg feishu.Message) (string, error) {
+	if strings.TrimSpace(msg.Workspace) == "" {
+		msg.Workspace = s.botWorkspace(msg.BotID)
+	}
+	reply := s.newSession(ctx, []string{"/new"}, msg)
+	if strings.TrimSpace(reply) == "" {
+		return "已创建新会话", nil
+	}
+	if strings.HasPrefix(reply, "已为当前会话创建 ACP 会话") {
+		return "已创建新会话", nil
+	}
+	return "", fmt.Errorf("%s", strings.TrimSuffix(reply, "。"))
+}
+
+func (s *Service) applyOverviewShowHelp(ctx context.Context, msg feishu.Message) error {
+	sent, err := s.sendIntermediateReply(ctx, msg, s.handleHelpCommand())
+	if err != nil {
+		slog.ErrorContext(ctx, "发送全览卡帮助失败", "错误", err)
+		return fmt.Errorf("发送帮助失败：%w", err)
+	}
+	if !sent {
+		return fmt.Errorf("当前会话无法发送帮助消息，请直接发送 /help")
 	}
 	return nil
 }

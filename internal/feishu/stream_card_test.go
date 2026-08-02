@@ -1283,7 +1283,20 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 			{ACPSessionID: "session-1", Title: "当前会话", Cwd: "/repo"},
 			{ACPSessionID: "session-2", Title: "旧会话", Cwd: "/old"},
 		},
-		CommandHints: []string{"/new [cwd] [title]"},
+		ModelOptions: []ModelOption{
+			{Value: "gpt-5.5", Name: "GPT-5.5"},
+			{Value: "gpt-5.6", Name: "GPT-5.6"},
+		},
+		ModeOptions: []ModeOption{
+			{Value: "default", Name: "Default"},
+			{Value: "plan", Name: "Plan"},
+		},
+		CommandHints: []string{
+			"/new [cwd] [title]",
+			"/schedule how 定时任务描述",
+			"/loop how 循环任务描述",
+			"/compact on 80%",
+		},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
 	}
@@ -1292,9 +1305,17 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 		"当前聊天全览",
 		"当前会话",
 		"gpt-5.5",
-		"模型",
+		"切换当前会话模型",
+		"切换当前会话模式",
 		"旧会话",
 		"compact",
+		"知识库：开启",
+		"知识沉淀已开启",
+		"/schedule how 定时任务描述",
+		"/loop how 循环任务描述",
+		"/compact on 80%",
+		"新的会话",
+		"查看帮助",
 	} {
 		if !jsonContainsSubstring(card, want) {
 			t.Fatalf("overview card does not contain %q: %#v", want, card)
@@ -1302,8 +1323,12 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 	}
 	for _, want := range []string{
 		overviewCardAction,
-		"open_model",
+		"set_model",
+		"set_mode",
 		"toggle_show",
+		"toggle_wiki",
+		"new_session",
+		"show_help",
 		"set_agent",
 		"set_session",
 		"session-1",
@@ -1314,16 +1339,17 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 			t.Fatalf("overview card callback does not contain %q: %#v", want, card)
 		}
 	}
-	for _, unexpected := range []string{"**聊天配置**", "上下文：", "过程 开启", "计划 关闭"} {
+	for _, unexpected := range []string{"**聊天配置**", "上下文：", "过程 开启", "计划 关闭", "open_model", "open_mode", "wiki 关闭", "状态栏"} {
 		if jsonContainsSubstring(card, unexpected) {
 			t.Fatalf("overview card should not contain %q: %#v", unexpected, card)
 		}
 	}
 	for text, wantType := range map[string]string{
-		"过程":  "primary",
-		"计划":  "primary",
-		"思考":  "default",
-		"状态栏": "primary",
+		"过程":      "primary",
+		"计划":      "primary",
+		"思考":      "default",
+		"状态":      "primary",
+		"知识沉淀已开启": "primary",
 	} {
 		if got := jsonButtonTypeByText(card, text); got != wantType {
 			t.Fatalf("button %q type = %q, want %q", text, got, wantType)
@@ -1344,6 +1370,31 @@ func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
 	}
 }
 
+func TestNewOverviewCardJSONOmitsUnsupportedModelAndModeDropdowns(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newOverviewCardJSON(OverviewCard{
+		BotID:               "default",
+		ChatID:              "oc_chat",
+		RequesterID:         "ou_requester",
+		CurrentACPSessionID: "session-1",
+		HasSession:          true,
+		SessionTitle:        "当前会话",
+		Model:               "gpt-5.5",
+		Mode:                "default",
+		WikiEnabled:         false,
+	})), &card); err != nil {
+		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
+	}
+	for _, unexpected := range []string{"overview_model", "overview_mode", "set_model", "set_mode"} {
+		if jsonContainsValue(card, unexpected) {
+			t.Fatalf("overview card should omit unsupported model/mode dropdown %q: %#v", unexpected, card)
+		}
+	}
+	if got := jsonButtonTypeByText(card, "知识沉淀已关闭"); got != "default" {
+		t.Fatalf("wiki disabled button type = %q, want default", got)
+	}
+}
+
 func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 	var card any
 	if err := json.Unmarshal([]byte(newOverviewCardJSON(OverviewCard{
@@ -1359,6 +1410,14 @@ func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 			{ACPSessionID: "session-1", Title: "当前会话", Cwd: "/repo"},
 			{ACPSessionID: "session-2", Title: "旧会话", Cwd: "/old"},
 		},
+		ModelOptions: []ModelOption{
+			{Value: "gpt-5.5", Name: "GPT-5.5"},
+			{Value: "gpt-5.6", Name: "GPT-5.6"},
+		},
+		ModeOptions: []ModeOption{
+			{Value: "default", Name: "Default"},
+			{Value: "plan", Name: "Plan"},
+		},
 	})), &card); err != nil {
 		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
 	}
@@ -1372,6 +1431,12 @@ func TestNewOverviewCardJSONElementIDsFollowCardKitRules(t *testing.T) {
 	}
 	if !jsonContainsValue(card, "overview_session") {
 		t.Fatalf("overview card does not contain session select element id: %#v", card)
+	}
+	if !jsonContainsValue(card, "overview_model") {
+		t.Fatalf("overview card does not contain model select element id: %#v", card)
+	}
+	if !jsonContainsValue(card, "overview_mode") {
+		t.Fatalf("overview card does not contain mode select element id: %#v", card)
 	}
 }
 
@@ -1501,6 +1566,76 @@ func TestOverviewCardSessionDropdownUpdatesAndReplacesCard(t *testing.T) {
 	}
 	if !jsonContainsValue(resp.Card.Data, "当前聊天全览") || !jsonContainsSubstring(resp.Card.Data, "旧会话") {
 		t.Fatalf("replacement card = %#v, want refreshed overview card", resp.Card.Data)
+	}
+}
+
+func TestOverviewCardModelDropdownUpdatesAndReplacesCard(t *testing.T) {
+	handler := &fakeOverviewActionHandler{
+		result: OverviewActionResult{
+			ToastType: "success",
+			Toast:     "模型已设置：GPT-5.6（gpt-5.6）",
+			Overview: &OverviewCard{
+				BotID:               "default",
+				ChatID:              "oc_chat",
+				ChatType:            "topic_group",
+				ThreadID:            "omt_thread",
+				GroupMessageType:    "thread",
+				RequesterID:         "ou_requester",
+				CurrentACPSessionID: "session-1",
+				HasSession:          true,
+				SessionTitle:        "当前会话",
+				ChatAgentName:       "traex",
+				Model:               "gpt-5.6",
+				ModelOptions: []ModelOption{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+				RuntimeStatus:  "空闲",
+				QueueStatus:    "待执行 0 条",
+				WikiStatus:     "开启",
+				LoopStatus:     "尚无状态",
+				ACPErrorStatus: "无",
+				AtStatus:       "需要 at",
+				Show:           OverviewShowOptions{Plan: true, Tool: true, Status: true, Used: true},
+				WikiEnabled:    true,
+			},
+		},
+	}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_requester"},
+			Action: &callback.CallBackAction{
+				Tag:    "select_static",
+				Option: "gpt-5.6",
+				Value: map[string]interface{}{
+					"action":                 overviewCardAction,
+					"overview_action":        "set_model",
+					"bot_id":                 "default",
+					"chat_id":                "oc_chat",
+					"chat_type":              "topic_group",
+					"thread_id":              "omt_thread",
+					"group_message_type":     "thread",
+					"requester_id":           "ou_requester",
+					"current_acp_session_id": "session-1",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "模型已设置：GPT-5.6（gpt-5.6）" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success overview card replacement", resp)
+	}
+	if handler.action.Action != "set_model" ||
+		handler.action.Value != "gpt-5.6" ||
+		handler.action.CurrentACPSessionID != "session-1" ||
+		handler.action.OperatorID != "ou_requester" {
+		t.Fatalf("overview action = %+v, want model dropdown context", handler.action)
+	}
+	if !jsonContainsValue(resp.Card.Data, "overview_model") || !jsonContainsValue(resp.Card.Data, "set_model") {
+		t.Fatalf("replacement card = %#v, want refreshed model dropdown", resp.Card.Data)
 	}
 }
 

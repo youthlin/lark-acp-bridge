@@ -2246,6 +2246,33 @@ func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session with options) error = %v", err)
+	}
 	oldSession := session
 	oldSession.Title = "old session"
 	oldSession.ACPSessionID = "acp-session-old"
@@ -2300,6 +2327,12 @@ func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	}
 	if len(gotCard.SessionOptions) != 2 || gotCard.SessionOptions[0].ACPSessionID != session.ACPSessionID || gotCard.SessionOptions[1].ACPSessionID != oldSession.ACPSessionID {
 		t.Fatalf("session options = %+v, want current and historical sessions", gotCard.SessionOptions)
+	}
+	if len(gotCard.ModelOptions) != 2 || gotCard.ModelOptions[1].Value != "gpt-5.6" {
+		t.Fatalf("model options = %+v, want available models", gotCard.ModelOptions)
+	}
+	if len(gotCard.ModeOptions) != 2 || gotCard.ModeOptions[1].Value != "plan" {
+		t.Fatalf("mode options = %+v, want available modes", gotCard.ModeOptions)
 	}
 }
 
@@ -2384,6 +2417,103 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
 	if !ok || chat.AgentName != "codex" {
 		t.Fatalf("chat config = %+v, %v; want codex agent", chat, ok)
+	}
+}
+
+func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.ConfigOptions = []acp.SessionConfigOption{
+		{
+			ID:           "model",
+			Name:         "Model",
+			Category:     "model",
+			Type:         "select",
+			CurrentValue: "gpt-5.5",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "gpt-5.5", Name: "GPT-5.5"},
+				{Value: "gpt-5.6", Name: "GPT-5.6"},
+			},
+		},
+		{
+			ID:           "mode",
+			Name:         "Mode",
+			Category:     "mode",
+			Type:         "select",
+			CurrentValue: "default",
+			Options: []acp.SessionConfigOptionValue{
+				{Value: "default", Name: "Default"},
+				{Value: "plan", Name: "Plan"},
+			},
+		},
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		configOptions: []acp.SessionConfigOption{
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.6",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+			{
+				ID:           "mode",
+				Name:         "Mode",
+				Category:     "mode",
+				Type:         "select",
+				CurrentValue: "plan",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "default", Name: "Default"},
+					{Value: "plan", Name: "Plan"},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	action := feishu.OverviewAction{
+		BotID:               session.Key.BotID,
+		ChatID:              session.Key.ChatID,
+		ThreadID:            session.Key.SubID,
+		GroupMessageType:    "thread",
+		RequesterID:         testOwnerOpenID,
+		OperatorID:          testOwnerOpenID,
+		CurrentACPSessionID: session.ACPSessionID,
+	}
+
+	modelAction := action
+	modelAction.Action = overviewActionSetModel
+	modelAction.Value = "gpt-5.6"
+	result, err := svc.HandleOverviewAction(context.Background(), modelAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(set model) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.Model != "gpt-5.6" || len(result.Overview.ModelOptions) != 2 {
+		t.Fatalf("overview result = %+v, want refreshed model options", result.Overview)
+	}
+	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "model" || rt.configCalls[0].Value != "gpt-5.6" {
+		t.Fatalf("configCalls = %+v, want model set_config_option", rt.configCalls)
+	}
+
+	modeAction := action
+	modeAction.Action = overviewActionSetMode
+	modeAction.Value = "plan"
+	result, err = svc.HandleOverviewAction(context.Background(), modeAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(set mode) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.Mode != "plan" || len(result.Overview.ModeOptions) != 2 {
+		t.Fatalf("overview result = %+v, want refreshed mode options", result.Overview)
+	}
+	if len(rt.configCalls) != 2 || rt.configCalls[1].ConfigID != "mode" || rt.configCalls[1].Value != "plan" {
+		t.Fatalf("configCalls = %+v, want mode set_config_option", rt.configCalls)
 	}
 }
 

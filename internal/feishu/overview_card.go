@@ -112,9 +112,16 @@ func newOverviewCardJSON(card OverviewCard) string {
 	if sessionSelect := overviewSessionSelectElement(card); sessionSelect != nil {
 		elements = append(elements, sessionSelect)
 	}
+	if modelSelect := overviewModelSelectElement(card); modelSelect != nil {
+		elements = append(elements, modelSelect)
+	}
+	if modeSelect := overviewModeSelectElement(card); modeSelect != nil {
+		elements = append(elements, modeSelect)
+	}
 	elements = append(elements, overviewOpenActionElements(card)...)
 	elements = append(elements, overviewShowActionElements(card)...)
 	elements = append(elements, overviewCommandHintsElement(card.CommandHints))
+	elements = append(elements, overviewCommandActionElements(card)...)
 	data, _ := json.Marshal(cardJSON{
 		"schema": "2.0",
 		"config": cardJSON{
@@ -173,7 +180,7 @@ func overviewRuntimeElement(card OverviewCard) cardJSON {
 		"**运行状态**",
 		"运行态：" + overviewInline(defaultString(card.RuntimeStatus, "未知")),
 		"队列：" + overviewInline(defaultString(card.QueueStatus, "未知")),
-		"wiki：" + overviewInline(defaultString(card.WikiStatus, "未知")),
+		"知识库：" + overviewInline(defaultString(card.WikiStatus, "未知")),
 		"loop：" + overviewInline(defaultString(card.LoopStatus, "未知")),
 		"ACP错误：" + overviewInline(defaultString(card.ACPErrorStatus, "无")),
 	}
@@ -261,25 +268,107 @@ func overviewSessionSelectElement(card OverviewCard) any {
 	return selectElement
 }
 
-func overviewOpenActionElements(card OverviewCard) []any {
-	buttons := []cardJSON{
-		overviewButton("模型", overviewActionValue(card, "open_model", "", ""), "default"),
-		overviewButton("模式", overviewActionValue(card, "open_mode", "", ""), "default"),
-		overviewButton("wiki "+overviewToggleLabel(card.WikiEnabled), overviewActionValue(card, "toggle_wiki", "wiki", overviewNextSwitch(card.WikiEnabled)), "default"),
+func overviewModelSelectElement(card OverviewCard) any {
+	options := make([]any, 0, len(card.ModelOptions))
+	current := strings.TrimSpace(card.Model)
+	hasCurrent := false
+	for _, option := range card.ModelOptions {
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		if value == current {
+			hasCurrent = true
+		}
+		options = append(options, cardJSON{
+			"text":  cardJSON{"tag": "plain_text", "content": modelOptionDisplayName(option)},
+			"value": value,
+		})
 	}
-	return overviewButtonRows(buttons, 2)
+	if len(options) == 0 {
+		return nil
+	}
+	selectElement := cardJSON{
+		"tag":         "select_static",
+		"element_id":  "overview_model",
+		"width":       "fill",
+		"placeholder": cardJSON{"tag": "plain_text", "content": "切换当前会话模型"},
+		"options":     options,
+		"behaviors": []any{
+			cardJSON{
+				"type":  "callback",
+				"value": overviewActionValue(card, "set_model", "", ""),
+			},
+		},
+	}
+	if hasCurrent {
+		selectElement["initial_option"] = current
+	}
+	return selectElement
+}
+
+func overviewModeSelectElement(card OverviewCard) any {
+	options := make([]any, 0, len(card.ModeOptions))
+	current := strings.TrimSpace(card.Mode)
+	hasCurrent := false
+	for _, option := range card.ModeOptions {
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		if value == current {
+			hasCurrent = true
+		}
+		options = append(options, cardJSON{
+			"text":  cardJSON{"tag": "plain_text", "content": modeOptionDisplayName(option)},
+			"value": value,
+		})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	selectElement := cardJSON{
+		"tag":         "select_static",
+		"element_id":  "overview_mode",
+		"width":       "fill",
+		"placeholder": cardJSON{"tag": "plain_text", "content": "切换当前会话模式"},
+		"options":     options,
+		"behaviors": []any{
+			cardJSON{
+				"type":  "callback",
+				"value": overviewActionValue(card, "set_mode", "", ""),
+			},
+		},
+	}
+	if hasCurrent {
+		selectElement["initial_option"] = current
+	}
+	return selectElement
+}
+
+func overviewOpenActionElements(card OverviewCard) []any {
+	text := "知识沉淀已关闭"
+	buttonType := "default"
+	if card.WikiEnabled {
+		text = "知识沉淀已开启"
+		buttonType = "primary"
+	}
+	buttons := []cardJSON{
+		overviewButton(text, overviewActionValue(card, "toggle_wiki", "wiki", overviewNextSwitch(card.WikiEnabled)), buttonType),
+	}
+	return overviewButtonRows(buttons, 1)
 }
 
 func overviewShowActionElements(card OverviewCard) []any {
 	buttons := []cardJSON{
-		overviewShowButton(card, "过程", "step", card.Show.Step),
 		overviewShowButton(card, "计划", "plan", card.Show.Plan),
 		overviewShowButton(card, "思考", "thought", card.Show.Thought),
 		overviewShowButton(card, "工具", "tool", card.Show.Tool),
-		overviewShowButton(card, "状态栏", "status", card.Show.Status),
+		overviewShowButton(card, "过程", "step", card.Show.Step),
+		overviewShowButton(card, "状态", "status", card.Show.Status),
 		overviewShowButton(card, "用量", "used", card.Show.Used),
 	}
-	return overviewButtonRows(buttons, 2)
+	return overviewButtonRows(buttons, 3)
 }
 
 func overviewShowButton(card OverviewCard, text string, target string, current bool) cardJSON {
@@ -300,6 +389,14 @@ func overviewCommandHintsElement(hints []string) cardJSON {
 		lines = append(lines, "`"+overviewInline(hint)+"`")
 	}
 	return overviewContainer("grey-200", "grey-50", strings.Join(lines, "\n"))
+}
+
+func overviewCommandActionElements(card OverviewCard) []any {
+	buttons := []cardJSON{
+		overviewButton("新的会话", overviewActionValue(card, "new_session", "", ""), "default"),
+		overviewButton("查看帮助", overviewActionValue(card, "show_help", "", ""), "default"),
+	}
+	return overviewButtonRows(buttons, 2)
 }
 
 func overviewActionValue(card OverviewCard, action string, target string, value string) cardJSON {
@@ -382,13 +479,6 @@ func overviewNextSwitch(current bool) string {
 		return "off"
 	}
 	return "on"
-}
-
-func overviewToggleLabel(current bool) string {
-	if current {
-		return "关闭"
-	}
-	return "开启"
 }
 
 func overviewInline(text string) string {
