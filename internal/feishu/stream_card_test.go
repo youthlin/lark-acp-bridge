@@ -1247,6 +1247,141 @@ func TestNewConfigDetailCardJSONContainsConfigFieldsAndOptions(t *testing.T) {
 	}
 }
 
+func TestNewOverviewCardJSONContainsActionsAndCallbackContext(t *testing.T) {
+	var card any
+	if err := json.Unmarshal([]byte(newOverviewCardJSON(OverviewCard{
+		BotID:               "default",
+		ChatID:              "oc_chat",
+		ChatType:            "topic_group",
+		ThreadID:            "omt_thread",
+		GroupMessageType:    "thread",
+		RequesterID:         "ou_requester",
+		CurrentACPSessionID: "session-1",
+		HasSession:          true,
+		SessionTitle:        "当前会话",
+		AgentName:           "traex",
+		ChatAgentName:       "traex",
+		Cwd:                 "/repo",
+		Model:               "gpt-5.5",
+		Mode:                "default",
+		RuntimeStatus:       "空闲",
+		QueueStatus:         "待执行 0 条",
+		WikiStatus:          "开启",
+		LoopStatus:          "尚无状态",
+		ACPErrorStatus:      "无",
+		AtStatus:            "需要 at",
+		Show:                OverviewShowOptions{Step: true, Plan: true, Tool: true, Status: true, Used: true},
+		WikiEnabled:         true,
+		AgentOptions: []OverviewOption{
+			{Value: "traex", Text: "traex", Current: true},
+			{Value: "codex", Text: "codex"},
+		},
+		CommandHints: []string{"/new [cwd] [title]"},
+	})), &card); err != nil {
+		t.Fatalf("newOverviewCardJSON() is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{
+		"当前聊天全览",
+		"当前会话",
+		"gpt-5.5",
+		"模型",
+		"历史会话",
+	} {
+		if !jsonContainsSubstring(card, want) {
+			t.Fatalf("overview card does not contain %q: %#v", want, card)
+		}
+	}
+	for _, want := range []string{
+		overviewCardAction,
+		"open_model",
+		"toggle_show",
+		"set_agent",
+		"session-1",
+		"ou_requester",
+	} {
+		if !jsonContainsValue(card, want) {
+			t.Fatalf("overview card callback does not contain %q: %#v", want, card)
+		}
+	}
+	cardData, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal overview card: %v", err)
+	}
+	for _, want := range []string{
+		`"chat_type":"topic_group"`,
+		`"group_message_type":"thread"`,
+		`"current_acp_session_id":"session-1"`,
+	} {
+		if !strings.Contains(string(cardData), want) {
+			t.Fatalf("overview card does not contain %s callback context: %s", want, cardData)
+		}
+	}
+}
+
+func TestOverviewCardActionUpdatesAndReplacesCard(t *testing.T) {
+	handler := &fakeOverviewActionHandler{
+		result: OverviewActionResult{
+			ToastType: "success",
+			Toast:     "展示配置已更新",
+			Overview: &OverviewCard{
+				BotID:               "default",
+				ChatID:              "oc_chat",
+				ThreadID:            "omt_thread",
+				GroupMessageType:    "thread",
+				RequesterID:         "ou_requester",
+				CurrentACPSessionID: "session-1",
+				ChatAgentName:       "traex",
+				RuntimeStatus:       "空闲",
+				QueueStatus:         "待执行 0 条",
+				WikiStatus:          "开启",
+				LoopStatus:          "尚无状态",
+				ACPErrorStatus:      "无",
+				AtStatus:            "需要 at",
+				Show:                OverviewShowOptions{Plan: true, Tool: true, Status: true, Used: true},
+				WikiEnabled:         true,
+			},
+		},
+	}
+	adapter := &Adapter{handler: handler}
+	resp, err := adapter.handleCardAction(nil, &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_requester"},
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{
+					"action":                 overviewCardAction,
+					"overview_action":        "toggle_show",
+					"target":                 "step",
+					"value":                  "off",
+					"bot_id":                 "default",
+					"chat_id":                "oc_chat",
+					"thread_id":              "omt_thread",
+					"group_message_type":     "thread",
+					"requester_id":           "ou_requester",
+					"current_acp_session_id": "session-1",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "展示配置已更新" || resp.Card == nil {
+		t.Fatalf("response = %+v, want success card replacement", resp)
+	}
+	if handler.action.OperatorID != "ou_requester" ||
+		handler.action.Action != "toggle_show" ||
+		handler.action.Target != "step" ||
+		handler.action.Value != "off" ||
+		handler.action.CurrentACPSessionID != "session-1" ||
+		handler.action.GroupMessageType != "thread" {
+		t.Fatalf("overview action = %+v, want callback context", handler.action)
+	}
+	if !jsonContainsValue(resp.Card.Data, "当前聊天全览") || !jsonContainsValue(resp.Card.Data, overviewCardAction) {
+		t.Fatalf("replacement card = %#v, want overview card", resp.Card.Data)
+	}
+}
+
 func TestSessionSelectionCardActionResumesSessionAndReplacesDropdown(t *testing.T) {
 	handler := &fakeSessionSelectionHandler{display: "旧会话"}
 	adapter := &Adapter{handler: handler}
@@ -1369,6 +1504,21 @@ func (f *fakeSessionSelectionHandler) HandleFeishuMessage(context.Context, Messa
 func (f *fakeSessionSelectionHandler) HandleSessionSelection(ctx context.Context, selection SessionSelection) (string, error) {
 	f.selection = selection
 	return f.display, f.err
+}
+
+type fakeOverviewActionHandler struct {
+	action OverviewAction
+	result OverviewActionResult
+	err    error
+}
+
+func (f *fakeOverviewActionHandler) HandleFeishuMessage(context.Context, Message) (string, error) {
+	return "", nil
+}
+
+func (f *fakeOverviewActionHandler) HandleOverviewAction(ctx context.Context, action OverviewAction) (OverviewActionResult, error) {
+	f.action = action
+	return f.result, f.err
 }
 
 type fakeLoopCancelHandler struct {

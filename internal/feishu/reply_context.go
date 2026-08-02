@@ -133,6 +133,73 @@ type SessionSelectionCard struct {
 	Options             []SessionOption
 }
 
+type OverviewOption struct {
+	Value   string
+	Text    string
+	Current bool
+}
+
+type OverviewShowOptions struct {
+	Step    bool
+	Plan    bool
+	Thought bool
+	Tool    bool
+	Status  bool
+	Used    bool
+}
+
+type OverviewCard struct {
+	BotID               string
+	ChatID              string
+	ChatType            string
+	ThreadID            string
+	GroupMessageType    string
+	RequesterID         string
+	CurrentACPSessionID string
+	HasSession          bool
+	SessionTitle        string
+	AgentName           string
+	ChatAgentName       string
+	Cwd                 string
+	Model               string
+	Mode                string
+	ContextUsage        string
+	CompactStatus       string
+	RuntimeStatus       string
+	QueueStatus         string
+	WikiStatus          string
+	LoopStatus          string
+	ACPErrorStatus      string
+	AtStatus            string
+	Show                OverviewShowOptions
+	WikiEnabled         bool
+	AgentOptions        []OverviewOption
+	CommandHints        []string
+}
+
+type OverviewAction struct {
+	BotID               string
+	ChatID              string
+	ChatType            string
+	ThreadID            string
+	GroupMessageType    string
+	RequesterID         string
+	OperatorID          string
+	CurrentACPSessionID string
+	Action              string
+	Target              string
+	Value               string
+}
+
+type OverviewActionResult struct {
+	ToastType string
+	Toast     string
+	Overview  *OverviewCard
+	Model     *ModelSelectionCard
+	Mode      *ModeSelectionCard
+	Session   *SessionSelectionCard
+}
+
 func WithStreamCardProcessPanel(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, streamCardProcessPanelKey{}, enabled)
 }

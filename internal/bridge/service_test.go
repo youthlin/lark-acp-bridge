@@ -95,6 +95,7 @@ type fakeSentMessageClient struct {
 	modelSelectionSender    func(context.Context, feishu.Message, feishu.ModelSelectionCard) error
 	modeSelectionSender     func(context.Context, feishu.Message, feishu.ModeSelectionCard) error
 	sessionSelectionSender  func(context.Context, feishu.Message, feishu.SessionSelectionCard) error
+	overviewSender          func(context.Context, feishu.Message, feishu.OverviewCard) error
 	configDetailSender      func(context.Context, feishu.Message, feishu.ConfigDetailCard) error
 	driveCommentReplySender func(context.Context, feishu.DriveComment, string) error
 	sent                    []string
@@ -213,6 +214,13 @@ func (f *fakeSentMessageClient) SendSessionSelectionCard(ctx context.Context, ms
 		return nil
 	}
 	return f.sessionSelectionSender(ctx, msg, card)
+}
+
+func (f *fakeSentMessageClient) SendOverviewCard(ctx context.Context, msg feishu.Message, card feishu.OverviewCard) error {
+	if f == nil || f.overviewSender == nil {
+		return nil
+	}
+	return f.overviewSender(ctx, msg, card)
 }
 
 func (f *fakeSentMessageClient) SendConfigDetailCard(ctx context.Context, msg feishu.Message, card feishu.ConfigDetailCard) error {
@@ -2232,6 +2240,193 @@ func TestHandleFeishuMessageShowCommandPersistsWithoutSession(t *testing.T) {
 	chat, ok := store.GetChat(ChatKey{BotID: "bot-a", ChatID: "oc_chat"})
 	if !ok || !chat.HideStepMessages {
 		t.Fatalf("chat config = %+v, %v; want step messages hidden", chat, ok)
+	}
+}
+
+func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	svc := newTestService(config.Default(), store)
+	client := newFakeSentMessageClient("")
+	var gotMsg feishu.Message
+	var gotCard feishu.OverviewCard
+	client.overviewSender = func(ctx context.Context, msg feishu.Message, card feishu.OverviewCard) error {
+		gotMsg = msg
+		gotCard = card
+		return nil
+	}
+	svc.setOutbound(session.Key.BotID, client)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            session.Key.BotID,
+		ChatID:           session.Key.ChatID,
+		ThreadID:         session.Key.SubID,
+		GroupMessageType: "thread",
+		ChatType:         "topic_group",
+		SenderID:         testOwnerOpenID,
+		Mentions:         testBotMentions(),
+		Text:             "/card",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/card) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty after overview card is sent", reply)
+	}
+	if gotMsg.ChatID != session.Key.ChatID || gotMsg.ThreadID != session.Key.SubID {
+		t.Fatalf("overview message = %+v, want current chat/thread", gotMsg)
+	}
+	if !gotCard.HasSession || gotCard.CurrentACPSessionID != session.ACPSessionID || gotCard.SessionTitle != "test session" {
+		t.Fatalf("overview card session = %+v, want current session", gotCard)
+	}
+	if gotCard.ChatAgentName != "traex" || gotCard.AtStatus == "" || !gotCard.WikiEnabled {
+		t.Fatalf("overview card config = %+v, want default chat config", gotCard)
+	}
+	if !gotCard.Show.Step || !gotCard.Show.Plan || gotCard.Show.Thought || !gotCard.Show.Tool || !gotCard.Show.Status || !gotCard.Show.Used {
+		t.Fatalf("overview show = %+v, want default display flags", gotCard.Show)
+	}
+	if len(gotCard.AgentOptions) == 0 || gotCard.AgentOptions[0].Value != "traex" || !gotCard.AgentOptions[0].Current {
+		t.Fatalf("agent options = %+v, want current traex option", gotCard.AgentOptions)
+	}
+}
+
+func TestHandleFeishuMessageCardCommandFallsBackToTextWithoutOverviewOutbound(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_card",
+		ChatType: "p2p",
+		SenderID: testOwnerOpenID,
+		Text:     "/card",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/card) error = %v", err)
+	}
+	for _, want := range []string{"当前聊天全览：", "默认 agent：traex", "当前还没有 ACP session"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+}
+
+func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	cfg := config.Default()
+	cfg.SetAgent("codex", config.AgentConfig{Command: "codex"})
+	svc := newTestService(cfg, store)
+	action := feishu.OverviewAction{
+		BotID:               session.Key.BotID,
+		ChatID:              session.Key.ChatID,
+		ThreadID:            session.Key.SubID,
+		GroupMessageType:    "thread",
+		RequesterID:         testOwnerOpenID,
+		OperatorID:          testOwnerOpenID,
+		CurrentACPSessionID: session.ACPSessionID,
+	}
+
+	showAction := action
+	showAction.Action = overviewActionToggleShow
+	showAction.Target = "status"
+	showAction.Value = "off"
+	result, err := svc.HandleOverviewAction(context.Background(), showAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(toggle show) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.Show.Status {
+		t.Fatalf("overview result = %+v, want status hidden", result.Overview)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	if !ok || !chat.HideStatusBar {
+		t.Fatalf("chat config = %+v, %v; want status bar hidden", chat, ok)
+	}
+
+	wikiAction := action
+	wikiAction.Action = overviewActionToggleWiki
+	wikiAction.Value = "off"
+	result, err = svc.HandleOverviewAction(context.Background(), wikiAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(toggle wiki) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.WikiEnabled {
+		t.Fatalf("overview result = %+v, want wiki disabled", result.Overview)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	if !ok || !chat.WikiDisabled {
+		t.Fatalf("chat config = %+v, %v; want wiki disabled", chat, ok)
+	}
+
+	agentAction := action
+	agentAction.Action = overviewActionSetAgent
+	agentAction.Value = "codex"
+	result, err = svc.HandleOverviewAction(context.Background(), agentAction)
+	if err != nil {
+		t.Fatalf("HandleOverviewAction(set agent) error = %v", err)
+	}
+	if result.Overview == nil || result.Overview.ChatAgentName != "codex" {
+		t.Fatalf("overview result = %+v, want codex chat agent", result.Overview)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	if !ok || chat.AgentName != "codex" {
+		t.Fatalf("chat config = %+v, %v; want codex agent", chat, ok)
+	}
+}
+
+func TestHandleOverviewActionPreservesChatTypeWhenRefreshingAtStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		chatID           string
+		chatType         string
+		groupMessageType string
+		wantAtStatus     string
+	}{
+		{
+			name:         "private",
+			chatID:       "oc_private_card",
+			chatType:     "p2p",
+			wantAtStatus: "私聊始终响应",
+		},
+		{
+			name:             "ordinary group",
+			chatID:           "oc_group_card",
+			chatType:         "group",
+			groupMessageType: "chat",
+			wantAtStatus:     "需要 at",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+			svc := newTestService(config.Default(), store)
+
+			result, err := svc.HandleOverviewAction(context.Background(), feishu.OverviewAction{
+				BotID:            "bot-a",
+				ChatID:           tt.chatID,
+				ChatType:         tt.chatType,
+				GroupMessageType: tt.groupMessageType,
+				RequesterID:      testOwnerOpenID,
+				OperatorID:       testOwnerOpenID,
+				Action:           overviewActionToggleShow,
+				Target:           "status",
+				Value:            "off",
+			})
+			if err != nil {
+				t.Fatalf("HandleOverviewAction(toggle show) error = %v", err)
+			}
+			if result.Overview == nil {
+				t.Fatal("result.Overview = nil, want refreshed overview")
+			}
+			if result.Overview.ChatType != tt.chatType {
+				t.Fatalf("overview ChatType = %q, want %q", result.Overview.ChatType, tt.chatType)
+			}
+			if result.Overview.AtStatus != tt.wantAtStatus {
+				t.Fatalf("overview AtStatus = %q, want %q", result.Overview.AtStatus, tt.wantAtStatus)
+			}
+			if result.Overview.Show.Status {
+				t.Fatalf("overview Show.Status = true, want false after toggle")
+			}
+		})
 	}
 }
 

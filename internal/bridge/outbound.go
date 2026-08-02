@@ -62,6 +62,10 @@ type configDetailCardSender interface {
 	SendConfigDetailCard(context.Context, feishu.Message, feishu.ConfigDetailCard) error
 }
 
+type overviewCardSender interface {
+	SendOverviewCard(context.Context, feishu.Message, feishu.OverviewCard) error
+}
+
 type driveCommentReplier interface {
 	ReplyDriveComment(context.Context, feishu.DriveComment, string) error
 }
@@ -201,6 +205,14 @@ func (s *Service) sendConfigDetailCardOutbound(ctx context.Context, msg feishu.M
 		return false, nil
 	}
 	return true, sender.SendConfigDetailCard(ctx, msg, card)
+}
+
+func (s *Service) sendOverviewCardOutbound(ctx context.Context, msg feishu.Message, card feishu.OverviewCard) (bool, error) {
+	sender, ok := s.outboundForBot(msg.BotID).(overviewCardSender)
+	if !ok || sender == nil {
+		return false, nil
+	}
+	return true, sender.SendOverviewCard(ctx, msg, card)
 }
 
 func (s *Service) replyDriveCommentWithOutbound(ctx context.Context, comment feishu.DriveComment, text string) (bool, error) {

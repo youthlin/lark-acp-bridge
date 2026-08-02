@@ -158,6 +158,7 @@ var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
 var _ feishu.ModeSelectionHandler = (*Service)(nil)
 var _ feishu.SessionSelectionHandler = (*Service)(nil)
+var _ feishu.OverviewActionHandler = (*Service)(nil)
 
 const maxSessionHistoryPerChat = 10
 

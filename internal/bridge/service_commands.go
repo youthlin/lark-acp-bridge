@@ -83,6 +83,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/card",
+		helpLines: []string{"/card - 打开当前聊天的配置与状态全览卡"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleCardCommand(ctx, msg)
+		},
+	},
+	{
 		name: "/loop",
 		helpLines: []string{
 			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
@@ -246,6 +253,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/loop"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/queue"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/card"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/cmds"),
 		"//command [args] - 透传执行 ACP slash command 的简写",
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/compact"),

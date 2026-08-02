@@ -152,6 +152,8 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 		return a.handleSessionSelectionAction(ctx, event)
 	case loopStatusCardAction:
 		return a.handleLoopCancelAction(ctx, event)
+	case overviewCardAction:
+		return a.handleOverviewAction(ctx, event)
 	case permissionCardAction:
 	default:
 		return permissionCardToast("error", "未知的卡片操作"), nil

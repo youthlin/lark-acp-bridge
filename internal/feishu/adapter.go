@@ -38,6 +38,10 @@ type SessionSelectionHandler interface {
 	HandleSessionSelection(context.Context, SessionSelection) (string, error)
 }
 
+type OverviewActionHandler interface {
+	HandleOverviewAction(context.Context, OverviewAction) (OverviewActionResult, error)
+}
+
 type LoopCancelHandler interface {
 	HandleLoopCancel(context.Context, LoopCancel) (string, error)
 }
