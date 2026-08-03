@@ -4,6 +4,8 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 
 它接收飞书 IM 事件，把飞书会话映射到 ACP session，将用户消息转发给 `traex acp serve` 这类 ACP server，再把智能体输出回传到飞书。
 
+> 本项目受 [acp-claw](https://github.com/IanYu-Tree/acp-claw) 启发；如果你更熟悉 TypeScript，不妨先看看它。
+
 ## 目标
 
 - Bot 后端作为 ACP client，而不是让飞书直接连接 ACP server。
