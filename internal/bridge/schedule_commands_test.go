@@ -501,9 +501,9 @@ func TestHandleScheduleHowCommandReturnsRecommendedAddCommand(t *testing.T) {
 	rt.mu.Unlock()
 	for _, want := range []string{
 		"每天上午 8 点执行 scripts/report.sh",
-		"## /schedule add 命令格式",
+		"## /schedule add 命令格式（循环）",
 		"每天上午 8 点应生成 0 8 * * *",
-		"最终只返回一条 /schedule add 命令",
+		"最终只返回一条 /schedule 命令",
 		"不要真正创建任务，只生成命令",
 	} {
 		if !strings.Contains(prompt, want) {
