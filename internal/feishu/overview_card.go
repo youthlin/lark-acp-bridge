@@ -413,7 +413,22 @@ func overviewShowActionElements(card OverviewCard) []any {
 		overviewShowButton(card, "状态", "status", card.Show.Status),
 		overviewShowButton(card, "用量", "used", card.Show.Used),
 	}
-	return overviewButtonRows(buttons, 3)
+	columns := make([]any, 0, len(buttons))
+	for _, button := range buttons {
+		columns = append(columns, cardJSON{
+			"tag":      "column",
+			"width":    "auto",
+			"elements": []any{button},
+		})
+	}
+	return []any{
+		cardJSON{
+			"tag":                "column_set",
+			"flex_mode":          "flow",
+			"horizontal_spacing": "8px",
+			"columns":            columns,
+		},
+	}
 }
 
 func overviewShowButton(card OverviewCard, text string, target string, current bool) cardJSON {
