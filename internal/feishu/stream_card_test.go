@@ -698,9 +698,7 @@ func TestPermissionCardActionCompletesWaiter(t *testing.T) {
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
 		waiter:       waiter,
-		requesterID:  "ou_requester",
 		ownerOpenIDs: []string{"ou_owner"},
-		groupChat:    true,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -761,9 +759,7 @@ func TestPermissionCardActionRejectsNonOwnerInGroup(t *testing.T) {
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
 		waiter:       waiter,
-		requesterID:  "ou_requester",
 		ownerOpenIDs: []string{"ou_owner"},
-		groupChat:    true,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -805,9 +801,7 @@ func TestPermissionCardActionRejectsGroupWhenOwnerMissing(t *testing.T) {
 	adapter := &Adapter{permissionCards: newPermissionCardRegistry()}
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
-		waiter:      waiter,
-		requesterID: "ou_requester",
-		groupChat:   true,
+		waiter: waiter,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -853,9 +847,7 @@ func TestPermissionCardActionAllowsOwnerInGroup(t *testing.T) {
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
 		waiter:       waiter,
-		requesterID:  "ou_requester",
 		ownerOpenIDs: []string{"ou_owner"},
-		groupChat:    true,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -901,9 +893,7 @@ func TestPermissionCardActionRejectsUnknownOption(t *testing.T) {
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
 		waiter:       waiter,
-		requesterID:  "ou_requester",
 		ownerOpenIDs: []string{"ou_owner"},
-		groupChat:    true,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -945,9 +935,7 @@ func TestPermissionCardActionRejectsPrivateWhenOwnerMissing(t *testing.T) {
 	adapter := &Adapter{permissionCards: newPermissionCardRegistry()}
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
-		waiter:      waiter,
-		requesterID: "ou_requester",
-		groupChat:   false,
+		waiter: waiter,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},
@@ -993,9 +981,7 @@ func TestPermissionCardActionAllowsOwnerInPrivate(t *testing.T) {
 	waiter := newPermissionCardWaiter()
 	adapter.permissionCards.add("perm-1", permissionCardEntry{
 		waiter:       waiter,
-		requesterID:  "ou_requester",
 		ownerOpenIDs: []string{"ou_owner"},
-		groupChat:    false,
 		request: acp.PermissionRequest{
 			RequestID: "perm-1",
 			ToolCall:  acp.PermissionToolCallRef{ToolCallID: "call-1"},

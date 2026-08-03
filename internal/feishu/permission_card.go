@@ -32,9 +32,7 @@ type permissionCardEntry struct {
 	waiter       *permissionCardWaiter
 	request      acp.PermissionRequest
 	cardID       string
-	requesterID  string
 	ownerOpenIDs []string
-	groupChat    bool
 }
 
 func newPermissionCardRegistry() *permissionCardRegistry {
@@ -99,9 +97,7 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 		waiter:       waiter,
 		request:      req,
 		cardID:       cardID,
-		requesterID:  msg.SenderID,
 		ownerOpenIDs: a.cfg.OwnerOpenIDs,
-		groupChat:    !msg.IsPrivateChat(),
 	})
 	defer a.permissionCards.remove(requestID)
 	if _, err := a.sendInteractiveCard(ctx, msg, cardID, "权限"); err != nil {
@@ -306,6 +302,7 @@ func permissionCardElements(requestID string, req acp.PermissionRequest, state p
 		elements = append(elements, cardJSON{"tag": "markdown", "content": "**已选择**：" + markdownInline(state.selectedOption)})
 		return elements
 	}
+	elements = append(elements, cardJSON{"tag": "markdown", "content": "<font color='grey'>仅 bot owner 可审批</font>"})
 	if optionsText := permissionOptionsMarkdown(req.Options); optionsText != "" {
 		elements = append(elements, cardJSON{"tag": "markdown", "content": optionsText})
 	}
