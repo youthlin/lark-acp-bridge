@@ -16,6 +16,7 @@ import (
 type Service struct {
 	cfg            config.Config     // 配置文件
 	configPath     string            // 配置文件路径，用于内置后台重启
+	version        string            // bridge 自身版本，用于 /update
 	registry       *acp.Registry     // 对接的 acp, 比如 traex -> "traex acp serve"
 	runtime        acpRuntime        // acp client 运行时
 	feishu         []*feishu.Adapter // Bots 实例
@@ -140,6 +141,12 @@ func (s *Service) WithConfigPath(path string) *Service {
 
 func (s *Service) WithBuiltinRestart(enabled bool) *Service {
 	s.builtinRestart = enabled
+	return s
+}
+
+// WithVersion 设置 bridge 自身版本号，供 /update 使用。
+func (s *Service) WithVersion(version string) *Service {
+	s.version = strings.TrimSpace(version)
 	return s
 }
 

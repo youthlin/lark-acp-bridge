@@ -141,6 +141,15 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name: "/update",
+		helpLines: []string{
+			"/update [--check] [--version <tag>] - 更新 bridge 二进制（只替换不重启，owner only）",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleUpdateCommand(ctx, text, msg)
+		},
+	},
+	{
 		name: "/schedule",
 		helpLines: []string{
 			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
@@ -264,8 +273,9 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/show"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/at"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/debug"),
-		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/restart"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/update"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/status"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/restart"),
 		"",
 		"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
 	}

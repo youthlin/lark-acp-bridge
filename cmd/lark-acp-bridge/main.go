@@ -665,7 +665,8 @@ func runForeground(cfg config.Config, configPath string) error {
 
 	svc := bridge.NewService(cfg, nil).
 		WithConfigPath(configPath).
-		WithBuiltinRestart(isDaemonChild())
+		WithBuiltinRestart(isDaemonChild()).
+		WithVersion(appVersion())
 	if err := svc.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败, err=%v\n", err)
 		return err
