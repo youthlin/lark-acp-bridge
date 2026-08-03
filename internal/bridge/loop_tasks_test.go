@@ -877,7 +877,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 	waitForCondition(t, time.Second, func() bool {
 		statusCancelled := false
 		for _, update := range card.statusUpdatesSnapshot() {
-			if strings.Contains(update, "已取消") {
+			if strings.Contains(update, "🚫") {
 				statusCancelled = true
 				break
 			}

@@ -206,10 +206,6 @@ func (s *promptCardStream) updatePromptStatusFromUpdate(update acp.PromptUpdate)
 	}
 }
 
-func (s *promptCardStream) updatePromptStatusFromResult(result acp.PromptResult) {
-	s.updatePromptStatusFromResultWithContext(s.ctx, result)
-}
-
 func (s *promptCardStream) updatePromptStatusFromResultWithContext(ctx context.Context, result acp.PromptResult) {
 	if !s.showStatusBar {
 		return

@@ -110,20 +110,21 @@ func promptStatusFromStopReason(stopReason string) promptStatusState {
 }
 
 func promptStatusStateLabel(state promptStatusState, stopReason string, elapsed time.Duration) string {
+	duration := formatPromptElapsedDuration(elapsed)
 	switch state {
 	case promptStatusCompleted:
-		return "✅ " + formatPromptElapsedDuration(elapsed)
+		return "✅ " + duration
 	case promptStatusCancelled:
-		return "已取消"
+		return "🚫 " + duration
 	case promptStatusFailed:
-		return "执行失败"
+		return "❌ " + duration
 	case promptStatusStopped:
 		if stopReason = strings.TrimSpace(stopReason); stopReason != "" {
-			return "已停止：" + stopReason
+			return fmt.Sprintf("⏹️ %v %v", duration, stopReason)
 		}
-		return "已停止"
+		return "⏹️ " + duration
 	default:
-		return "⏳ " + formatPromptElapsedDuration(elapsed)
+		return "⏳ " + duration
 	}
 }
 
@@ -164,7 +165,10 @@ func formatContextUsage(usage acp.ContextWindowUsage) string {
 	if usage.Used <= 0 {
 		return formatContextTokenCount(usage.Size)
 	}
-	return formatContextTokenCount(usage.Used) + "/" + formatContextTokenCount(usage.Size)
+	return fmt.Sprintf("%v/%v%v",
+		formatContextTokenCount(usage.Used),
+		formatContextTokenCount(usage.Size),
+		formatPercent(usage.Used, usage.Size))
 }
 
 func formatTokenCountWithUnit(value int64) string {
@@ -200,7 +204,7 @@ func formatTokenCount(value int64) string {
 func formatPromptTokenUsage(input, cachedInput, output int64) string {
 	items := make([]string, 0, 2)
 	if input > 0 {
-		items = append(items, formatTokenCount(input)+formatCacheHitRate(cachedInput, input))
+		items = append(items, formatTokenCount(input)+formatPercent(cachedInput, input))
 	}
 	if output > 0 {
 		items = append(items, formatTokenCount(output))
@@ -276,11 +280,13 @@ func markdownCodeFence(text string) string {
 	return fence
 }
 
-func formatCacheHitRate(cached, total int64) string {
-	if cached <= 0 || total <= 0 {
+// formatPercent 返回 numerator/denominator 的百分比,形如 "(27%)";
+// 任一值 <=0 或取整后为 0 时返回空串,超过 100 截断为 100。
+func formatPercent(numerator, denominator int64) string {
+	if numerator <= 0 || denominator <= 0 {
 		return ""
 	}
-	percent := int64(math.Round(float64(cached) / float64(total) * 100))
+	percent := int64(math.Round(float64(numerator) / float64(denominator) * 100))
 	if percent <= 0 {
 		return ""
 	}

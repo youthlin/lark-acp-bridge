@@ -6709,8 +6709,9 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
 	got := cards[0].statusUpdatesSnapshot()
-	if len(got) == 0 || got[len(got)-1] != "已取消 | 1.2K" {
-		t.Fatalf("statusUpdates = %+v, want final cancelled status", got)
+	last := got[len(got)-1]
+	if !strings.Contains(last, "🚫") || !strings.Contains(last, "1.2K") {
+		t.Fatalf("statusUpdates = %+v, want final cancelled status with duration and token usage", got)
 	}
 }
 
@@ -8899,7 +8900,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	statusCancelled := false
 	for _, update := range cards[0].statusUpdatesSnapshot() {
-		if strings.Contains(update, "已取消") {
+		if strings.Contains(update, "🚫") {
 			statusCancelled = true
 			break
 		}

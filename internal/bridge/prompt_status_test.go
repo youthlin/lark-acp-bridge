@@ -80,7 +80,7 @@ func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
 	})
 
 	got := status.textAt(startedAt.Add(95 * time.Second))
-	want := "⏳ 1m35s | 511.8K(97%), 356 | 69K/258K"
+	want := "⏳ 1m35s | 511.8K(97%), 356 | 69K/258K(27%)"
 	if got != want {
 		t.Fatalf("status text = %q, want %q", got, want)
 	}
@@ -99,7 +99,7 @@ func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
 	}
 
 	got := status.text()
-	want := "✅ 2m5s | 2.9M(95%), 1.2M | 2M/4M"
+	want := "✅ 2m5s | 2.9M(95%), 1.2M | 2M/4M(71%)"
 	if got != want {
 		t.Fatalf("status text = %q, want %q", got, want)
 	}
@@ -168,7 +168,7 @@ func TestPromptStatusBarCancelledStopReason(t *testing.T) {
 	})
 	status.state = promptStatusFromStopReason("cancelled")
 	status.stopReason = "cancelled"
-	if got, want := status.text(), "已取消 | 1.2K, 345"; got != want {
+	if got, want := status.text(), "🚫 0s | 1.2K, 345"; got != want {
 		t.Fatalf("status text = %q, want %q", got, want)
 	}
 }
