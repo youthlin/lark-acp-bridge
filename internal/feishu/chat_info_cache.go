@@ -39,7 +39,6 @@ func (c *chatInfoCache) Get(chatID string) (chatInfo, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// TODO 先清理过期的 keys
 	entry, ok := c.entries[chatID]
 	if !ok {
 		return chatInfo{}, false
@@ -61,9 +60,15 @@ func (c *chatInfoCache) Set(chatID string, info chatInfo) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	now := time.Now()
+	// 写入时顺带淘汰已过期的条目，避免长期不再访问的群信息无限残留。
+	for id, entry := range c.entries {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, id)
+		}
+	}
 	c.entries[chatID] = chatInfoCacheEntry{
 		info:      info,
-		expiresAt: time.Now().Add(c.ttl),
+		expiresAt: now.Add(c.ttl),
 	}
-	// TODO 清理过期的 keys
 }
