@@ -152,15 +152,20 @@ func TestStreamCardUsageTargetID(t *testing.T) {
 		want                string
 	}{
 		{
-			name:                "after status bar",
+			name:                "after process panel with status bar (usage above status)",
 			processPanelEnabled: true,
 			statusBarEnabled:    true,
-			want:                streamCardStatusElementID,
+			want:                streamCardProcessPanelID,
 		},
 		{
 			name:                "after process panel without status bar",
 			processPanelEnabled: true,
 			want:                streamCardProcessPanelID,
+		},
+		{
+			name:             "after text with status bar but no process panel",
+			statusBarEnabled: true,
+			want:             streamCardTextElementID,
 		},
 		{
 			name: "after text only",
@@ -399,6 +404,36 @@ func TestSDKStreamCardFullCardJSONIncludesSnapshotPanels(t *testing.T) {
 	}
 	if !jsonContainsBool(payload, "streaming_mode", false) {
 		t.Fatalf("full card snapshot should disable streaming_mode: %#v", payload)
+	}
+}
+
+func TestStreamCardUsageAppearsAboveStatusBar(t *testing.T) {
+	card := newStreamCardJSONFromState(
+		"最终回复", "执行过程", "已完成", "usage detail",
+		true, true, true, false, StreamCardMeta{},
+	)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(card), &payload); err != nil {
+		t.Fatalf("card json is not valid: %v", err)
+	}
+	body, _ := payload["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	usageIdx, statusIdx := -1, -1
+	for i, raw := range elements {
+		el, _ := raw.(map[string]any)
+		id, _ := el["element_id"].(string)
+		switch id {
+		case streamCardUsagePanelID:
+			usageIdx = i
+		case streamCardStatusElementID:
+			statusIdx = i
+		}
+	}
+	if usageIdx < 0 || statusIdx < 0 {
+		t.Fatalf("expected both usage(%d) and status(%d) elements: %#v", usageIdx, statusIdx, elements)
+	}
+	if usageIdx >= statusIdx {
+		t.Fatalf("usage panel(index %d) should appear above status bar(index %d)", usageIdx, statusIdx)
 	}
 }
 

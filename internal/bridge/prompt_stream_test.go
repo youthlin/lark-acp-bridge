@@ -313,3 +313,49 @@ func TestNormalizeStreamMarkdownKeepsProcessMarkersOnSeparateLines(t *testing.T)
 		t.Fatalf("normalizeStreamMarkdown() = %q, want %q", got, want)
 	}
 }
+
+func TestToolProgressCarriesTitleFromStartUpdate(t *testing.T) {
+	s := &promptCardStream{showTools: true}
+
+	// 起始事件带 title 和 toolCallId,显示为运行中。
+	s.applyToolProgressLineLocked(toolProgressRunning, "call-1", "read: foo.go")
+	// 更新/结束事件只带 toolCallId,没有 title(omp 的 tool_call_update 即如此)。
+	s.applyToolProgressLineLocked(toolProgressCompleted, "call-1", "")
+
+	if len(s.process) != 1 {
+		t.Fatalf("process lines = %d, want 1 (start/end must share one row): %v", len(s.process), s.process)
+	}
+	want := "✅ read: foo.go"
+	if s.process[0] != want {
+		t.Fatalf("process line = %q, want %q", s.process[0], want)
+	}
+	for i, row := range s.tools {
+		if row.active {
+			t.Fatalf("tool row %d still active after completion: %+v", i, row)
+		}
+	}
+}
+
+func TestToolProgressWithoutIdFallsBackToTitle(t *testing.T) {
+	s := &promptCardStream{showTools: true}
+	s.applyToolProgressLineLocked(toolProgressRunning, "", "bash")
+	s.applyToolProgressLineLocked(toolProgressCompleted, "", "bash")
+	if len(s.process) != 1 {
+		t.Fatalf("process lines = %d, want 1: %v", len(s.process), s.process)
+	}
+	if !strings.Contains(s.process[0], "bash") {
+		t.Fatalf("process line = %q, want to contain tool title", s.process[0])
+	}
+}
+
+func TestToolProgressWithoutTitleUsesPlaceholderOnce(t *testing.T) {
+	s := &promptCardStream{showTools: true}
+	s.applyToolProgressLineLocked(toolProgressRunning, "call-x", "")
+	s.applyToolProgressLineLocked(toolProgressCompleted, "call-x", "")
+	if len(s.process) != 1 {
+		t.Fatalf("process lines = %d, want 1: %v", len(s.process), s.process)
+	}
+	if !strings.Contains(s.process[0], "工具调用") {
+		t.Fatalf("process line = %q, want placeholder 工具调用", s.process[0])
+	}
+}

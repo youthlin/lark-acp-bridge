@@ -53,14 +53,14 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanelWithContent(process))
 	}
+	if includeUsagePanel {
+		elements = append(elements, streamCardUsagePanel(usage))
+	}
 	if includeStatusBar {
 		if strings.TrimSpace(status) == "" {
 			status = streamCardInitialStatus
 		}
 		elements = append(elements, streamCardStatusMarkdown(status))
-	}
-	if includeUsagePanel {
-		elements = append(elements, streamCardUsagePanel(usage))
 	}
 	meta = normalizeStreamCardMeta(meta)
 	if meta.Footer != "" {
@@ -261,9 +261,8 @@ func (c *sdkStreamCard) Message() SentMessage {
 }
 
 func streamCardUsageTargetID(processPanelEnabled, statusBarEnabled bool) string {
-	if statusBarEnabled {
-		return streamCardStatusElementID
-	}
+	// 用量面板位于状态栏之上:有状态栏时插到状态栏前一个元素(过程面板或正文)之后,
+	// 无状态栏时作为末尾组件插到过程面板或正文之后。
 	if processPanelEnabled {
 		return streamCardProcessPanelID
 	}

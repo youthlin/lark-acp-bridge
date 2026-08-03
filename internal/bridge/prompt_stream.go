@@ -40,6 +40,7 @@ type promptCardStream struct {
 }
 
 type promptToolRow struct {
+	id     string
 	title  string
 	line   int
 	active bool
@@ -403,13 +404,10 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 		return true
 	}
 	status := toolStatusFromUpdate(kind, u.Status)
-	title := toolDisplayName(u)
-	line, ok := s.toolProgressLine(status, title)
-	if !ok {
-		return true
-	}
+	id := strings.TrimSpace(u.ToolCallID)
+	rawTitle := strings.TrimSpace(toolDisplayName(u))
 	s.mu.Lock()
-	processText := s.applyToolProgressLineLocked(status, title, line)
+	processText := s.applyToolProgressLineLocked(status, id, rawTitle)
 	delayed := s.delayed
 	s.mu.Unlock()
 	if delayed {
@@ -423,51 +421,72 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 	return true
 }
 
-func (s *promptCardStream) toolProgressLine(status toolProgressStatus, title string) (string, bool) {
-	title = strings.TrimSpace(title)
-	if title == "" && status != toolProgressRunning {
-		s.mu.Lock()
-		title = s.latestActiveToolTitleLocked()
-		s.mu.Unlock()
-	}
-	if title == "" {
-		title = "工具调用"
-	}
-	title = truncateRunes(title, 80)
-	return toolStatusIcon(status) + " " + title, true
-}
-
-func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus, title, line string) string {
-	title = strings.TrimSpace(title)
-	if title == "" && status != toolProgressRunning {
-		title = s.latestActiveToolTitleLocked()
-	}
-	if title == "" {
-		title = "工具调用"
-	}
-	normalizedTitle := truncateRunes(title, 80)
+func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus, id, rawTitle string) string {
+	title := s.resolveToolTitleLocked(id, rawTitle)
+	line := normalizeStreamMarkdown(toolStatusIcon(status) + " " + title)
 	if status == toolProgressRunning {
-		s.process = append(s.process, normalizeStreamMarkdown(line))
+		// 仅当带 toolCallId 且命中同一调用的已有行时才复用(更新 in_progress 进度);
+		// 没有 id 时无法判定是否同一次调用,按原逻辑新增一行,避免覆盖上一个仍在运行的工具。
+		if id != "" {
+			if idx := s.findToolRowLocked(id, title); idx >= 0 && s.tools[idx].active {
+				row := &s.tools[idx]
+				if title != "" {
+					row.title = title
+				}
+				if row.line >= 0 && row.line < len(s.process) {
+					s.process[row.line] = line
+				} else {
+					s.process = append(s.process, line)
+					row.line = len(s.process) - 1
+				}
+				return processPanelText(s.process)
+			}
+		}
+		s.process = append(s.process, line)
 		s.tools = append(s.tools, promptToolRow{
-			title:  normalizedTitle,
+			id:     id,
+			title:  title,
 			line:   len(s.process) - 1,
 			active: true,
 		})
 		return processPanelText(s.process)
 	}
-	if idx := s.findToolRowLocked(normalizedTitle); idx >= 0 {
+	if idx := s.findToolRowLocked(id, title); idx >= 0 {
 		row := &s.tools[idx]
+		if title != "" {
+			row.title = title
+		}
 		if row.line >= 0 && row.line < len(s.process) {
-			s.process[row.line] = normalizeStreamMarkdown(line)
+			s.process[row.line] = line
 		} else {
-			s.process = append(s.process, normalizeStreamMarkdown(line))
+			s.process = append(s.process, line)
 			row.line = len(s.process) - 1
 		}
 		row.active = false
 		return processPanelText(s.process)
 	}
-	s.process = append(s.process, normalizeStreamMarkdown(line))
+	s.process = append(s.process, line)
 	return processPanelText(s.process)
+}
+
+// resolveToolTitleLocked 确定一次工具更新展示的标题:
+// 优先用本条 update 自带的标题;否则按 toolCallId 复用同一次调用起始事件记录的标题;
+// 再退回到最近一个活跃工具;都没有时用占位文案。
+func (s *promptCardStream) resolveToolTitleLocked(id, rawTitle string) string {
+	if rawTitle != "" {
+		return truncateRunes(rawTitle, 80)
+	}
+	if id != "" {
+		if idx := s.findToolRowLocked(id, ""); idx >= 0 {
+			if t := strings.TrimSpace(s.tools[idx].title); t != "" {
+				return t
+			}
+		}
+	}
+	if t := strings.TrimSpace(s.latestActiveToolTitleLocked()); t != "" {
+		return t
+	}
+	return "工具调用"
 }
 
 func (s *promptCardStream) latestActiveToolTitleLocked() string {
@@ -484,8 +503,21 @@ func (s *promptCardStream) latestActiveToolTitleLocked() string {
 	return ""
 }
 
-func (s *promptCardStream) findToolRowLocked(title string) int {
+func (s *promptCardStream) findToolRowLocked(id, title string) int {
+	id = strings.TrimSpace(id)
 	title = strings.TrimSpace(title)
+	if id != "" {
+		for i := len(s.tools) - 1; i >= 0; i-- {
+			if s.tools[i].active && s.tools[i].id == id {
+				return i
+			}
+		}
+		for i := len(s.tools) - 1; i >= 0; i-- {
+			if s.tools[i].id == id {
+				return i
+			}
+		}
+	}
 	if title != "" {
 		for i := len(s.tools) - 1; i >= 0; i-- {
 			if s.tools[i].active && s.tools[i].title == title {
