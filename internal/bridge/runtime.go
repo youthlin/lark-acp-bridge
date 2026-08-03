@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -190,11 +193,17 @@ func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent conf
 }
 
 func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
+	key = normalizeRuntimeKey(key)
 	client, err := r.clientForRuntimeSession(ctx, key, session, agent)
 	if err != nil {
 		return acp.PromptResult{}, err
 	}
-	return promptWithClient(ctx, client, session.ACPSessionID, text, opts)
+	result, err := promptWithClient(ctx, client, session.ACPSessionID, text, opts)
+	if err == nil || !isBrokenACPClientPipeError(err) {
+		return result, err
+	}
+	r.detachBrokenRuntimeClient(key, client)
+	return result, fmt.Errorf("%w: %v", errACPSessionUnavailable, err)
 }
 
 func promptWithClient(ctx context.Context, client *acp.Client, sessionID string, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
@@ -578,6 +587,44 @@ func (r *runtimeManager) detachClient(key runtimeKey) (*acp.Client, string, func
 	delete(r.sessionIDs, key)
 	delete(r.clientUnsub, key)
 	return client, sessionID, unsub
+}
+
+func (r *runtimeManager) detachBrokenRuntimeClient(key runtimeKey, broken *acp.Client) {
+	key = normalizeRuntimeKey(key)
+	lock := r.transitionLock(key)
+	lock.Lock()
+	r.mu.Lock()
+	client := r.clients[key]
+	sessionID := r.sessionIDs[key]
+	unsub := r.clientUnsub[key]
+	if client == broken {
+		delete(r.clients, key)
+		delete(r.sessionIDs, key)
+		delete(r.clientUnsub, key)
+	} else {
+		client = nil
+		sessionID = ""
+		unsub = nil
+	}
+	r.mu.Unlock()
+	lock.Unlock()
+	if unsub != nil {
+		unsub()
+	}
+	if client != nil {
+		_ = r.closeClient(client, sessionID)
+	}
+}
+
+func isBrokenACPClientPipeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, acp.ErrServerOutputClosed) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, os.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		strings.Contains(strings.ToLower(err.Error()), "broken pipe")
 }
 
 type detachedRuntimeClient struct {

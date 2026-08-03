@@ -3,7 +3,10 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,6 +97,25 @@ func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T)
 	r.mu.Unlock()
 	if markerExists {
 		t.Fatal("CloseSession() left runtime session marker")
+	}
+}
+
+func TestRuntimeTreatsBrokenPipeAsUnavailableSession(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("session/prompt: write |1: broken pipe"),
+		fmt.Errorf("session/prompt: %w", syscall.EPIPE),
+		fmt.Errorf("session/prompt: %w", io.ErrClosedPipe),
+		fmt.Errorf("session/prompt: %w: %w", acp.ErrServerOutputClosed, io.EOF),
+	} {
+		if !isBrokenACPClientPipeError(err) {
+			t.Fatalf("isBrokenACPClientPipeError(%v) = false, want true", err)
+		}
+	}
+	if isBrokenACPClientPipeError(fmt.Errorf("session/prompt: read response: %w", io.EOF)) {
+		t.Fatal("isBrokenACPClientPipeError(naked EOF) = true, want false")
+	}
+	if isBrokenACPClientPipeError(errors.New("session/prompt: model overloaded")) {
+		t.Fatal("isBrokenACPClientPipeError(non pipe error) = true, want false")
 	}
 }
 

@@ -16,12 +16,14 @@ func TestRenderSystemdUserService(t *testing.T) {
 		"/home/user/.lark-acp-bridge/config.json",
 		"/home/user/bridge work",
 		"/opt/agent/bin:/usr/bin",
+		"/tmp/.cache/go-build",
 	)
 	for _, want := range []string{
 		"[Unit]",
 		"Description=Lark ACP Bridge",
 		`WorkingDirectory="/home/user/bridge work"`,
 		"Environment=PATH=/opt/agent/bin:/usr/bin",
+		"Environment=GOCACHE=/tmp/.cache/go-build",
 		`ExecStart="/opt/lark acp/lark-acp-bridge" --config /home/user/.lark-acp-bridge/config.json run`,
 		"Restart=on-failure",
 		"WantedBy=default.target",
@@ -38,9 +40,13 @@ func TestRenderSystemdUserServiceEscapesPercent(t *testing.T) {
 		"/tmp/%i/config.json",
 		"/tmp/work",
 		"/usr/bin",
+		"/tmp/%h/go-cache",
 	)
 	if !strings.Contains(got, "/tmp/%%i/config.json") {
 		t.Fatalf("systemd service =\n%s\nwant escaped percent", got)
+	}
+	if !strings.Contains(got, "GOCACHE=/tmp/%%h/go-cache") {
+		t.Fatalf("systemd service =\n%s\nwant escaped percent in GOCACHE", got)
 	}
 }
 
@@ -51,6 +57,7 @@ func TestRenderLaunchdAgent(t *testing.T) {
 		"/Users/me/work & test",
 		"/Users/me/.lark-acp-bridge/lark-acp-bridge.log",
 		"/opt/agent/bin:/usr/bin",
+		"/tmp/.cache/go-build",
 	)
 	for _, want := range []string{
 		"<key>Label</key>",
@@ -65,6 +72,8 @@ func TestRenderLaunchdAgent(t *testing.T) {
 		"<key>EnvironmentVariables</key>",
 		"<key>PATH</key>",
 		"<string>/opt/agent/bin:/usr/bin</string>",
+		"<key>GOCACHE</key>",
+		"<string>/tmp/.cache/go-build</string>",
 		"<key>RunAtLoad</key>",
 		"<key>KeepAlive</key>",
 		"<key>StandardOutPath</key>",
@@ -72,6 +81,17 @@ func TestRenderLaunchdAgent(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launchd plist =\n%s\nmissing %q", got, want)
 		}
+	}
+}
+
+func TestServiceGoCacheForUIDIsUserSpecific(t *testing.T) {
+	first := serviceGoCacheForUID(1000)
+	second := serviceGoCacheForUID(1001)
+	if first == second {
+		t.Fatalf("cache paths = %q and %q, want different paths", first, second)
+	}
+	if want := filepath.Join(os.TempDir(), "lark-acp-bridge-1000", "go-build"); first != want {
+		t.Fatalf("serviceGoCacheForUID(1000) = %q, want %q", first, want)
 	}
 }
 
@@ -163,6 +183,9 @@ func TestInstallServiceWritesLinuxUnit(t *testing.T) {
 	if !strings.Contains(got, "Environment=PATH="+wantPath) {
 		t.Fatalf("unit =\n%s\nwant PATH environment %q", got, wantPath)
 	}
+	if !strings.Contains(got, "Environment=GOCACHE="+serviceGoCacheForInstall()) {
+		t.Fatalf("unit =\n%s\nwant GOCACHE environment", got)
+	}
 	if !strings.Contains(out, "systemctl --user enable --now "+serviceUnitName) ||
 		!strings.Contains(out, "已更新配置 restart_command: systemctl --user restart "+serviceUnitName) {
 		t.Fatalf("stdout = %q, want systemd next steps", out)
@@ -231,7 +254,9 @@ func TestInstallServiceWritesLaunchdPlist(t *testing.T) {
 	}
 	if !strings.Contains(got, "<key>EnvironmentVariables</key>") ||
 		!strings.Contains(got, "<key>PATH</key>") ||
-		!strings.Contains(got, "<string>"+os.Getenv("PATH")+"</string>") {
+		!strings.Contains(got, "<string>"+os.Getenv("PATH")+"</string>") ||
+		!strings.Contains(got, "<key>GOCACHE</key>") ||
+		!strings.Contains(got, "<string>"+serviceGoCacheForInstall()+"</string>") {
 		t.Fatalf("plist =\n%s\nwant PATH environment", got)
 	}
 	if !strings.Contains(out, "launchctl bootstrap gui/") ||

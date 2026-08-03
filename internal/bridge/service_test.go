@@ -2987,6 +2987,112 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 	}
 }
 
+func TestHandleFeishuMessageRefreshesBrokenPipeACPSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	key := SessionKey{ChatID: "oc_chat", SubID: "omt_thread"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		Title:        "old session",
+		AgentName:    "traex",
+		ACPSessionID: "old-acp-session",
+		Cwd:          workDir,
+		ConfigOptions: []acp.SessionConfigOption{
+			{
+				ID:           "mode",
+				Category:     "mode",
+				Type:         "select",
+				CurrentValue: "plan",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "default", Name: "Default"},
+					{Value: "plan", Name: "Plan"},
+				},
+			},
+			{
+				ID:           "model",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.6",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "new-acp-session",
+			ConfigOptions: []acp.SessionConfigOption{
+				{
+					ID:           "mode",
+					Category:     "mode",
+					Type:         "select",
+					CurrentValue: "default",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "default", Name: "Default"},
+						{Value: "plan", Name: "Plan"},
+					},
+				},
+				{
+					ID:           "model",
+					Category:     "model",
+					Type:         "select",
+					CurrentValue: "gpt-5.5",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "gpt-5.5", Name: "GPT-5.5"},
+						{Value: "gpt-5.6", Name: "GPT-5.6"},
+					},
+				},
+			},
+		},
+		promptReply: "ACP 回复",
+		promptErrors: []error{
+			fmt.Errorf("%w: session/prompt: write |1: broken pipe", errACPSessionUnavailable),
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.newCalls) != 1 || rt.newCalls[0].Cwd != workDir {
+		t.Fatalf("newCalls = %+v, want refresh with cwd %q", rt.newCalls, workDir)
+	}
+	if len(rt.promptCalls) != 2 || rt.promptCalls[1].Session.ACPSessionID != "new-acp-session" {
+		t.Fatalf("promptCalls = %+v, want retry on refreshed session", rt.promptCalls)
+	}
+	if currentModeDisplay(rt.promptCalls[1].Session) != "plan" || currentModelDisplay(rt.promptCalls[1].Session) != "gpt-5.6" {
+		t.Fatalf("retry session config = %+v, want inherited mode/model", rt.promptCalls[1].Session.ConfigOptions)
+	}
+	if len(rt.configCalls) != 2 ||
+		rt.configCalls[0].ConfigID != "mode" || rt.configCalls[0].Value != "plan" ||
+		rt.configCalls[1].ConfigID != "model" || rt.configCalls[1].Value != "gpt-5.6" {
+		t.Fatalf("configCalls = %+v, want mode/model restored before retry", rt.configCalls)
+	}
+	updated, ok := store.Get(key)
+	if !ok || updated.ACPSessionID != "new-acp-session" {
+		t.Fatalf("updated session = %+v, ok=%v; want refreshed session", updated, ok)
+	}
+	if currentModeDisplay(updated) != "plan" || currentModelDisplay(updated) != "gpt-5.6" {
+		t.Fatalf("updated session config = %+v, want inherited mode/model", updated.ConfigOptions)
+	}
+}
+
 func TestRefreshACPSessionDoesNotReplaceNewCurrentSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
@@ -5106,6 +5212,260 @@ func TestHandleFeishuNewSessionUsesDefaultTitleAndDisplaysModeModel(t *testing.T
 	}
 	if !strings.Contains(reply, "标题：session#2") || !strings.Contains(reply, "cwd 来源：当前会话已有会话") {
 		t.Fatalf("reply = %q, want second default title and reused cwd", reply)
+	}
+}
+
+func TestHandleFeishuNewSessionInheritsModeAndModelForSameAgent(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	previous := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Title:        "previous",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          workDir,
+		ConfigOptions: []acp.SessionConfigOption{
+			{
+				ID:           "mode",
+				Name:         "Mode",
+				Category:     "mode",
+				Type:         "select",
+				CurrentValue: "plan",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "default", Name: "Default"},
+					{Value: "plan", Name: "Plan"},
+				},
+			},
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				Type:         "select",
+				CurrentValue: "gpt-5.6",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "gpt-5.5", Name: "GPT-5.5"},
+					{Value: "gpt-5.6", Name: "GPT-5.6"},
+				},
+			},
+		},
+	}
+	if err := store.Upsert(previous); err != nil {
+		t.Fatalf("Upsert(previous) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-session-new",
+			ConfigOptions: []acp.SessionConfigOption{
+				{
+					ID:           "mode",
+					Name:         "Mode",
+					Category:     "mode",
+					Type:         "select",
+					CurrentValue: "default",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "default", Name: "Default"},
+						{Value: "plan", Name: "Plan"},
+					},
+				},
+				{
+					ID:           "model",
+					Name:         "Model",
+					Category:     "model",
+					Type:         "select",
+					CurrentValue: "gpt-5.5",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "gpt-5.5", Name: "GPT-5.5"},
+						{Value: "gpt-5.6", Name: "GPT-5.6"},
+					},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     previous.Key.BotID,
+		ChatID:    previous.Key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	for _, want := range []string{"标题：session#2", "mode：plan", "model：gpt-5.6"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	if len(rt.configCalls) != 2 {
+		t.Fatalf("configCalls = %+v, want mode and model inheritance", rt.configCalls)
+	}
+	if rt.configCalls[0].ConfigID != "mode" || rt.configCalls[0].Value != "plan" {
+		t.Fatalf("first config call = %+v, want mode plan", rt.configCalls[0])
+	}
+	if rt.configCalls[1].ConfigID != "model" || rt.configCalls[1].Value != "gpt-5.6" {
+		t.Fatalf("second config call = %+v, want model gpt-5.6", rt.configCalls[1])
+	}
+	session, ok := store.Get(previous.Key)
+	if !ok {
+		t.Fatalf("new session not found")
+	}
+	if session.ACPSessionID != "acp-session-new" {
+		t.Fatalf("session id = %q, want acp-session-new", session.ACPSessionID)
+	}
+	if currentModeDisplay(session) != "plan" || currentModelDisplay(session) != "gpt-5.6" {
+		t.Fatalf("session config = %+v, want inherited mode/model", session.ConfigOptions)
+	}
+}
+
+func TestHandleFeishuNewSessionWaitsForConfigOptionsBeforeInheritance(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	previous := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Title:        "previous",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          workDir,
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "mode", Category: "mode", Type: "select", CurrentValue: "plan"},
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.6"},
+		},
+	}
+	if err := store.Upsert(previous); err != nil {
+		t.Fatalf("Upsert(previous) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-session-new"},
+		noDefaultState: true,
+	}
+	rt.afterNewSession = func(key SessionKey, sessionID string) {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			rt.dispatchUpdate(key, sessionID, acp.SessionUpdate{
+				SessionUpdate: "config_option_update",
+				ConfigOptions: []acp.SessionConfigOption{
+					{
+						ID:           "mode",
+						Category:     "mode",
+						Type:         "select",
+						CurrentValue: "default",
+						Options: []acp.SessionConfigOptionValue{
+							{Value: "default", Name: "Default"},
+							{Value: "plan", Name: "Plan"},
+						},
+					},
+					{
+						ID:           "model",
+						Category:     "model",
+						Type:         "select",
+						CurrentValue: "gpt-5.5",
+						Options: []acp.SessionConfigOptionValue{
+							{Value: "gpt-5.5", Name: "GPT-5.5"},
+							{Value: "gpt-5.6", Name: "GPT-5.6"},
+						},
+					},
+				},
+			})
+		}()
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     previous.Key.BotID,
+		ChatID:    previous.Key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	for _, want := range []string{"mode：plan", "model：gpt-5.6"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	if len(rt.configCalls) != 2 ||
+		rt.configCalls[0].ConfigID != "mode" || rt.configCalls[0].Value != "plan" ||
+		rt.configCalls[1].ConfigID != "model" || rt.configCalls[1].Value != "gpt-5.6" {
+		t.Fatalf("configCalls = %+v, want inheritance after async options", rt.configCalls)
+	}
+}
+
+func TestHandleFeishuNewSessionDoesNotInheritModeAndModelForDifferentAgent(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	previous := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Title:        "previous",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-old",
+		Cwd:          workDir,
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "mode", Category: "mode", Type: "select", CurrentValue: "plan"},
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.6"},
+		},
+	}
+	if err := store.Upsert(previous); err != nil {
+		t.Fatalf("Upsert(previous) error = %v", err)
+	}
+	if err := store.UpsertChat(ChatConfig{
+		Key:       ChatKey{BotID: previous.Key.BotID, ChatID: previous.Key.ChatID},
+		AgentName: "hermes",
+	}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	cfg := config.Default()
+	cfg.AgentList = append(cfg.AgentList, config.NamedAgentConfig{
+		Name: "hermes",
+		AgentConfig: config.AgentConfig{
+			Command:    "hermes",
+			DefaultCwd: workDir,
+		},
+	})
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-session-new",
+			ConfigOptions: []acp.SessionConfigOption{
+				{ID: "mode", Category: "mode", Type: "select", CurrentValue: "default"},
+				{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+			},
+		},
+	}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     previous.Key.BotID,
+		ChatID:    previous.Key.ChatID,
+		ChatType:  "p2p",
+		MessageID: "om_new",
+		Text:      "/new",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	}
+	for _, want := range []string{"mode：default", "model：gpt-5.5"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	if len(rt.configCalls) != 0 {
+		t.Fatalf("configCalls = %+v, want no inherited config for different agent", rt.configCalls)
+	}
+	session, ok := store.Get(previous.Key)
+	if !ok {
+		t.Fatalf("new session not found")
+	}
+	if session.AgentName != "hermes" {
+		t.Fatalf("session agent = %q, want hermes", session.AgentName)
+	}
+	if currentModeDisplay(session) != "default" || currentModelDisplay(session) != "gpt-5.5" {
+		t.Fatalf("session config = %+v, want new agent defaults", session.ConfigOptions)
 	}
 }
 
@@ -8414,6 +8774,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		},
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
+		blockCancel:   make(chan struct{}),
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
@@ -8457,22 +8818,50 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
 	secondCtx := logging.CtxAddAttr(ctx, slog.String("message_id", "om_second"))
-	reply, err := handleFeishuMessage(t, svc, secondCtx, feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_second",
-		ChatID:    "oc_chat",
-		ChatType:  "topic_group",
-		ThreadID:  "omt_thread",
-		Mentions:  testBotMentions(),
-		Text:      "改成做这个",
-	})
-	if err != nil {
-		t.Fatalf("HandleFeishuMessage(second) error = %v", err)
-	}
-	if reply != "" && reply != "ACP 回复" {
-		t.Fatalf("reply = %q, want empty streamed reply or final text", reply)
-	}
+	secondDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, secondCtx, feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_second",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "改成做这个",
+		})
+		secondDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
 	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want replacement prompt to wait for runtime cancel", got)
+	}
+	select {
+	case got := <-secondDone:
+		t.Fatalf("second prompt finished before runtime cancel returned: %+v", got)
+	default:
+	}
+	close(rt.blockCancel)
+	var secondResult struct {
+		reply string
+		err   error
+	}
+	select {
+	case secondResult = <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second prompt did not finish")
+	}
+	if secondResult.err != nil {
+		t.Fatalf("HandleFeishuMessage(second) error = %v", secondResult.err)
+	}
+	if secondResult.reply != "" && secondResult.reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want empty streamed reply or final text", secondResult.reply)
+	}
 	select {
 	case got := <-firstDone:
 		if got.err != nil {
@@ -8490,6 +8879,9 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	rt.mu.Lock()
 	if len(rt.cancelCalls) == 0 || rt.cancelCalls[0].Attrs["message_id"] != "om_second" {
 		t.Fatalf("cancel calls = %+v, want cancellation ctx from second message", rt.cancelCalls)
+	}
+	if len(rt.promptCalls) != 2 || len(rt.cancelCalls) != 1 || rt.cancelCalls[0].Seq > rt.promptCalls[1].Seq {
+		t.Fatalf("prompt/cancel calls = %+v / %+v, want runtime cancel before replacement prompt", rt.promptCalls, rt.cancelCalls)
 	}
 	rt.mu.Unlock()
 	if len(cards) == 0 {
@@ -9724,6 +10116,8 @@ type fakeRuntime struct {
 	promptCalls         []fakePromptCall
 	wikiRuntimeCalls    []fakePromptCall
 	cancelCalls         []fakeCancelCall
+	callSeq             int
+	blockCancel         chan struct{}
 	closedRuntimeKeys   []runtimeKey
 	closedKeys          []SessionKey
 	shutdownCancelCount int
@@ -9749,12 +10143,14 @@ type fakePromptCall struct {
 	Text                 string
 	HasUpdateHandler     bool
 	HasPermissionHandler bool
+	Seq                  int
 }
 
 type fakeCancelCall struct {
 	Runtime runtimeKey
 	Session Session
 	Attrs   map[string]string
+	Seq     int
 }
 
 type fakeConfigCall struct {
@@ -9868,6 +10264,7 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 		Text:                 text,
 		HasUpdateHandler:     opts.OnUpdate != nil,
 		HasPermissionHandler: opts.OnPermissionRequest != nil,
+		Seq:                  f.nextCallSeqLocked(),
 	}
 	if wiki {
 		f.wikiRuntimeCalls = append(f.wikiRuntimeCalls, call)
@@ -9932,9 +10329,22 @@ func (f *fakeRuntime) CancelSession(ctx context.Context, key runtimeKey, session
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Runtime: key, Session: session, Attrs: slogAttrsMap(logging.CtxAttrs(ctx))})
+	f.cancelCalls = append(f.cancelCalls, fakeCancelCall{Runtime: key, Session: session, Attrs: slogAttrsMap(logging.CtxAttrs(ctx)), Seq: f.nextCallSeqLocked()})
+	blockCancel := f.blockCancel
+	f.mu.Unlock()
+	if blockCancel != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-blockCancel:
+		}
+	}
 	return nil
+}
+
+func (f *fakeRuntime) nextCallSeqLocked() int {
+	f.callSeq++
+	return f.callSeq
 }
 
 func (f *fakeRuntime) SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error) {
@@ -9945,15 +10355,21 @@ func (f *fakeRuntime) SetConfigOption(ctx context.Context, session Session, agen
 	if len(f.configOptions) > 0 {
 		return append([]acp.SessionConfigOption(nil), f.configOptions...), nil
 	}
-	return []acp.SessionConfigOption{
-		{
-			ID:           configID,
-			Name:         configID,
-			Category:     configID,
-			Type:         "select",
-			CurrentValue: value,
-		},
-	}, nil
+	options := append([]acp.SessionConfigOption(nil), session.ConfigOptions...)
+	for i := range options {
+		opt := options[i]
+		if opt.ID == configID || strings.EqualFold(opt.ID, configID) || opt.Category == configID || strings.EqualFold(opt.Category, configID) {
+			options[i].CurrentValue = value
+			return options, nil
+		}
+	}
+	return append(options, acp.SessionConfigOption{
+		ID:           configID,
+		Name:         configID,
+		Category:     configID,
+		Type:         "select",
+		CurrentValue: value,
+	}), nil
 }
 
 func (f *fakeRuntime) SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error {

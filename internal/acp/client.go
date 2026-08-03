@@ -20,6 +20,8 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
+var ErrServerOutputClosed = errors.New("ACP server 输出已关闭")
+
 type Client struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
@@ -982,7 +984,7 @@ func (c *Client) readLoop(stdout io.Reader) {
 	if err == nil {
 		err = io.EOF
 	}
-	c.failPending(fmt.Errorf("ACP server 输出已关闭: %w", err))
+	c.failPending(fmt.Errorf("%w: %w", ErrServerOutputClosed, err))
 }
 
 func (c *Client) handleMessage(msg Message) {

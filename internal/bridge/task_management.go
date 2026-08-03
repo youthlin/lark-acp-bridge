@@ -86,7 +86,7 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 		return ctx, func() {}, errSessionTaskBusy
 	}
 	if previous != nil && !opts.queuedContinuation {
-		s.cancelTask(ctx, previous, false)
+		s.cancelTask(ctx, previous, true)
 	}
 
 	return ctx, func() {

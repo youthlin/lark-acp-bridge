@@ -53,6 +53,8 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if errText != "" {
 		return Session{}, config.AgentConfig{}, "", errText
 	}
+	previous, hasPrevious := s.findSession(msg)
+	inheritConfig := inheritedSessionConfigForNewSession(previous, hasPrevious, plan.AgentName)
 	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
@@ -71,6 +73,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
 		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
 	}
+	session = s.inheritNewSessionConfig(ctx, msg, session, inheritConfig)
 	s.afterSessionCommitted(transition, session)
 	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", plan.AgentName, "cwd", plan.Cwd)
 	return session, plan.Agent, plan.Source, ""
@@ -153,6 +156,55 @@ func commitNewSessionCandidate(candidate acpSessionCandidate, store *SessionStor
 	return candidate.Commit(func() error {
 		return store.Upsert(*session)
 	})
+}
+
+type inheritedSessionConfig struct {
+	Mode  string
+	Model string
+}
+
+func inheritedSessionConfigForNewSession(previous Session, ok bool, agentName string) inheritedSessionConfig {
+	if !ok || strings.TrimSpace(previous.AgentName) != strings.TrimSpace(agentName) {
+		return inheritedSessionConfig{}
+	}
+	return inheritedSessionConfig{
+		Mode:  strings.TrimSpace(currentModeDisplay(previous)),
+		Model: strings.TrimSpace(currentModelDisplay(previous)),
+	}
+}
+
+func (c inheritedSessionConfig) empty() bool {
+	return c.Mode == "" && c.Model == ""
+}
+
+func (s *Service) inheritNewSessionConfig(ctx context.Context, msg feishu.Message, session Session, inherited inheritedSessionConfig) Session {
+	if inherited.empty() {
+		return session
+	}
+	session = s.waitForNewSessionState(ctx, msg, session.Key, session)
+	return s.applyInheritedSessionConfig(ctx, msg, session, inherited)
+}
+
+func (s *Service) applyInheritedSessionConfig(ctx context.Context, msg feishu.Message, session Session, inherited inheritedSessionConfig) Session {
+	if inherited.empty() {
+		return session
+	}
+	store := s.storeForMessage(msg)
+	if inherited.Mode != "" {
+		if _, _, err := s.setSessionMode(ctx, msg, session, inherited.Mode); err != nil {
+			slog.WarnContext(ctx, "继承上次 ACP session mode 失败", "mode", inherited.Mode, "session", session.ACPSessionID, "错误", err)
+		} else {
+			session = latestSessionForKey(store, session.Key, session)
+		}
+	}
+	if inherited.Model != "" {
+		if _, _, err := s.setSessionModel(ctx, msg, session, inherited.Model); err != nil {
+			slog.WarnContext(ctx, "继承上次 ACP session model 失败", "model", inherited.Model, "session", session.ACPSessionID, "错误", err)
+		} else {
+			session = latestSessionForKey(store, session.Key, session)
+		}
+	}
+	return latestSessionForKey(store, session.Key, session)
 }
 
 func (s *Service) afterSessionCommitted(transition sessionTransition, session Session) {

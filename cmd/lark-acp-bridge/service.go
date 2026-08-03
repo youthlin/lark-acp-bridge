@@ -103,6 +103,7 @@ func installService(options serviceInstallOptions) error {
 		return err
 	}
 	servicePath := servicePathForInstall(goos, options.Path)
+	goCache := serviceGoCacheForInstall()
 	target, err := serviceTargetPath(goos)
 	if err != nil {
 		return err
@@ -111,10 +112,10 @@ func installService(options serviceInstallOptions) error {
 	var result serviceInstallResult
 	switch goos {
 	case "linux":
-		content = renderSystemdUserService(binaryPath, configPath, workingDir, servicePath)
+		content = renderSystemdUserService(binaryPath, configPath, workingDir, servicePath, goCache)
 		result.RestartCommand = systemdRestartCommand()
 	case "darwin":
-		content = renderLaunchdAgent(binaryPath, configPath, workingDir, serviceLogFile(configPath), servicePath)
+		content = renderLaunchdAgent(binaryPath, configPath, workingDir, serviceLogFile(configPath), servicePath, goCache)
 		result.RestartCommand = launchdRestartCommand(os.Getuid())
 	default:
 		return unsupportedServicePlatform(goos)
@@ -313,11 +314,22 @@ func defaultServicePath(goos string) string {
 	}
 }
 
-func renderSystemdUserService(binaryPath, configPath, workingDir, servicePath string) string {
+func serviceGoCacheForInstall() string {
+	return serviceGoCacheForUID(os.Getuid())
+}
+
+func serviceGoCacheForUID(uid int) string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("lark-acp-bridge-%d", uid), "go-build")
+}
+
+func renderSystemdUserService(binaryPath, configPath, workingDir, servicePath, goCache string) string {
 	execStart := systemdCommand([]string{binaryPath, "--config", configPath, "run"})
-	var environment string
+	var environment strings.Builder
 	if strings.TrimSpace(servicePath) != "" {
-		environment = fmt.Sprintf("Environment=%s\n", systemdQuote("PATH="+servicePath))
+		fmt.Fprintf(&environment, "Environment=%s\n", systemdQuote("PATH="+servicePath))
+	}
+	if strings.TrimSpace(goCache) != "" {
+		fmt.Fprintf(&environment, "Environment=%s\n", systemdQuote("GOCACHE="+goCache))
 	}
 	return fmt.Sprintf(`[Unit]
 Description=Lark ACP Bridge
@@ -332,7 +344,7 @@ RestartSec=5s
 
 [Install]
 WantedBy=default.target
-`, systemdQuote(workingDir), environment, execStart)
+`, systemdQuote(workingDir), environment.String(), execStart)
 }
 
 func systemdCommand(args []string) string {
@@ -376,7 +388,7 @@ func systemdQuote(value string) string {
 	return b.String()
 }
 
-func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath, servicePath string) string {
+func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath, servicePath, goCache string) string {
 	args := []string{binaryPath, "--config", configPath, "run"}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
@@ -401,14 +413,25 @@ func renderLaunchdAgent(binaryPath, configPath, workingDir, logPath, servicePath
 	b.WriteString(xmlText(workingDir))
 	b.WriteString(`</string>
 `)
-	if strings.TrimSpace(servicePath) != "" {
+	if strings.TrimSpace(servicePath) != "" || strings.TrimSpace(goCache) != "" {
 		b.WriteString(`  <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
+`)
+		if strings.TrimSpace(servicePath) != "" {
+			b.WriteString(`    <key>PATH</key>
     <string>`)
-		b.WriteString(xmlText(servicePath))
-		b.WriteString(`</string>
-  </dict>
+			b.WriteString(xmlText(servicePath))
+			b.WriteString(`</string>
+`)
+		}
+		if strings.TrimSpace(goCache) != "" {
+			b.WriteString(`    <key>GOCACHE</key>
+    <string>`)
+			b.WriteString(xmlText(goCache))
+			b.WriteString(`</string>
+`)
+		}
+		b.WriteString(`  </dict>
 `)
 	}
 	b.WriteString(`  <key>RunAtLoad</key>
