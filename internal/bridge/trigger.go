@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
@@ -338,8 +339,8 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 					_ = req.Sink.OnUpdate(taskCtx, newTriggerUpdateResult(req, session, update))
 				}
 			},
-			OnPermissionRequest: func(_ context.Context, permission acp.PermissionRequest) (acp.PermissionOutcome, error) {
-				return defaultTriggerPermissionOutcome(taskCtx, session, permission), nil
+			OnPermissionRequest: func(permCtx context.Context, permission acp.PermissionRequest) (acp.PermissionOutcome, error) {
+				return s.requestTriggerPermission(permCtx, req, session, permission), nil
 			},
 		})
 		return result, false, err
@@ -353,16 +354,91 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	return result, err
 }
 
-func defaultTriggerPermissionOutcome(ctx context.Context, session Session, req acp.PermissionRequest) acp.PermissionOutcome {
-	outcome := defaultPermissionOutcome(req)
-	slog.WarnContext(ctx, "trigger 权限请求已按默认策略拒绝",
+// triggerPermissionTimeout 限制非 IM source 等待 owner 审批的最长时间，避免 cron/评论 run 永久挂起。
+const triggerPermissionTimeout = 10 * time.Minute
+
+// requestTriggerPermission 向 bot owner 发送私聊权限卡片并等待审批。
+// 没有配置 owner、出站不支持私聊发卡、发送失败或超时时，统一按默认策略拒绝（不放行）。
+func (s *Service) requestTriggerPermission(ctx context.Context, req TriggerRequest, session Session, permission acp.PermissionRequest) acp.PermissionOutcome {
+	requester, ok := s.outboundForBot(req.BotID).(triggerPermissionRequester)
+	if !ok || requester == nil {
+		slog.WarnContext(ctx, "trigger 权限请求无法发送：出站不支持私聊权限卡片，已拒绝",
+			triggerPermissionLogArgs(req, session, permission)...)
+		return defaultPermissionOutcome(permission)
+	}
+	owners := s.ownerOpenIDs(req.BotID)
+	if len(owners) == 0 {
+		slog.WarnContext(ctx, "trigger 权限请求无法发送：未配置 bot owner，已拒绝",
+			triggerPermissionLogArgs(req, session, permission)...)
+		return defaultPermissionOutcome(permission)
+	}
+	source := triggerPermissionSourceLabel(req)
+	waitCtx, cancel := context.WithTimeout(ctx, triggerPermissionTimeout)
+	defer cancel()
+	for _, ownerID := range owners {
+		ownerID = strings.TrimSpace(ownerID)
+		if ownerID == "" {
+			continue
+		}
+		outcome, err := requester.RequestPermissionForOpenID(waitCtx, ownerID, source, permission)
+		if err != nil {
+			slog.WarnContext(ctx, "trigger 权限卡片发送失败，已拒绝",
+				append(triggerPermissionLogArgs(req, session, permission), "owner", ownerID, "err", err)...)
+			return defaultPermissionOutcome(permission)
+		}
+		if outcome.Outcome == "cancelled" {
+			continue // 该 owner 超时或取消，尝试下一个
+		}
+		return outcome
+	}
+	slog.WarnContext(ctx, "trigger 权限请求未获审批（无 owner 响应或全部超时），已拒绝",
+		triggerPermissionLogArgs(req, session, permission)...)
+	return defaultPermissionOutcome(permission)
+}
+
+func triggerPermissionLogArgs(req TriggerRequest, session Session, permission acp.PermissionRequest) []any {
+	return []any{
+		"source", req.Key.Source,
+		"main_id", req.Key.MainID,
+		"sub_id", req.Key.SubID,
 		"session", session.ACPSessionID,
-		"tool_call_id", strings.TrimSpace(req.ToolCall.ToolCallID),
-		"tool_title", strings.TrimSpace(req.ToolCall.Title),
-		"outcome", outcome.Outcome,
-		"option_id", outcome.OptionID,
-	)
-	return outcome
+		"tool_call_id", strings.TrimSpace(permission.ToolCall.ToolCallID),
+		"tool_title", strings.TrimSpace(permission.ToolCall.Title),
+	}
+}
+
+// triggerPermissionSourceLabel 生成权限卡片上展示的来源说明。
+func triggerPermissionSourceLabel(req TriggerRequest) string {
+	switch req.Key.Source {
+	case sessionSourceSchedule:
+		taskID := strings.TrimSpace(req.Metadata["task_id"])
+		runID := strings.TrimSpace(req.Metadata["run_id"])
+		label := "定时任务"
+		if taskID != "" {
+			label += " " + taskID
+		}
+		if runID != "" {
+			label += "（run " + runID + "）"
+		}
+		return label
+	case sessionSourceDriveComment:
+		fileType := strings.TrimSpace(req.Metadata["file_type"])
+		fileToken := strings.TrimSpace(req.Metadata["file_token"])
+		commentID := strings.TrimSpace(req.Metadata["comment_id"])
+		label := "云文档评论"
+		if fileType != "" || fileToken != "" {
+			label += " " + fileType + ":" + fileToken
+		}
+		if commentID != "" {
+			label += "#" + commentID
+		}
+		return label
+	default:
+		if req.Key.Source != "" {
+			return req.Key.Source
+		}
+		return req.Title
+	}
 }
 
 type triggerTextAccumulator struct {

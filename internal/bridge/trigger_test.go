@@ -794,8 +794,8 @@ func TestRunTriggerPromptUsesDefaultPermissionOutcome(t *testing.T) {
 		t.Fatalf("permission outcome = %+v, want reject option selected", rt.permissionOutcome)
 	}
 	logText := logs.String()
-	if !strings.Contains(logText, "trigger 权限请求已按默认策略拒绝") || !strings.Contains(logText, "tool_call_id=tool-1") || !strings.Contains(logText, "option_id=reject") {
-		t.Fatalf("logs = %q, want default permission rejection details", logText)
+	if !strings.Contains(logText, "trigger 权限请求无法发送：出站不支持私聊权限卡片，已拒绝") || !strings.Contains(logText, "tool_call_id=tool-1") {
+		t.Fatalf("logs = %q, want trigger permission rejection details", logText)
 	}
 
 	rt.permissionOutcome = acp.PermissionOutcome{}
@@ -904,4 +904,133 @@ func (s *recordingTriggerSink) OnComplete(_ context.Context, result TriggerResul
 func (s *recordingTriggerSink) OnError(context.Context, TriggerResult) error {
 	s.errors++
 	return nil
+}
+
+// fakeTriggerPermissionOutbound 实现 triggerPermissionRequester，记录发卡请求并返回预设结果。
+type fakeTriggerPermissionOutbound struct {
+	targetOpenIDs []string
+	sources       []string
+	outcomes      []acp.PermissionOutcome
+	err           error
+	call          int
+}
+
+func (*fakeTriggerPermissionOutbound) Outbound() {}
+
+func (f *fakeTriggerPermissionOutbound) RequestPermissionForOpenID(_ context.Context, targetOpenID string, source string, _ acp.PermissionRequest) (acp.PermissionOutcome, error) {
+	f.targetOpenIDs = append(f.targetOpenIDs, targetOpenID)
+	f.sources = append(f.sources, source)
+	if f.err != nil {
+		return acp.PermissionOutcome{}, f.err
+	}
+	idx := f.call
+	f.call++
+	if idx < len(f.outcomes) {
+		return f.outcomes[idx], nil
+	}
+	return acp.PermissionOutcome{Outcome: "cancelled"}, nil
+}
+
+func newTriggerPermissionService(t *testing.T, key SessionKey, rt *fakeRuntime, owners []string) *Service {
+	t.Helper()
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-existing", Cwd: "/repo"}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	bot := config.BotConfig{ID: "bot-a"}
+	bot.OwnerOpenIDs = owners
+	svc := NewService(config.Config{
+		Bots:      []config.BotConfig{bot},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	svc.setRuntime(rt)
+	return svc
+}
+
+func TestRunTriggerPromptSendsPermissionCardToOwnerAndAllows(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
+	rt := &fakeRuntime{
+		promptReply: "done",
+		permissionRequest: &acp.PermissionRequest{
+			ToolCall: acp.PermissionToolCallRef{ToolCallID: "tool-1", Title: "write file"},
+			Options:  []acp.PermissionOption{{OptionID: "approve", Kind: "allow_once"}},
+		},
+	}
+	svc := newTriggerPermissionService(t, key, rt, []string{"ou_owner"})
+	out := &fakeTriggerPermissionOutbound{outcomes: []acp.PermissionOutcome{{Outcome: "selected", OptionID: "approve"}}}
+	svc.setOutbound("bot-a", out)
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID: "bot-a", Key: key, Workspace: t.TempDir(), AgentName: "traex",
+		Cwd: t.TempDir(), Prompt: "run",
+		Metadata: map[string]string{"task_id": "daily", "run_id": "run:1"},
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if len(out.targetOpenIDs) != 1 || out.targetOpenIDs[0] != "ou_owner" {
+		t.Fatalf("targetOpenIDs = %v, want [ou_owner]", out.targetOpenIDs)
+	}
+	if rt.permissionOutcome.Outcome != "selected" || rt.permissionOutcome.OptionID != "approve" {
+		t.Fatalf("permission outcome = %+v, want approve", rt.permissionOutcome)
+	}
+	if len(out.sources) != 1 || !strings.Contains(out.sources[0], "定时任务") || !strings.Contains(out.sources[0], "daily") {
+		t.Fatalf("source label = %q, want schedule label containing 定时任务/daily", out.sources[0])
+	}
+}
+
+func TestRunTriggerPromptOwnerRejectFallsThrough(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+	rt := &fakeRuntime{
+		promptReply: "done",
+		permissionRequest: &acp.PermissionRequest{
+			ToolCall: acp.PermissionToolCallRef{ToolCallID: "tool-1", Title: "write file"},
+			Options:  []acp.PermissionOption{{OptionID: "reject", Kind: "reject_once"}},
+		},
+	}
+	svc := newTriggerPermissionService(t, key, rt, []string{"ou_owner"})
+	out := &fakeTriggerPermissionOutbound{outcomes: []acp.PermissionOutcome{{Outcome: "selected", OptionID: "reject"}}}
+	svc.setOutbound("bot-a", out)
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID: "bot-a", Key: key, Workspace: t.TempDir(), AgentName: "traex",
+		Cwd: t.TempDir(), Prompt: "run",
+		Metadata: map[string]string{"file_type": "docx", "file_token": "token", "comment_id": "comment-1"},
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if rt.permissionOutcome.OptionID != "reject" {
+		t.Fatalf("permission outcome = %+v, want reject", rt.permissionOutcome)
+	}
+	if len(out.sources) != 1 || !strings.Contains(out.sources[0], "云文档评论") {
+		t.Fatalf("source label = %q, want drive_comment label", out.sources[0])
+	}
+}
+
+func TestRunTriggerPermissionWithoutOwnerRejects(t *testing.T) {
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
+	rt := &fakeRuntime{
+		promptReply: "done",
+		permissionRequest: &acp.PermissionRequest{
+			Options: []acp.PermissionOption{{OptionID: "reject", Kind: "reject_once"}},
+		},
+	}
+	svc := newTriggerPermissionService(t, key, rt, nil)
+	out := &fakeTriggerPermissionOutbound{}
+	svc.setOutbound("bot-a", out)
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID: "bot-a", Key: key, Workspace: t.TempDir(), AgentName: "traex",
+		Cwd: t.TempDir(), Prompt: "run",
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if len(out.targetOpenIDs) != 0 {
+		t.Fatalf("targetOpenIDs = %v, want no card sent without owner", out.targetOpenIDs)
+	}
+	if rt.permissionOutcome.OptionID != "reject" {
+		t.Fatalf("permission outcome = %+v, want default reject", rt.permissionOutcome)
+	}
 }

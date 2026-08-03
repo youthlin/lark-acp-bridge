@@ -531,7 +531,7 @@ func TestNewPermissionCardJSONShowsToolAndOptions(t *testing.T) {
 		},
 	}
 	var card any
-	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "", "")), &card); err != nil {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
@@ -575,7 +575,7 @@ func TestNewPermissionCardJSONUsesToolCallTitleWithoutSnapshot(t *testing.T) {
 		},
 	}
 	var card any
-	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "", "")), &card); err != nil {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
@@ -614,7 +614,7 @@ func TestNewPermissionCardJSONMergesPartialSnapshotWithRequestToolCall(t *testin
 		},
 	}
 	var card any
-	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "", "")), &card); err != nil {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
@@ -646,7 +646,7 @@ func TestNewPermissionCardJSONShowsAgentOptionsWithShortButtons(t *testing.T) {
 		},
 	}
 	var card any
-	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "")), &card); err != nil {
+	if err := json.Unmarshal([]byte(newPermissionCardJSON("perm-1", req, "", "")), &card); err != nil {
 		t.Fatalf("newPermissionCardJSON() is not valid JSON: %v", err)
 	}
 
@@ -1035,7 +1035,7 @@ func TestNewPermissionCardCancelledJSONHidesButtons(t *testing.T) {
 		},
 	}
 	var card any
-	if err := json.Unmarshal([]byte(newPermissionCardCancelledJSON("perm-1", req)), &card); err != nil {
+	if err := json.Unmarshal([]byte(newPermissionCardCancelledJSON("perm-1", req, "")), &card); err != nil {
 		t.Fatalf("newPermissionCardCancelledJSON() is not valid JSON: %v", err)
 	}
 	for _, want := range []string{"权限请求已取消", "Run tests"} {

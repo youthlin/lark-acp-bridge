@@ -38,6 +38,10 @@ type permissionRequester interface {
 	RequestPermission(context.Context, feishu.Message, acp.PermissionRequest) (acp.PermissionOutcome, error)
 }
 
+// triggerPermissionRequester 向指定 open_id（bot owner）发送私聊权限卡片。
+type triggerPermissionRequester interface {
+	RequestPermissionForOpenID(ctx context.Context, targetOpenID string, source string, req acp.PermissionRequest) (acp.PermissionOutcome, error)
+}
 type processingReactionStarter interface {
 	StartProcessingReaction(context.Context, feishu.Message) func()
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
@@ -32,6 +33,7 @@ type permissionCardEntry struct {
 	waiter       *permissionCardWaiter
 	request      acp.PermissionRequest
 	cardID       string
+	source       string
 	ownerOpenIDs []string
 }
 
@@ -81,6 +83,22 @@ func (r *permissionCardRegistry) remove(id string) {
 }
 
 func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+	return a.requestPermission(ctx, req, "", func(cardID string) error {
+		_, err := a.sendInteractiveCard(ctx, msg, cardID, "权限")
+		return err
+	})
+}
+
+// RequestPermissionForOpenID 给指定 open_id（通常是 bot owner）发送私聊权限卡片并等待审批。
+// 复用同一个 permissionCardRegistry，因此卡片回调按 requestID 路由，操作人仍必须是 owner。
+// source 为空时不展示来源说明。
+func (a *Adapter) RequestPermissionForOpenID(ctx context.Context, targetOpenID string, source string, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+	return a.requestPermission(ctx, req, source, func(cardID string) error {
+		return a.sendInteractiveCardToOpenID(ctx, targetOpenID, cardID, "权限")
+	})
+}
+
+func (a *Adapter) requestPermission(ctx context.Context, req acp.PermissionRequest, source string, send func(cardID string) error) (acp.PermissionOutcome, error) {
 	if a.client == nil {
 		return acp.PermissionOutcome{}, fmt.Errorf("飞书客户端未初始化")
 	}
@@ -88,7 +106,7 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 	if requestID == "" {
 		return acp.PermissionOutcome{Outcome: "cancelled"}, nil
 	}
-	cardID, err := a.createCardJSON(ctx, newPermissionCardJSON(requestID, req, ""), "权限")
+	cardID, err := a.createCardJSON(ctx, newPermissionCardJSON(requestID, req, source, ""), "权限")
 	if err != nil {
 		return acp.PermissionOutcome{}, err
 	}
@@ -97,10 +115,11 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 		waiter:       waiter,
 		request:      req,
 		cardID:       cardID,
+		source:       strings.TrimSpace(source),
 		ownerOpenIDs: a.cfg.OwnerOpenIDs,
 	})
 	defer a.permissionCards.remove(requestID)
-	if _, err := a.sendInteractiveCard(ctx, msg, cardID, "权限"); err != nil {
+	if err := send(cardID); err != nil {
 		return acp.PermissionOutcome{}, err
 	}
 	select {
@@ -114,6 +133,35 @@ func (a *Adapter) RequestPermission(ctx context.Context, msg Message, req acp.Pe
 	}
 }
 
+func (a *Adapter) sendInteractiveCardToOpenID(ctx context.Context, targetOpenID string, cardID string, name string) error {
+	displayName := cardNameForError(name)
+	content, err := json.Marshal(map[string]any{
+		"type": "card",
+		"data": map[string]string{"card_id": cardID},
+	})
+	if err != nil {
+		return fmt.Errorf("编码飞书%s卡片消息内容: %w", displayName, err)
+	}
+	if strings.TrimSpace(targetOpenID) == "" {
+		return fmt.Errorf("发送飞书%s卡片消息: open_id 为空", displayName)
+	}
+	resp, err := a.client.Im.V1.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeOpenId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(targetOpenID).
+			MsgType("interactive").
+			Content(string(content)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("发送飞书%s卡片消息: %w", displayName, err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("发送飞书%s卡片消息返回错误: code=%d msg=%s", displayName, resp.Code, resp.Msg)
+	}
+	return nil
+}
+
 func (a *Adapter) markPermissionCardCancelled(requestID string, entry permissionCardEntry) {
 	cardID := strings.TrimSpace(entry.cardID)
 	if a == nil || a.client == nil || cardID == "" {
@@ -121,7 +169,7 @@ func (a *Adapter) markPermissionCardCancelled(requestID string, entry permission
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := a.updatePermissionCard(ctx, cardID, newPermissionCardCancelledJSON(requestID, entry.request)); err != nil {
+	if err := a.updatePermissionCard(ctx, cardID, newPermissionCardCancelledJSON(requestID, entry.request, entry.source)); err != nil {
 		slog.Warn("更新飞书权限卡片取消状态失败", "request_id", requestID, "card_id", cardID, "err", err)
 	}
 }
@@ -183,7 +231,7 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActi
 		Toast: &callback.Toast{Type: "success", Content: "已提交选择"},
 		Card: &callback.Card{
 			Type: "raw",
-			Data: newPermissionCardData(requestID, entry.request, selectedOption),
+			Data: newPermissionCardData(requestID, entry.request, entry.source, selectedOption),
 		},
 	}, nil
 }
@@ -242,13 +290,13 @@ func permissionCardToast(kind, content string) *callback.CardActionTriggerRespon
 	}
 }
 
-func newPermissionCardJSON(requestID string, req acp.PermissionRequest, selectedOptionID string) string {
-	data, _ := json.Marshal(newPermissionCardData(requestID, req, selectedOptionID))
+func newPermissionCardJSON(requestID string, req acp.PermissionRequest, source string, selectedOptionID string) string {
+	data, _ := json.Marshal(newPermissionCardData(requestID, req, source, selectedOptionID))
 	return string(data)
 }
 
-func newPermissionCardCancelledJSON(requestID string, req acp.PermissionRequest) string {
-	data, _ := json.Marshal(newPermissionCardDataWithState(requestID, req, permissionCardRenderState{cancelled: true}))
+func newPermissionCardCancelledJSON(requestID string, req acp.PermissionRequest, source string) string {
+	data, _ := json.Marshal(newPermissionCardDataWithState(requestID, req, source, permissionCardRenderState{cancelled: true}))
 	return string(data)
 }
 
@@ -257,11 +305,11 @@ type permissionCardRenderState struct {
 	cancelled      bool
 }
 
-func newPermissionCardData(requestID string, req acp.PermissionRequest, selectedOptionID string) cardJSON {
-	return newPermissionCardDataWithState(requestID, req, permissionCardRenderState{selectedOption: selectedOptionID})
+func newPermissionCardData(requestID string, req acp.PermissionRequest, source string, selectedOptionID string) cardJSON {
+	return newPermissionCardDataWithState(requestID, req, source, permissionCardRenderState{selectedOption: selectedOptionID})
 }
 
-func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest, state permissionCardRenderState) cardJSON {
+func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest, source string, state permissionCardRenderState) cardJSON {
 	title := "需要确认权限"
 	if state.cancelled {
 		title = "权限请求已取消"
@@ -280,16 +328,19 @@ func newPermissionCardDataWithState(requestID string, req acp.PermissionRequest,
 			"title": cardJSON{"tag": "plain_text", "content": title},
 		},
 		"body": cardJSON{
-			"elements": permissionCardElements(requestID, req, state),
+			"elements": permissionCardElements(requestID, req, source, state),
 		},
 	}
 }
 
-func permissionCardElements(requestID string, req acp.PermissionRequest, state permissionCardRenderState) []any {
+func permissionCardElements(requestID string, req acp.PermissionRequest, source string, state permissionCardRenderState) []any {
 	title := permissionToolDisplayName(req)
 	lines := []string{"**工具调用**：" + markdownInline(title)}
 	if kind := permissionToolKind(req); kind != "" {
 		lines = append(lines, "**类型**：`"+markdownInline(kind)+"`")
+	}
+	if source = strings.TrimSpace(source); source != "" {
+		lines = append(lines, "**来源**："+markdownInline(source))
 	}
 	lines = appendJSONDetail(lines, "位置", permissionToolLocations(req))
 	elements := []any{
