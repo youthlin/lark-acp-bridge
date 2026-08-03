@@ -34,14 +34,6 @@ func (h *countingHandler) HandleFeishuMessage(ctx context.Context, msg Message) 
 	return "", nil
 }
 
-type replyingHandler struct {
-	reply string
-}
-
-func (h replyingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (string, error) {
-	return h.reply, nil
-}
-
 type reactionStartingHandler struct{}
 
 func (h reactionStartingHandler) HandleFeishuMessage(ctx context.Context, msg Message) (string, error) {

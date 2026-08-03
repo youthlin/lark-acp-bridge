@@ -82,6 +82,7 @@ go run ./cmd/lark-acp-bridge --help
 go run ./cmd/lark-acp-bridge bots list
 go run ./cmd/lark-acp-bridge bots register default
 go run ./cmd/lark-acp-bridge bots add default cli_xxx --stdin-secret
+go run ./cmd/lark-acp-bridge bots create-lark-cli-profile default
 go run ./cmd/lark-acp-bridge bots remove default
 
 # 安装/卸载系统服务（systemd 或 launchd）

@@ -65,10 +65,9 @@ func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T)
 		"lark-cli",
 		"https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md",
 		"lark-acp-default",
-		"config.json",
-		"app_id",
+		"lark-acp-bridge bots create-lark-cli-profile default",
 		"app_secret",
-		"stdin",
+		"不要手动读取或解密",
 		"不要写入提示词、回复、日志或命令行参数",
 	} {
 		if !strings.Contains(tools, want) {

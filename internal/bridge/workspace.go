@@ -75,20 +75,6 @@ func ensureWorkspaceRoot(path string) error {
 	return nil
 }
 
-func workspaceGuide(status WorkspaceStatus) string {
-	lines := []string{
-		"已准备 workspace：" + status.Path,
-	}
-	if len(status.CreatedFiles) > 0 {
-		lines = append(lines, "已创建基础文件："+strings.Join(status.CreatedFiles, "、"))
-	}
-	lines = append(lines,
-		"发送普通文本或 /new [cwd] 会创建 ACP 会话。",
-		"如果 workspace 中存在 Bootstrap.md，后续普通消息会把它作为工作区上下文注入给 ACP agent。",
-	)
-	return strings.Join(lines, "\n")
-}
-
 func workspaceHasManagedFiles(path string) (bool, error) {
 	for _, file := range workspaceFiles("") {
 		_, err := os.Stat(filepath.Join(path, file.name))
@@ -219,7 +205,7 @@ func workspaceFiles(botID string) []struct {
 
 - 如果当前环境没有安装 lark-cli，按飞书 CLI 安装指南安装：https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md
 - 需要调用 lark-cli 时，优先使用当前对话智能体对应的 profile；当前 bot 建议使用 profile：` + profileName + `。
-- 如果不存在对应 profile，先查看 lark-cli 的帮助命令确认创建方式，再使用 config.json 中当前 bot 的 app_id 和 app_secret 创建该 profile，后续固定使用这个 profile。
+- 如果不存在对应 profile，运行 ` + "`lark-acp-bridge bots create-lark-cli-profile " + botID + "`" + ` 创建；如需自定义 profile 名称，使用 ` + "`--profile <name>`" + `。不要手动读取或解密 app_secret。
 - app_secret 属于敏感信息，不要写入提示词、回复、日志或命令行参数；需要传给 lark-cli 时，应使用 stdin 等不回显到命令文本的方式。
 `,
 		},

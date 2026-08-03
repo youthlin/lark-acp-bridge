@@ -1101,14 +1101,6 @@ func setMessagePrimaryImage(msg *Message) {
 	msg.LocalPath = msg.Images[0].LocalPath
 }
 
-func setReplyPrimaryImage(reply *ReplyContext) {
-	if reply == nil || len(reply.Images) == 0 {
-		return
-	}
-	reply.ImageKey = reply.Images[0].ImageKey
-	reply.LocalPath = reply.Images[0].LocalPath
-}
-
 func messageImageCachePath(workspace string, imageKey string) string {
 	return filepath.Join(workspace, "cache", safeImageCacheName(imageKey)+".png")
 }

@@ -253,10 +253,6 @@ func (s *promptCardStream) updatePromptResult(result acp.PromptResult) {
 	}
 }
 
-func (s *promptCardStream) finishPromptStatus(stopReason string) {
-	s.finishPromptStatusWithContext(s.ctx, stopReason)
-}
-
 func (s *promptCardStream) finishPromptStatusWithContext(ctx context.Context, stopReason string) {
 	if !s.showStatusBar {
 		return
@@ -276,10 +272,6 @@ func (s *promptCardStream) finishPromptStatusWithContext(ctx context.Context, st
 	if err := card.UpdateStatus(ctx, statusText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
 	}
-}
-
-func (s *promptCardStream) failPromptStatus() {
-	s.failPromptStatusWithContext(s.ctx)
 }
 
 func (s *promptCardStream) failPromptStatusWithContext(ctx context.Context) {
@@ -706,10 +698,6 @@ func (s *promptCardStream) queueProcessUpdateWithContext(ctx context.Context, ca
 	}
 }
 
-func (s *promptCardStream) flushPendingProcessUpdate() {
-	s.flushPendingProcessUpdateWithContext(s.ctx)
-}
-
 func (s *promptCardStream) flushPendingProcessUpdateWithContext(ctx context.Context) {
 	var (
 		card      feishu.StreamCard
@@ -771,10 +759,6 @@ func (s *promptCardStream) refreshPromptStatusWithContext(ctx context.Context, c
 	if err := card.UpdateStatus(ctx, statusText); err != nil {
 		slog.ErrorContext(ctx, "更新 ACP 流式卡片状态栏失败", "session", s.session.ACPSessionID, "错误", err)
 	}
-}
-
-func (s *promptCardStream) ensureCard() feishu.StreamCard {
-	return s.ensureCardWithContext(s.ctx)
 }
 
 func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.StreamCard {

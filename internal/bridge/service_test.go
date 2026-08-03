@@ -115,10 +115,6 @@ func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
 
 func (f *fakeSentMessageClient) Outbound() {}
 
-func (f *fakeSentMessageClient) send(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, error) {
-	return f.SendTextMessage(ctx, msg, text)
-}
-
 func (f *fakeSentMessageClient) SendText(ctx context.Context, msg feishu.Message, text string) error {
 	if f != nil && f.replySender != nil {
 		return f.replySender(ctx, msg, text)
@@ -145,20 +141,12 @@ func (f *fakeSentMessageClient) SendTextMessage(ctx context.Context, msg feishu.
 	}, nil
 }
 
-func (f *fakeSentMessageClient) update(ctx context.Context, messageID string, text string) error {
-	return f.UpdateText(ctx, messageID, text)
-}
-
 func (f *fakeSentMessageClient) UpdateText(ctx context.Context, messageID string, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.textUpdateIDs = append(f.textUpdateIDs, messageID)
 	f.textUpdates = append(f.textUpdates, text)
 	return nil
-}
-
-func (f *fakeSentMessageClient) sendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {
-	return f.SendLoopStatusCard(ctx, msg, request)
 }
 
 func (f *fakeSentMessageClient) SendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {
@@ -302,12 +290,6 @@ func (f *fakeSentMessageClient) finishesSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.finishes...)
-}
-
-func (f *fakeSentMessageClient) loopRequestsSnapshot() []feishu.LoopStatusCardRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]feishu.LoopStatusCardRequest(nil), f.loopRequests...)
 }
 
 func (f *fakeSentMessageClient) messagesSnapshot() []feishu.Message {

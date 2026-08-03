@@ -161,19 +161,6 @@ func toolStatusIcon(status toolProgressStatus) string {
 	}
 }
 
-func promptUpdateChunkText(update acp.PromptUpdate) string {
-	if update.Update.SessionUpdate != "agent_message_chunk" {
-		return ""
-	}
-	if update.Update.Title != "" {
-		return ""
-	}
-	if update.Update.Content == nil || update.Update.Content.Text == "" {
-		return ""
-	}
-	return update.Update.Content.Text
-}
-
 func promptUpdateChunk(update acp.PromptUpdate) (promptChunk, bool) {
 	u := update.Update
 	kind := promptUpdateKind(update)

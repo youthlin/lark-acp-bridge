@@ -106,13 +106,6 @@ func (a *promptChunkAccumulator) hasToolBoundary() bool {
 	return a.hasTool
 }
 
-func (a *promptChunkAccumulator) flush() {
-	a.mu.Lock()
-	flush := a.takeFlushLocked(false)
-	a.mu.Unlock()
-	a.applyFlush(flush)
-}
-
 func (a *promptChunkAccumulator) finishStream() {
 	a.mu.Lock()
 	a.stopTimerLocked()
@@ -124,12 +117,6 @@ func (a *promptChunkAccumulator) finishStream() {
 func (a *promptChunkAccumulator) close() {
 	a.finishStream()
 	a.flushing.Wait()
-}
-
-func (a *promptChunkAccumulator) replyText() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return strings.TrimSpace(a.reply.String())
 }
 
 func (a *promptChunkAccumulator) finalText() string {

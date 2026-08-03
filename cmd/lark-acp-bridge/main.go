@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"strings"
@@ -22,6 +24,7 @@ import (
 
 var version string
 var registerApp = registration.RegisterApp
+var runLarkCLIProfileAdd = defaultRunLarkCLIProfileAdd
 
 type botRegisterOptions struct {
 	ID           string
@@ -125,7 +128,7 @@ func runBotsCommand(configPath string, args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|register|remove>")
+		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|register|create-lark-cli-profile|remove>")
 	}
 	switch args[0] {
 	case "list":
@@ -134,6 +137,8 @@ func runBotsCommand(configPath string, args []string) error {
 		return runBotsAdd(path, args[1:])
 	case "register":
 		return runBotsRegister(path, args[1:])
+	case "create-lark-cli-profile":
+		return runBotsCreateLarkCLIProfile(path, args[1:])
 	case "remove", "rm":
 		return runBotsRemove(path, args[1:])
 	default:
@@ -265,6 +270,126 @@ func runBotsRegister(configPath string, args []string) error {
 	}
 	fmt.Printf("已注册并添加 bot %s，配置: %s\n", id, configPath)
 	return nil
+}
+
+func runBotsCreateLarkCLIProfile(configPath string, args []string) error {
+	fs := flag.NewFlagSet("bots create-lark-cli-profile", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	profile := fs.String("profile", "", "lark-cli profile 名称（默认：lark-acp-<bot-id>）")
+	flagArgs, positional, err := splitBotsCreateLarkCLIProfileArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(positional) != 1 || fs.NArg() != 0 {
+		return fmt.Errorf("用法: lark-acp-bridge bots create-lark-cli-profile <id> [--profile <name>]")
+	}
+	id := strings.TrimSpace(positional[0])
+	if id == "" {
+		return fmt.Errorf("bot id 不能为空")
+	}
+	profileName := strings.TrimSpace(*profile)
+	if profileName == "" {
+		profileName = "lark-acp-" + id
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("读取配置: %w", err)
+	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		return fmt.Errorf("解析 bot secret: %w", err)
+	}
+	bot, ok := findBotByID(cfg, id)
+	if !ok {
+		return fmt.Errorf("未找到 bot %q", id)
+	}
+	appID := strings.TrimSpace(bot.AppID)
+	if appID == "" {
+		return fmt.Errorf("bot %q app_id 为空", id)
+	}
+	secret := strings.TrimSpace(bot.AppSecret.RuntimeValue())
+	if secret == "" {
+		return fmt.Errorf("bot %q app_secret 为空", id)
+	}
+	if err := runLarkCLIProfileAdd(context.Background(), profileName, appID, secret); err != nil {
+		return err
+	}
+	fmt.Printf("已创建 lark-cli profile %s（bot: %s, app_id: %s）。\n", profileName, id, appID)
+	return nil
+}
+
+func splitBotsCreateLarkCLIProfileArgs(args []string) ([]string, []string, error) {
+	valueFlags := map[string]struct{}{
+		"-profile":  {},
+		"--profile": {},
+	}
+	var flagArgs []string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-profile=") || strings.HasPrefix(arg, "--profile=") {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		if _, ok := valueFlags[arg]; ok {
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
+			}
+			flagArgs = append(flagArgs, arg, args[i+1])
+			i++
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return flagArgs, positional, nil
+}
+
+func findBotByID(cfg config.Config, id string) (config.BotConfig, bool) {
+	id = strings.TrimSpace(id)
+	for _, bot := range cfg.Bots {
+		if strings.TrimSpace(bot.ID) == id {
+			return bot, true
+		}
+	}
+	return config.BotConfig{}, false
+}
+
+func defaultRunLarkCLIProfileAdd(ctx context.Context, profile, appID, secret string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "lark-cli", "profile", "add",
+		"--name", profile,
+		"--app-id", appID,
+		"--app-secret-stdin",
+	)
+	cmd.Stdin = strings.NewReader(secret + "\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		detail = redactSecretText(detail, secret)
+		if detail != "" {
+			return fmt.Errorf("创建 lark-cli profile 失败: %w: %s", err, detail)
+		}
+		return fmt.Errorf("创建 lark-cli profile 失败: %w", err)
+	}
+	return nil
+}
+
+func redactSecretText(text, secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "[已隐藏]")
 }
 
 func ensureInitialBotRegistered(configPath string, cfg config.Config) (config.Config, error) {

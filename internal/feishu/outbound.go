@@ -106,16 +106,6 @@ func outboundBlocksHaveImage(blocks []outboundBlock) bool {
 	return false
 }
 
-func outboundBlocksText(blocks []outboundBlock) string {
-	var parts []string
-	for _, block := range blocks {
-		if block.Kind == outboundBlockMarkdown && strings.TrimSpace(block.Text) != "" {
-			parts = append(parts, strings.TrimSpace(block.Text))
-		}
-	}
-	return strings.TrimSpace(strings.Join(parts, "\n\n"))
-}
-
 func outboundBlocksPostContent(blocks []outboundBlock) (string, error) {
 	content := make([][]cardJSON, 0, len(blocks))
 	for _, block := range blocks {
@@ -142,51 +132,6 @@ func outboundBlocksPostContent(blocks []outboundBlock) (string, error) {
 		return "", fmt.Errorf("编码飞书富文本消息内容: %w", err)
 	}
 	return string(data), nil
-}
-
-func outboundBlocksCardElements(blocks []outboundBlock) []any {
-	elements := make([]any, 0, len(blocks))
-	for idx, block := range blocks {
-		switch block.Kind {
-		case outboundBlockMarkdown:
-			if strings.TrimSpace(block.Text) == "" {
-				continue
-			}
-			element := cardJSON{"tag": "markdown", "content": strings.TrimSpace(block.Text)}
-			if len(elements) == 0 {
-				element["element_id"] = streamCardTextElementID
-			}
-			elements = append(elements, element)
-		case outboundBlockImage:
-			imageKey := strings.TrimSpace(block.ImageKey)
-			if imageKey == "" {
-				continue
-			}
-			alt := strings.TrimSpace(block.Alt)
-			element := cardJSON{
-				"tag":           "img",
-				"img_key":       imageKey,
-				"alt":           cardJSON{"tag": "plain_text", "content": alt},
-				"scale_type":    "fit_horizontal",
-				"preview":       true,
-				"element_id":    streamCardImageElementID(idx),
-				"corner_radius": "4px",
-			}
-			if alt != "" {
-				element["title"] = cardJSON{"tag": "plain_text", "content": alt}
-			}
-			elements = append(elements, element)
-		}
-	}
-	if len(elements) == 0 {
-		return []any{cardJSON{"tag": "markdown", "content": streamCardEmptyContent, "element_id": streamCardTextElementID}}
-	}
-	if first, ok := elements[0].(cardJSON); ok {
-		if _, exists := first["element_id"]; !exists {
-			first["element_id"] = streamCardTextElementID
-		}
-	}
-	return elements
 }
 
 func outboundBlocksStreamCardElements(blocks []outboundBlock) []any {

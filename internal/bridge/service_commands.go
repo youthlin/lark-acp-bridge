@@ -225,14 +225,6 @@ func lookupSlashCommand(name string) (slashCommandSpec, bool) {
 	return slashCommandSpec{}, false
 }
 
-func lookupSlashCommandHelp(name string) string {
-	command, ok := lookupSlashCommandIn(slashCommandTable, name)
-	if !ok {
-		return ""
-	}
-	return strings.Join(command.helpLines, "\n")
-}
-
 func lookupSlashCommandHelpIn(commands []slashCommandSpec, name string) string {
 	command, ok := lookupSlashCommandIn(commands, name)
 	if !ok {

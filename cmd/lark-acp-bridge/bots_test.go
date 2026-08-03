@@ -126,6 +126,90 @@ func TestRunBotsListPrintsSecretSummary(t *testing.T) {
 	}
 }
 
+func TestRunBotsCreateLarkCLIProfileUsesResolvedSecret(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := config.AddBot(configPath, config.BotConfig{ID: "default", AppID: "cli_xxx"}, "super-secret"); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+
+	oldRun := runLarkCLIProfileAdd
+	var gotProfile, gotAppID, gotSecret string
+	runLarkCLIProfileAdd = func(ctx context.Context, profile, appID, secret string) error {
+		gotProfile = profile
+		gotAppID = appID
+		gotSecret = secret
+		return nil
+	}
+	t.Cleanup(func() {
+		runLarkCLIProfileAdd = oldRun
+	})
+
+	out := captureStdout(t, func() {
+		if err := runBotsCommand(configPath, []string{"create-lark-cli-profile", "default"}); err != nil {
+			t.Fatalf("runBotsCommand(create-lark-cli-profile) error = %v", err)
+		}
+	})
+	if gotProfile != "lark-acp-default" || gotAppID != "cli_xxx" || gotSecret != "super-secret" {
+		t.Fatalf("profile call = (%q, %q, %q), want default profile, app id and resolved secret", gotProfile, gotAppID, gotSecret)
+	}
+	if !strings.Contains(out, "lark-acp-default") || !strings.Contains(out, "cli_xxx") {
+		t.Fatalf("stdout = %q, want profile and app id", out)
+	}
+	if strings.Contains(out, "super-secret") {
+		t.Fatalf("stdout leaked secret: %q", out)
+	}
+}
+
+func TestRunBotsCreateLarkCLIProfileAcceptsExplicitProfile(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := config.AddBot(configPath, config.BotConfig{ID: "bot-a", AppID: "cli_a"}, "secret-a"); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+
+	oldRun := runLarkCLIProfileAdd
+	var gotProfile string
+	runLarkCLIProfileAdd = func(ctx context.Context, profile, appID, secret string) error {
+		gotProfile = profile
+		return nil
+	}
+	t.Cleanup(func() {
+		runLarkCLIProfileAdd = oldRun
+	})
+
+	if err := runBotsCommand(configPath, []string{"create-lark-cli-profile", "bot-a", "--profile", "custom-profile"}); err != nil {
+		t.Fatalf("runBotsCommand(create-lark-cli-profile) error = %v", err)
+	}
+	if gotProfile != "custom-profile" {
+		t.Fatalf("profile = %q, want custom-profile", gotProfile)
+	}
+}
+
+func TestSplitBotsCreateLarkCLIProfileArgsKeepsIDPositionIndependent(t *testing.T) {
+	flagArgs, positional, err := splitBotsCreateLarkCLIProfileArgs([]string{"default", "--profile", "custom-profile"})
+	if err != nil {
+		t.Fatalf("splitBotsCreateLarkCLIProfileArgs() error = %v", err)
+	}
+	if strings.Join(positional, ",") != "default" {
+		t.Fatalf("positional = %+v, want default", positional)
+	}
+	if !containsAll(flagArgs, []string{"--profile", "custom-profile"}) {
+		t.Fatalf("flagArgs = %+v, missing expected profile flag", flagArgs)
+	}
+}
+
+func TestRedactSecretText(t *testing.T) {
+	got := redactSecretText("failed with super-secret in stderr", "super-secret")
+	if strings.Contains(got, "super-secret") || !strings.Contains(got, "[已隐藏]") {
+		t.Fatalf("redactSecretText() = %q, want redacted secret", got)
+	}
+}
+
 func TestRunBotsRegisterStoresReturnedSecret(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

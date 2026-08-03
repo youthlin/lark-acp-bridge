@@ -26,21 +26,6 @@ func testConfigWithAgent(name string, agent AgentConfig) Config {
 	}
 }
 
-func testEncryptedBotConfig(t *testing.T, id, appID, secret string) Config {
-	t.Helper()
-	home := filepath.Join(t.TempDir(), "home")
-	t.Setenv("HOME", home)
-	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
-	if err := AddBot(configPath, BotConfig{ID: id, AppID: appID}, secret); err != nil {
-		t.Fatalf("AddBot() error = %v", err)
-	}
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load(config) error = %v", err)
-	}
-	return cfg
-}
-
 func TestLoadOrCreateUsesHomeDataDir(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

@@ -17,10 +17,6 @@ type sentMessageSender interface {
 	SendTextMessage(context.Context, feishu.Message, string) (feishu.SentMessage, error)
 }
 
-type messageUpdater interface {
-	UpdateText(context.Context, string, string) error
-}
-
 type loopStatusCardSender interface {
 	SendLoopStatusCard(context.Context, feishu.Message, feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error)
 }
@@ -111,38 +107,12 @@ func (s *Service) sendIntermediateReply(ctx context.Context, msg feishu.Message,
 	return true, sender.SendText(ctx, msg, text)
 }
 
-func (s *Service) sendMessage(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, bool, error) {
-	sender, ok := s.outboundForBot(msg.BotID).(sentMessageSender)
-	if !ok || sender == nil {
-		return feishu.SentMessage{}, false, nil
-	}
-	sent, err := sender.SendTextMessage(ctx, msg, text)
-	return sent, true, err
-}
-
-func (s *Service) updateMessageText(ctx context.Context, botID string, messageID string, text string) (bool, error) {
-	updater, ok := s.outboundForBot(botID).(messageUpdater)
-	if !ok || updater == nil {
-		return false, nil
-	}
-	return true, updater.UpdateText(ctx, messageID, text)
-}
-
 func (s *Service) sendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, bool, error) {
 	sender, ok := s.outboundForBot(msg.BotID).(loopStatusCardSender)
 	if !ok || sender == nil {
 		return nil, false, nil
 	}
 	card, err := sender.SendLoopStatusCard(ctx, msg, request)
-	return card, true, err
-}
-
-func (s *Service) startStreamCard(ctx context.Context, msg feishu.Message) (feishu.StreamCard, bool, error) {
-	starter := s.streamCardStarterForMessage(msg)
-	if starter == nil {
-		return nil, false, nil
-	}
-	card, err := starter.StartStreamCard(ctx, msg)
 	return card, true, err
 }
 
