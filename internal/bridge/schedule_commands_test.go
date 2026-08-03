@@ -43,7 +43,7 @@ func TestHandleScheduleCommandAddListStatusPauseResumeDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/schedule add) error = %v", err)
 	}
-	if !strings.Contains(reply, "已创建定时任务：task-") || !strings.Contains(reply, "spec：@every 1h") || !strings.Contains(reply, "cwd："+cwd) {
+	if !strings.Contains(reply, "已创建定时任务：task-") || !strings.Contains(reply, "触发：@every 1h") || !strings.Contains(reply, "cwd："+cwd) {
 		t.Fatalf("add reply = %q, want created task summary", reply)
 	}
 	store := svc.scheduledTaskStoreForBotID("bot-a")
@@ -132,7 +132,7 @@ func TestHandleScheduleCommandAddCronSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/schedule add cron) error = %v", err)
 	}
-	if !strings.Contains(reply, "spec：0 9 * * 1") {
+	if !strings.Contains(reply, "触发：0 9 * * 1") {
 		t.Fatalf("reply = %q, want cron spec", reply)
 	}
 	tasks := svc.scheduledTaskStoreForBotID("bot-a").List()
@@ -188,7 +188,7 @@ func TestHandleScheduleEditCommandUpdatesEnabledTaskAndReregistersJob(t *testing
 	for _, want := range []string{
 		"已更新定时任务：" + task.ID,
 		"状态：启用",
-		"spec：0 9 * * 1",
+		"触发：0 9 * * 1",
 		"agent：claude",
 		"cwd：" + explicitCwd,
 		"prompt：生成周报",
@@ -258,7 +258,7 @@ func TestHandleScheduleEditCommandKeepsDefaultsAndPausedState(t *testing.T) {
 	for _, want := range []string{
 		"已更新定时任务：" + task.ID,
 		"状态：暂停",
-		"spec：@every 2h",
+		"触发：@every 2h",
 		"agent：traex",
 		"cwd：" + cwd,
 		"prompt：生成双小时日报",
@@ -573,5 +573,146 @@ func TestHandleScheduleCommandRejectsNonOwner(t *testing.T) {
 	}
 	if reply != "只有 bot owner 可以执行斜杠命令。" {
 		t.Fatalf("reply = %q, want owner-only rejection", reply)
+	}
+}
+
+func TestOnceScheduleSpecFiresOnceThenExpires(t *testing.T) {
+	at := time.Now().Add(time.Hour)
+	spec := onceScheduleSpec{at: at}
+	next, ok := spec.Next(time.Now())
+	if !ok || !next.Equal(at) {
+		t.Fatalf("Next(before) = %s %v, want %s true", next, ok, at)
+	}
+	if _, ok := spec.Next(at.Add(time.Second)); ok {
+		t.Fatal("Next(after at) = ok true, want false")
+	}
+}
+
+func TestParseOnceAtSpecUsesLocalAndRFC3339(t *testing.T) {
+	// RFC3339 保留绝对时刻与时区偏移。
+	rfc, err := parseOnceAtSpec("2026-08-05T09:00:00+08:00", "")
+	if err != nil {
+		t.Fatalf("parseOnceAtSpec(RFC3339) error = %v", err)
+	}
+	next, ok := rfc.Next(time.Now())
+	if !ok {
+		t.Fatal("RFC3339 Next = false, want true")
+	}
+	want, _ := time.Parse(time.RFC3339, "2026-08-05T09:00:00+08:00")
+	if !next.Equal(want) {
+		t.Fatalf("RFC3339 next = %s, want %s", next, want)
+	}
+
+	// "YYYY-MM-DD HH:MM" 按给定（或 local）时区解释。
+	local, err := parseOnceAtSpec("2026-08-05 09:00", "")
+	if err != nil {
+		t.Fatalf("parseOnceAtSpec(local) error = %v", err)
+	}
+	nextLocal, ok := local.Next(time.Now())
+	if !ok {
+		t.Fatal("local Next = false, want true")
+	}
+	wantLocal, _ := time.ParseInLocation("2006-01-02 15:04", "2026-08-05 09:00", time.Local)
+	if !nextLocal.Equal(wantLocal) {
+		t.Fatalf("local next = %s, want %s", nextLocal, wantLocal)
+	}
+
+	if _, err := parseOnceAtSpec("not-a-time", ""); err == nil {
+		t.Fatal("parseOnceAtSpec(invalid) error = nil, want error")
+	}
+}
+
+func TestHandleScheduleOnceCommandFiresAndDeletes(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:           "bot-a",
+			Workspace:    workspace,
+			OwnerOpenIDs: []string{testOwnerOpenID},
+		}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-once"},
+		promptReply:    "一次性任务完成",
+	}
+	svc.setRuntime(rt)
+	sent := make(chan string, 1)
+	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
+		sent <- text
+		return nil
+	}
+
+	at := time.Now().Add(2 * time.Second).Format(time.RFC3339)
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_once",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule once " + at + " 生成一次性早报",
+	}
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule once) error = %v", err)
+	}
+	if !strings.Contains(reply, "已创建一次性任务：task-") || !strings.Contains(reply, "触发：@at "+at) {
+		t.Fatalf("once reply = %q, want one-shot summary with trigger time", reply)
+	}
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	tasks := store.List()
+	if len(tasks) != 1 || !tasks[0].Once || tasks[0].Spec != "@at "+at || tasks[0].Prompt != "生成一次性早报" {
+		t.Fatalf("tasks = %+v, want persisted once task", tasks)
+	}
+	if got := svc.scheduledTaskJobCount(); got != 1 {
+		t.Fatalf("job count = %d, want once task registered", got)
+	}
+	taskID := tasks[0].ID
+
+	// 等到任务执行、结果回传，并确认任务已从存储和内存中删除。
+	waitForCondition(t, 3*time.Second, func() bool {
+		return rt.promptCallCount() == 1 && len(store.List()) == 0 && svc.scheduledTaskJobCount() == 0
+	})
+	select {
+	case text := <-sent:
+		if text != "一次性任务完成" {
+			t.Fatalf("sent text = %q, want prompt reply", text)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for once run result sink")
+	}
+	if _, ok := store.Get(taskID); ok {
+		t.Fatal("once task still present after firing")
+	}
+}
+
+func TestHandleScheduleOnceCommandRejectsPastTime(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: t.TempDir()}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_once",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule once 2020-01-01 09:00 过期任务",
+	}
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage error = %v", err)
+	}
+	if !strings.Contains(reply, "执行时间必须在将来") {
+		t.Fatalf("reply = %q, want future-time rejection", reply)
+	}
+	if tasks := svc.scheduledTaskStoreForBotID("bot-a").List(); len(tasks) != 0 {
+		t.Fatalf("tasks = %+v, want none persisted", tasks)
 	}
 }

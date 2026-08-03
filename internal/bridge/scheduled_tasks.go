@@ -42,6 +42,7 @@ type ScheduledTask struct {
 	ID                   string                  `json:"id"`
 	BotID                string                  `json:"bot_id"`
 	Enabled              bool                    `json:"enabled"`
+	Once                 bool                    `json:"once,omitempty"`
 	Spec                 string                  `json:"spec"`
 	Timezone             string                  `json:"timezone,omitempty"`
 	AgentName            string                  `json:"agent_name"`
@@ -352,6 +353,11 @@ func (s *Service) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJob
 		now := time.Now()
 		next, ok := job.schedule.Next(now)
 		if !ok {
+			if job.task.Once {
+				// 一次性任务触发时间已过（通常是重启后加载到过期任务），直接删除，不补跑。
+				s.completeOnceScheduledTask(ctx, job.task)
+				return
+			}
 			err := fmt.Errorf("定时任务无法计算下次触发时间")
 			s.markScheduleRunFinished(job.task.ID, scheduledTaskRunID(job.task, now), now, err)
 			slog.WarnContext(ctx, "定时任务无法计算下次触发时间", "task_id", job.task.ID, "spec", job.task.Spec)
@@ -373,14 +379,39 @@ func (s *Service) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJob
 		}
 		runCtx, cancel := context.WithCancel(ctx)
 		job.addActiveRun(runID, scheduledTaskRunKey(job.task, runID), cancel)
+		if job.task.Once {
+			// 一次性任务：同步执行本次 run，完成后删除任务定义并退出调度循环。
+			s.executeScheduledTaskRun(runCtx, job, runID, triggeredAt)
+			cancel()
+			job.removeActiveRun(runID)
+			s.completeOnceScheduledTask(ctx, job.task)
+			return
+		}
 		go func() {
 			defer job.removeActiveRun(runID)
 			defer cancel()
-			if _, err := s.runScheduledTaskOnce(runCtx, job.task, runID, triggeredAt, job.workspace, nil); err != nil {
-				slog.ErrorContext(runCtx, "定时任务执行失败", "task_id", job.task.ID, "run_id", runID, "错误", err)
-			}
+			s.executeScheduledTaskRun(runCtx, job, runID, triggeredAt)
 		}()
 	}
+}
+
+func (s *Service) executeScheduledTaskRun(ctx context.Context, job *scheduledTaskJob, runID string, triggeredAt time.Time) {
+	if _, err := s.runScheduledTaskOnce(ctx, job.task, runID, triggeredAt, job.workspace, nil); err != nil {
+		slog.ErrorContext(ctx, "定时任务执行失败", "task_id", job.task.ID, "run_id", runID, "错误", err)
+	}
+}
+
+// completeOnceScheduledTask 删除已执行完毕的一次性任务定义（持久化 + 内存），
+// 使其不会在重启后再次出现。
+func (s *Service) completeOnceScheduledTask(ctx context.Context, task ScheduledTask) {
+	store := s.scheduledTaskStoreForBotID(task.BotID)
+	if store != nil {
+		if _, err := store.Delete(task.ID); err != nil {
+			slog.WarnContext(ctx, "删除已完成一次性定时任务失败", "task_id", task.ID, "错误", err)
+		}
+	}
+	s.stopScheduledTask(task)
+	slog.InfoContext(ctx, "一次性定时任务已完成并删除", "task_id", task.ID)
 }
 
 func (s *Service) removeScheduledTaskJob(job *scheduledTaskJob) {
@@ -1093,6 +1124,22 @@ func (s everyScheduleSpec) Next(after time.Time) (time.Time, bool) {
 	return after.Add(s.interval), true
 }
 
+// onceScheduleSpec 表示只触发一次的任务：在 at 之前调用 Next 返回 at；
+// 到点之后返回 ok=false，调度循环据此结束并删除任务。
+type onceScheduleSpec struct {
+	at time.Time
+}
+
+func (s onceScheduleSpec) Next(after time.Time) (time.Time, bool) {
+	if after.IsZero() {
+		after = time.Now()
+	}
+	if after.Before(s.at) {
+		return s.at, true
+	}
+	return time.Time{}, false
+}
+
 type cronScheduleSpec struct {
 	minute     cronField
 	hour       cronField
@@ -1178,6 +1225,9 @@ func parseScheduleSpec(spec string, timezone string) (scheduleSpec, error) {
 		}
 		return everyScheduleSpec{interval: interval}, nil
 	}
+	if strings.HasPrefix(spec, "@at ") {
+		return parseOnceAtSpec(strings.TrimSpace(strings.TrimPrefix(spec, "@at ")), timezone)
+	}
 	loc := time.Local
 	if timezone != "" {
 		loaded, err := time.LoadLocation(timezone)
@@ -1188,7 +1238,7 @@ func parseScheduleSpec(spec string, timezone string) (scheduleSpec, error) {
 	}
 	parts := strings.Fields(spec)
 	if len(parts) != 5 {
-		return nil, fmt.Errorf("定时任务 spec 仅支持 @every <duration> 或 5 段 cron")
+		return nil, fmt.Errorf("定时任务 spec 仅支持 @every <duration>、@at <时间> 或 5 段 cron")
 	}
 	minute, err := parseCronField(parts[0], 0, 59)
 	if err != nil {
@@ -1217,6 +1267,30 @@ func parseScheduleSpec(spec string, timezone string) (scheduleSpec, error) {
 	return cronScheduleSpec{minute: minute, hour: hour, dayOfMonth: dayOfMonth, month: month, weekday: weekday, location: loc}, nil
 }
 
+// parseOnceAtSpec 解析一次性任务的 @at 时间。
+// 支持 "2006-01-02 15:04"（按 timezone，缺省 local）和 RFC3339（如 2026-08-05T09:00:00+08:00）。
+func parseOnceAtSpec(value string, timezone string) (scheduleSpec, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("@at 时间不能为空")
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return onceScheduleSpec{at: t}, nil
+	}
+	loc := time.Local
+	if strings.TrimSpace(timezone) != "" {
+		loaded, err := time.LoadLocation(timezone)
+		if err != nil {
+			return nil, fmt.Errorf("解析定时任务 timezone: %w", err)
+		}
+		loc = loaded
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04", value, loc)
+	if err != nil {
+		return nil, fmt.Errorf("解析 @at 时间（需为 RFC3339 或 2006-01-02 15:04）: %w", err)
+	}
+	return onceScheduleSpec{at: t}, nil
+}
 func parseCronField(expr string, min int, max int) (cronField, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {

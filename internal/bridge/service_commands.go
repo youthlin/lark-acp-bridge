@@ -153,8 +153,8 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		name: "/schedule",
 		helpLines: []string{
 			"/schedule add <spec> <prompt> - 创建定时任务，spec 可用 @every 1h 或 5 段 cron",
+			"/schedule once <时间> <prompt> - 创建只执行一次的任务，时间用 YYYY-MM-DD HH:MM（按任务时区）或 RFC3339",
 			"/schedule how <自然语言需求> - 生成可直接执行的 /schedule add 命令",
-			"/schedule list|status <id>|run <id>|edit <id> ...|pause <id>|resume <id>|delete <id> - 管理定时任务",
 		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleScheduleCommand(ctx, text, msg)
