@@ -258,6 +258,27 @@ launchctl bootout gui/$(id -u)/com.youthlin.lark-acp-bridge
 lark-acp-bridge service uninstall
 ```
 
+## 更新
+
+从 GitHub Release 自动更新到最新版本：
+
+```bash
+lark-acp-bridge update            # 检查并下载替换当前二进制
+lark-acp-bridge update --check    # 只检查是否有新版本，不替换
+lark-acp-bridge update --version v1.2.3   # 升级到指定版本
+```
+
+更新流程：查询最新 Release（依次尝试 GitHub API、Gitee OpenAPI、GitHub `releases/latest` 重定向）→ 下载当前平台的 `lark-acp-bridge_<version>_<goos>_<goarch>.tar.gz` → 校验 `.sha256` → 解压出二进制并原子替换。GitHub 下载失败时自动回退到 Gitee Release 镜像（`gitee.com/<owner>/<repo>/releases/download/...`），可用 `--gitee-repo` 或环境变量 `LARK_ACP_UPDATE_GITEE_REPO` 指定镜像仓库，传 `-` 禁用。更新完成后需重启服务（如 `systemctl --user restart lark-acp-bridge`）。有 Go 环境时也可直接 `go install github.com/youthlin/lark-acp-bridge/cmd/lark-acp-bridge@latest`。`go run` 产生的临时二进制不能原地更新，请先 `go install` 或用 `--binary` 指定稳定路径。
+
+## 发布
+
+打 `v*` tag 推送到 Gitee 后，Gitee 自带“仓库镜像”把 tag 同步到 GitHub：
+
+1. GitHub Actions `.github/workflows/release.yml` 交叉编译 6 个平台（linux/darwin/windows × amd64/arm64），创建 GitHub Release 并上传 tar.gz 与 `.sha256`。
+2. `.github/workflows/gitee.yml` 等 GitHub Release 制品就绪后下载，再通过 Gitee OpenAPI v5 在同名 Gitee Release 上传附件（需在 GitHub Secrets 配置 `GITEE_TOKEN`，含 projects 权限的私人令牌）。
+
+因此国内用户可从 Gitee Release 下载，`update` 命令也会在 GitHub 不可达时自动回退到 Gitee。
+
 Feishu Adapter 使用官方 Go SDK：
 
 ```text

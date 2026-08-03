@@ -19,6 +19,7 @@
 - `internal/acp`：基于 stdio JSON-RPC 的 ACP client，包含进程管理、initialize、session/new/prompt/resume/close、agent 能力与配置项、权限请求处理。
 - `internal/arg`：零拷贝的 JSON 参数封装工具。
 - `internal/logging`：带 context 的 `slog` handler、日志级别与 debug 开关。
+- `internal/update`：GitHub Release 自更新：查询最新版本（API + 重定向回退）、跨平台资产名匹配、sha256 校验、tar.gz 解压、原子替换二进制。
 
 保持飞书适配、桥接 session 管理、ACP runtime 的包边界清晰；`internal/feishu` 不直接依赖 ACP 细节，`internal/acp` 不感知飞书。
 
@@ -86,9 +87,14 @@ go run ./cmd/lark-acp-bridge bots remove default
 # 安装/卸载系统服务（systemd 或 launchd）
 go run ./cmd/lark-acp-bridge service install
 go run ./cmd/lark-acp-bridge service uninstall
+
+# 自更新（--check 只检查不替换）
+go run ./cmd/lark-acp-bridge update --check
+go run ./cmd/lark-acp-bridge update
 ```
 
 发布构建使用 `CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<version>"`，产物为 `lark-acp-bridge`（Windows 加 `.exe`）。
+发布产物命名固定为 `lark-acp-bridge_<version>_<goos>_<goarch>.tar.gz`（Windows 包内二进制为 `.exe`），配套同名 `.sha256`；`internal/update` 依赖该命名约定，改动 release.yml 产物名需同步更新。Gitee 自带镜像同步代码与 tag 到 GitHub；`.github/workflows/gitee.yml` 在 GitHub Release 产出后把附件回传到同名 Gitee Release（需 GitHub Secrets `GITEE_TOKEN`）。`internal/update` 的版本发现和下载都以 GitHub 为主、Gitee 为回退，新增下载源时保持这个回退链。
 
 ## 风格与约定
 

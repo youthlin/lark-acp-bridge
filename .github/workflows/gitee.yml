@@ -1,0 +1,116 @@
+name: 回传制品到 Gitee Release
+
+# Gitee 自带“仓库镜像”把代码与 tag 同步到 GitHub。
+# 当 GitHub 上 release.yml 基于 tag 构建并发完 GitHub Release 后，
+# 本 workflow 下载制品并通过 Gitee OpenAPI v5 上传到同名 Gitee Release。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '要同步到 Gitee Release 的 tag，例如 v1.2.3'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mirror-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          for i in $(seq 1 40); do
+            if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist \
+                --pattern 'lark-acp-bridge_*' || true
+              if find dist -type f | grep -q .; then
+                ls -lh dist
+                exit 0
+              fi
+            fi
+            echo "GitHub Release assets for ${RELEASE_TAG} are not ready yet, retry ${i}/40..."
+            sleep 15
+          done
+          echo "Timed out waiting for GitHub Release assets: ${RELEASE_TAG}" >&2
+          exit 1
+
+      - name: Upload release assets to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: youthlin
+          GITEE_REPO: lark-acp-bridge
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          : "${GITEE_TOKEN:?需要在 GitHub Secrets 配置 GITEE_TOKEN（Gitee 私人令牌，含 projects 权限）}"
+          api="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
+          tag="${RELEASE_TAG}"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "${tmp}"' EXIT
+
+          release_json="${tmp}/release.json"
+          http_code="$(curl -sS -o "${release_json}" -w '%{http_code}' "${api}/releases/tags/${tag}?access_token=${GITEE_TOKEN}")"
+          if [ "${http_code}" = "200" ]; then
+            release_id="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("id", "") if isinstance(data, dict) else "")' "${release_json}")"
+          elif [ "${http_code}" = "404" ]; then
+            release_id=""
+          else
+            echo "Fetch Gitee release failed, status=${http_code}" >&2
+            cat "${release_json}" >&2 || true
+            exit 1
+          fi
+
+          if [ -z "${release_id}" ]; then
+            echo "Gitee Git tag ${tag} exists, but Release object is missing; creating Release..."
+            target_commitish="$(git rev-list -n 1 "${tag}")"
+            create_http_code="$(curl -sS -o "${release_json}" -w '%{http_code}' -X POST "${api}/releases" \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
+              --data-urlencode "tag_name=${tag}" \
+              --data-urlencode "name=${tag}" \
+              --data-urlencode "body=同步自 GitHub Release ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
+              --data-urlencode "prerelease=false" \
+              --data-urlencode "target_commitish=${target_commitish}")"
+            if [ "${create_http_code}" != "200" ] && [ "${create_http_code}" != "201" ]; then
+              echo "Create Gitee release failed, status=${create_http_code}" >&2
+              cat "${release_json}" >&2 || true
+              exit 1
+            fi
+            release_id="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("id", "") if isinstance(data, dict) else "")' "${release_json}")"
+          fi
+
+          if [ -z "${release_id}" ]; then
+            echo "Gitee release response does not contain id:" >&2
+            cat "${release_json}" >&2 || true
+            exit 1
+          fi
+
+          echo "Gitee release id: ${release_id}"
+
+          for file in dist/*; do
+            [ -f "${file}" ] || continue
+            name="$(basename "${file}")"
+            attach_id="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); name=sys.argv[2]; items=sum([(data.get(k) or []) for k in ("attach_files", "assets")], []) if isinstance(data, dict) else []; print(next((str(item.get("id", "")) for item in items if item.get("name") == name), ""))' "${release_json}" "${name}")"
+            if [ -n "${attach_id}" ]; then
+              curl -fsS -X DELETE "${api}/releases/${release_id}/attach_files/${attach_id}" \
+                --data-urlencode "access_token=${GITEE_TOKEN}" >/dev/null || true
+            fi
+            curl -fsS -X POST "${api}/releases/${release_id}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${file}"
+            echo "Uploaded ${name} to Gitee release ${tag}"
+          done
