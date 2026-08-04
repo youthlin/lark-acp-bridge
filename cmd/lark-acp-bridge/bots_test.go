@@ -68,19 +68,6 @@ func TestRunBotsAddReadsSecretFromStdin(t *testing.T) {
 	}
 }
 
-func TestIsBotsShorthand(t *testing.T) {
-	for _, command := range []string{"list", "add", "register", "remove", "rm"} {
-		if !isBotsShorthand(command) {
-			t.Fatalf("isBotsShorthand(%q) = false, want true", command)
-		}
-	}
-	for _, command := range []string{"run", "start", "stop", "restart", "unknown"} {
-		if isBotsShorthand(command) {
-			t.Fatalf("isBotsShorthand(%q) = true, want false", command)
-		}
-	}
-}
-
 func TestRunBotsListPrintsSecretSummary(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -125,7 +112,7 @@ func TestRunBotsListPrintsSecretSummary(t *testing.T) {
 	}
 }
 
-func TestBotsListShorthand(t *testing.T) {
+func TestBotsListRequiresBotsCommand(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
@@ -134,13 +121,9 @@ func TestBotsListShorthand(t *testing.T) {
 		t.Fatalf("AddBot() error = %v", err)
 	}
 
-	out := captureStdout(t, func() {
-		if err := executeCommand("--config", configPath, "list"); err != nil {
-			t.Fatalf("executeCommand(list) error = %v", err)
-		}
-	})
-	if !strings.Contains(out, "default") || !strings.Contains(out, "cli_xxx") {
-		t.Fatalf("stdout = %q, want shorthand list output", out)
+	err := executeCommand("--config", configPath, "list")
+	if err == nil || !strings.Contains(err.Error(), "unknown command \"list\"") {
+		t.Fatalf("executeCommand(list) error = %v, want unknown command", err)
 	}
 }
 
@@ -563,7 +546,7 @@ func TestBotsRegisterTimeoutFlagAcceptsDuration(t *testing.T) {
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
 	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
-	if err := executeCommand("--config", configPath, "bots", "register", "-timeout", (2 * time.Minute).String(), "default"); err != nil {
+	if err := executeCommand("--config", configPath, "bots", "register", "--timeout", (2 * time.Minute).String(), "default"); err != nil {
 		t.Fatalf("executeCommand(bots register) error = %v", err)
 	}
 	if timeout < 119*time.Second || timeout > 2*time.Minute {
@@ -573,7 +556,7 @@ func TestBotsRegisterTimeoutFlagAcceptsDuration(t *testing.T) {
 
 func executeCommand(args ...string) error {
 	cmd := newRootCommand()
-	cmd.SetArgs(normalizeLegacyLongFlags(args))
+	cmd.SetArgs(args)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

@@ -102,15 +102,6 @@ func runBridge(configPath, mode string) error {
 	return runForeground(loaded.Config, loaded.Path)
 }
 
-func isBotsShorthand(command string) bool {
-	switch command {
-	case "list", "add", "register", "remove", "rm":
-		return true
-	default:
-		return false
-	}
-}
-
 func configPathOrDefault(configPath string) (string, error) {
 	if strings.TrimSpace(configPath) == "" {
 		return config.DefaultPath()

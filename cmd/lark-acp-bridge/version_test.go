@@ -17,7 +17,7 @@ func TestValidateTopLevelArgs(t *testing.T) {
 		{name: "version flag already handled", args: nil},
 		{name: "run mode", args: []string{"run"}},
 		{name: "service command", args: []string{"service", "install"}},
-		{name: "bots shorthand", args: []string{"list"}},
+		{name: "bots shorthand is unknown", args: []string{"list"}, wantErr: "无法识别的命令: lark-acp-bridge list"},
 		{name: "bare version is unknown", args: []string{"version"}, wantErr: "无法识别的命令: lark-acp-bridge version"},
 		{name: "unknown command is unknown", args: []string{"status"}, wantErr: "无法识别的命令: lark-acp-bridge status"},
 	}
@@ -86,17 +86,46 @@ func TestTopLevelVersionFlag(t *testing.T) {
 	}
 
 	out, err = commandOutput("-version")
-	if err != nil {
-		t.Fatalf("commandOutput(-version) error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "unknown shorthand flag: 'v'") {
+		t.Fatalf("commandOutput(-version) error = %v, output = %q, want shorthand flag error", err, out)
 	}
-	if strings.TrimSpace(out) != "v9.9.9" {
-		t.Fatalf("-version output = %q, want v9.9.9", out)
+}
+
+func TestRemovedCompatibilityPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "single dash long subcommand flag",
+			args:    []string{"bots", "register", "-timeout", "2m", "default"},
+			wantErr: "unknown shorthand flag: 't'",
+		},
+		{
+			name:    "service remove alias",
+			args:    []string{"service", "remove"},
+			wantErr: "用法: lark-acp-bridge service <install|uninstall>",
+		},
+		{
+			name:    "service rm alias",
+			args:    []string{"service", "rm"},
+			wantErr: "用法: lark-acp-bridge service <install|uninstall>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := commandOutput(tt.args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("commandOutput(%v) error = %v, output = %q, want contains %q", tt.args, err, out, tt.wantErr)
+			}
+		})
 	}
 }
 
 func commandOutput(args ...string) (string, error) {
 	cmd := newRootCommand()
-	cmd.SetArgs(normalizeLegacyLongFlags(args))
+	cmd.SetArgs(args)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

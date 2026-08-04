@@ -17,7 +17,6 @@ type rootOptions struct {
 var daemonChild bool
 
 func execute(args []string) error {
-	args = normalizeLegacyLongFlags(args)
 	if err := validateTopLevelArgs(args); err != nil {
 		return err
 	}
@@ -53,66 +52,7 @@ func newRootCommand() *cobra.Command {
 	cmd.AddCommand(newBotsCommand(options, false))
 	cmd.AddCommand(newServiceCommand(options))
 	cmd.AddCommand(newUpdateCommand())
-	for _, command := range []string{"list", "add", "register", "remove", "rm"} {
-		cmd.AddCommand(newBotsShorthandCommand(options, command))
-	}
 	return cmd
-}
-
-func normalizeLegacyLongFlags(args []string) []string {
-	out := append([]string(nil), args...)
-	for i, arg := range out {
-		name, ok := legacyLongFlagName(arg)
-		if !ok || !isLegacyLongFlag(name) {
-			continue
-		}
-		out[i] = "-" + arg
-	}
-	return out
-}
-
-func legacyLongFlagName(arg string) (string, bool) {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) <= 2 {
-		return "", false
-	}
-	name := strings.TrimPrefix(arg, "-")
-	if name == "h" {
-		return "", false
-	}
-	if i := strings.IndexByte(name, '='); i >= 0 {
-		name = name[:i]
-	}
-	return name, name != ""
-}
-
-func isLegacyLongFlag(name string) bool {
-	switch name {
-	case "app-desc",
-		"app-name",
-		"binary",
-		"bot-open-id",
-		"check",
-		"config",
-		"create-only",
-		"daemon-child",
-		"domain",
-		"gitee-repo",
-		"help",
-		"lark-domain",
-		"owner-open-ids",
-		"path",
-		"profile",
-		"repo",
-		"secret-file",
-		"stdin-secret",
-		"timeout",
-		"version",
-		"working-dir",
-		"workspace":
-		return true
-	default:
-		return false
-	}
 }
 
 func newRunModeCommand(options *rootOptions, mode string) *cobra.Command {
@@ -157,7 +97,7 @@ func newBotsCommand(options *rootOptions, hidden bool) *cobra.Command {
 	cmd.AddCommand(newBotsAddCommand(options, false))
 	cmd.AddCommand(newBotsRegisterCommand(options, false))
 	cmd.AddCommand(newBotsCreateLarkCLIProfileCommand(options))
-	cmd.AddCommand(newBotsRemoveCommand(options, false, "remove", []string{"rm"}))
+	cmd.AddCommand(newBotsRemoveCommand(options, false, "remove", nil))
 	return cmd
 }
 
@@ -274,23 +214,6 @@ func newBotsRemoveCommand(options *rootOptions, hidden bool, use string, aliases
 	}
 }
 
-func newBotsShorthandCommand(options *rootOptions, command string) *cobra.Command {
-	switch command {
-	case "list":
-		return newBotsListCommand(options, true)
-	case "add":
-		return newBotsAddCommand(options, true)
-	case "register":
-		return newBotsRegisterCommand(options, true)
-	case "remove":
-		return newBotsRemoveCommand(options, true, "remove", nil)
-	case "rm":
-		return newBotsRemoveCommand(options, true, "rm", nil)
-	default:
-		panic("unknown bots shorthand: " + command)
-	}
-}
-
 func newServiceCommand(options *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "service",
@@ -327,7 +250,6 @@ func newServiceInstallCommand(options *rootOptions) *cobra.Command {
 func newServiceUninstallCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:          "uninstall",
-		Aliases:      []string{"remove", "rm"},
 		Short:        "卸载用户级服务",
 		Args:         noArgsUsage("用法: lark-acp-bridge service uninstall"),
 		SilenceUsage: true,
@@ -376,7 +298,7 @@ func exactArgsUsage(count int, usage string) cobra.PositionalArgs {
 
 func validateTopLevelArgs(args []string) error {
 	command := firstTopLevelCommandArg(args)
-	if command == "" || isRunMode(command) || isTopLevelSubcommand(command) || isBotsShorthand(command) {
+	if command == "" || isRunMode(command) || isTopLevelSubcommand(command) {
 		return nil
 	}
 	return fmt.Errorf("无法识别的命令: lark-acp-bridge %s", command)
