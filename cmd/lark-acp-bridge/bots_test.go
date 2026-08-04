@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,8 +36,8 @@ func TestRunBotsAddReadsSecretFromStdin(t *testing.T) {
 		_ = r.Close()
 	})
 
-	if err := runBotsCommand(configPath, []string{"add", "default", "cli_xxx", "--stdin-secret"}); err != nil {
-		t.Fatalf("runBotsCommand(add) error = %v", err)
+	if err := executeCommand("--config", configPath, "bots", "add", "default", "cli_xxx", "--stdin-secret"); err != nil {
+		t.Fatalf("executeCommand(bots add) error = %v", err)
 	}
 
 	raw, err := os.ReadFile(configPath)
@@ -108,8 +107,8 @@ func TestRunBotsListPrintsSecretSummary(t *testing.T) {
 		done <- err
 	}()
 
-	if err := runBotsCommand(configPath, []string{"list"}); err != nil {
-		t.Fatalf("runBotsCommand(list) error = %v", err)
+	if err := executeCommand("--config", configPath, "bots", "list"); err != nil {
+		t.Fatalf("executeCommand(bots list) error = %v", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close(stdout writer) error = %v", err)
@@ -123,6 +122,25 @@ func TestRunBotsListPrintsSecretSummary(t *testing.T) {
 	}
 	if strings.Contains(got, "super-secret") {
 		t.Fatalf("list output leaked secret: %q", got)
+	}
+}
+
+func TestBotsListShorthand(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := config.AddBot(configPath, config.BotConfig{ID: "default", AppID: "cli_xxx"}, "super-secret"); err != nil {
+		t.Fatalf("AddBot() error = %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := executeCommand("--config", configPath, "list"); err != nil {
+			t.Fatalf("executeCommand(list) error = %v", err)
+		}
+	})
+	if !strings.Contains(out, "default") || !strings.Contains(out, "cli_xxx") {
+		t.Fatalf("stdout = %q, want shorthand list output", out)
 	}
 }
 
@@ -148,8 +166,8 @@ func TestRunBotsCreateLarkCLIProfileUsesResolvedSecret(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if err := runBotsCommand(configPath, []string{"create-lark-cli-profile", "default"}); err != nil {
-			t.Fatalf("runBotsCommand(create-lark-cli-profile) error = %v", err)
+		if err := executeCommand("--config", configPath, "bots", "create-lark-cli-profile", "default"); err != nil {
+			t.Fatalf("executeCommand(bots create-lark-cli-profile) error = %v", err)
 		}
 	})
 	if gotProfile != "lark-acp-default" || gotAppID != "cli_xxx" || gotSecret != "super-secret" {
@@ -182,24 +200,11 @@ func TestRunBotsCreateLarkCLIProfileAcceptsExplicitProfile(t *testing.T) {
 		runLarkCLIProfileAdd = oldRun
 	})
 
-	if err := runBotsCommand(configPath, []string{"create-lark-cli-profile", "bot-a", "--profile", "custom-profile"}); err != nil {
-		t.Fatalf("runBotsCommand(create-lark-cli-profile) error = %v", err)
+	if err := executeCommand("--config", configPath, "bots", "create-lark-cli-profile", "bot-a", "--profile", "custom-profile"); err != nil {
+		t.Fatalf("executeCommand(bots create-lark-cli-profile) error = %v", err)
 	}
 	if gotProfile != "custom-profile" {
 		t.Fatalf("profile = %q, want custom-profile", gotProfile)
-	}
-}
-
-func TestSplitBotsCreateLarkCLIProfileArgsKeepsIDPositionIndependent(t *testing.T) {
-	flagArgs, positional, err := splitBotsCreateLarkCLIProfileArgs([]string{"default", "--profile", "custom-profile"})
-	if err != nil {
-		t.Fatalf("splitBotsCreateLarkCLIProfileArgs() error = %v", err)
-	}
-	if strings.Join(positional, ",") != "default" {
-		t.Fatalf("positional = %+v, want default", positional)
-	}
-	if !containsAll(flagArgs, []string{"--profile", "custom-profile"}) {
-		t.Fatalf("flagArgs = %+v, missing expected profile flag", flagArgs)
 	}
 }
 
@@ -236,8 +241,8 @@ func TestRunBotsRegisterStoresReturnedSecret(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if err := runBotsCommand(configPath, []string{"register", "default", "--timeout=1m", "--app-name", "Bridge Bot", "--app-desc=ACP bridge"}); err != nil {
-			t.Fatalf("runBotsCommand(register) error = %v", err)
+		if err := executeCommand("--config", configPath, "bots", "register", "default", "--timeout=1m", "--app-name", "Bridge Bot", "--app-desc=ACP bridge"); err != nil {
+			t.Fatalf("executeCommand(bots register) error = %v", err)
 		}
 	})
 	if !strings.Contains(out, "https://example.test/register") || !strings.Contains(out, "等待用户确认应用创建") {
@@ -451,9 +456,9 @@ func TestRunBotsRegisterRequiresPositiveTimeout(t *testing.T) {
 		registerApp = oldRegisterApp
 	})
 
-	err := runBotsCommand(filepath.Join(t.TempDir(), "config.json"), []string{"register", "default", "--timeout=0s"})
+	err := executeCommand("--config", filepath.Join(t.TempDir(), "config.json"), "bots", "register", "default", "--timeout=0s")
 	if err == nil || !strings.Contains(err.Error(), "--timeout 必须大于 0") {
-		t.Fatalf("runBotsCommand(register) error = %v, want timeout validation", err)
+		t.Fatalf("executeCommand(bots register) error = %v, want timeout validation", err)
 	}
 }
 
@@ -508,47 +513,69 @@ func TestRegistrationStatusLine(t *testing.T) {
 	}
 }
 
-func TestSplitBotsRegisterArgsKeepsIDPositionIndependent(t *testing.T) {
-	flagArgs, positional, err := splitBotsRegisterArgs([]string{"default", "--app-name", "Bridge Bot", "--timeout=1m", "--create-only=false", "--owner-open-ids", "ou_a,ou_b"})
-	if err != nil {
-		t.Fatalf("splitBotsRegisterArgs() error = %v", err)
+func TestBotsRegisterFlagsCanFollowPositional(t *testing.T) {
+	oldRegisterApp := registerApp
+	var gotOpts *registration.Options
+	registerApp = func(ctx context.Context, opts *registration.Options) (*registration.RegisterAppResult, error) {
+		gotOpts = opts
+		return &registration.RegisterAppResult{
+			ClientID:     "cli_registered",
+			ClientSecret: "registered-secret",
+			UserInfo:     &registration.UserInfo{OpenID: "ou_owner"},
+		}, nil
 	}
-	if strings.Join(positional, ",") != "default" {
-		t.Fatalf("positional = %+v, want default", positional)
+	t.Cleanup(func() {
+		registerApp = oldRegisterApp
+	})
+
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := executeCommand("--config", configPath, "bots", "register", "default", "--app-name", "Bridge Bot", "--timeout=1m", "--create-only=false", "--owner-open-ids", "ou_a,ou_b"); err != nil {
+		t.Fatalf("executeCommand(bots register) error = %v", err)
 	}
-	if !containsAll(flagArgs, []string{"--app-name", "Bridge Bot", "--timeout=1m", "--create-only=false", "--owner-open-ids", "ou_a,ou_b"}) {
-		t.Fatalf("flagArgs = %+v, missing expected flags", flagArgs)
+	if gotOpts == nil || gotOpts.AppPreset == nil || gotOpts.AppPreset.Name != "Bridge Bot" || gotOpts.CreateOnly {
+		t.Fatalf("opts = %+v, want positional independent flags", gotOpts)
 	}
 }
 
-func containsAll(values []string, wants []string) bool {
-	counts := make(map[string]int, len(values))
-	for _, value := range values {
-		counts[value]++
-	}
-	for _, want := range wants {
-		if counts[want] == 0 {
-			return false
+func TestBotsRegisterTimeoutFlagAcceptsDuration(t *testing.T) {
+	oldRegisterApp := registerApp
+	var timeout time.Duration
+	registerApp = func(ctx context.Context, opts *registration.Options) (*registration.RegisterAppResult, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("ctx has no deadline")
 		}
-		counts[want]--
+		timeout = time.Until(deadline).Round(time.Second)
+		return &registration.RegisterAppResult{
+			ClientID:     "cli_registered",
+			ClientSecret: "registered-secret",
+			UserInfo:     &registration.UserInfo{OpenID: "ou_owner"},
+		}, nil
 	}
-	return true
+	t.Cleanup(func() {
+		registerApp = oldRegisterApp
+	})
+
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := executeCommand("--config", configPath, "bots", "register", "-timeout", (2 * time.Minute).String(), "default"); err != nil {
+		t.Fatalf("executeCommand(bots register) error = %v", err)
+	}
+	if timeout < 119*time.Second || timeout > 2*time.Minute {
+		t.Fatalf("timeout = %v, want about 2m", timeout)
+	}
 }
 
-func TestRunBotsRegisterTimeoutFlagAcceptsDuration(t *testing.T) {
-	flagArgs, positional, err := splitBotsRegisterArgs([]string{"--timeout", (2 * time.Minute).String(), "default"})
-	if err != nil {
-		t.Fatalf("splitBotsRegisterArgs() error = %v", err)
-	}
-	if strings.Join(positional, ",") != "default" {
-		t.Fatalf("positional = %+v, want default", positional)
-	}
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	timeout := fs.Duration("timeout", time.Minute, "")
-	if err := fs.Parse(flagArgs); err != nil {
-		t.Fatalf("Parse(flagArgs) error = %v", err)
-	}
-	if *timeout != 2*time.Minute {
-		t.Fatalf("timeout = %v, want 2m", *timeout)
-	}
+func executeCommand(args ...string) error {
+	cmd := newRootCommand()
+	cmd.SetArgs(normalizeLegacyLongFlags(args))
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	return cmd.Execute()
 }

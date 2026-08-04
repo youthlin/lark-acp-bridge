@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,8 +13,6 @@ import (
 	"syscall"
 	"time"
 )
-
-var daemonChild = flag.Bool("daemon-child", false, "内部参数：后台子进程模式")
 
 const (
 	modeRun     = "run"
@@ -43,7 +40,7 @@ func isRunMode(command string) bool {
 }
 
 func isDaemonChild() bool {
-	return *daemonChild
+	return daemonChild
 }
 
 func runDaemon(mode, configPath string) error {

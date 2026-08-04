@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/xml"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,58 +30,6 @@ type serviceInstallOptions struct {
 
 type serviceInstallResult struct {
 	RestartCommand []string
-}
-
-func runServiceCommand(configPath string, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("用法: lark-acp-bridge service <install|uninstall>")
-	}
-	switch args[0] {
-	case "install":
-		return runServiceInstall(configPath, args[1:])
-	case "uninstall", "remove", "rm":
-		return runServiceUninstall(args[1:])
-	default:
-		return fmt.Errorf("未知 service 子命令: %s", args[0])
-	}
-}
-
-func runServiceInstall(configPath string, args []string) error {
-	fs := flagSet("service install")
-	binaryPath := fs.String("binary", "", "bridge 可执行文件路径（默认：当前可执行文件）")
-	workingDir := fs.String("working-dir", "", "服务工作目录（默认：用户主目录）")
-	servicePath := fs.String("path", "", "服务进程 PATH（默认：当前 PATH 去除临时目录后的稳定部分）")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: lark-acp-bridge service install [--binary <path>] [--working-dir <dir>] [--path <PATH>]")
-	}
-	options := serviceInstallOptions{
-		GOOS:       runtime.GOOS,
-		ConfigPath: configPath,
-		BinaryPath: *binaryPath,
-		WorkingDir: *workingDir,
-		Path:       *servicePath,
-	}
-	return installService(options)
-}
-
-func runServiceUninstall(args []string) error {
-	fs := flagSet("service uninstall")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: lark-acp-bridge service uninstall")
-	}
-	return uninstallService(runtime.GOOS)
-}
-
-func flagSet(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	return fs
 }
 
 func installService(options serviceInstallOptions) error {

@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"runtime/debug"
 	"strings"
 	"testing"
 )
 
-func TestValidateTopLevelCommand(t *testing.T) {
+func TestValidateTopLevelArgs(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
@@ -22,46 +23,85 @@ func TestValidateTopLevelCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateTopLevelCommand(tt.args)
+			err := validateTopLevelArgs(tt.args)
 			if tt.wantErr == "" {
 				if err != nil {
-					t.Fatalf("validateTopLevelCommand(%v) error = %v", tt.args, err)
+					t.Fatalf("validateTopLevelArgs(%v) error = %v", tt.args, err)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("validateTopLevelCommand(%v) error = nil, want %q", tt.args, tt.wantErr)
+				t.Fatalf("validateTopLevelArgs(%v) error = nil, want %q", tt.args, tt.wantErr)
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("validateTopLevelCommand(%v) error = %q, want contains %q", tt.args, err, tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), "bots <list|add|register|create-lark-cli-profile|remove>") {
-				t.Fatalf("validateTopLevelCommand(%v) error missing usage, got %q", tt.args, err)
+				t.Fatalf("validateTopLevelArgs(%v) error = %q, want contains %q", tt.args, err, tt.wantErr)
 			}
 		})
 	}
 }
 
 func TestTopLevelUsage(t *testing.T) {
-	usage := topLevelUsage()
+	usage, err := commandOutput("--help")
+	if err != nil {
+		t.Fatalf("commandOutput(--help) error = %v", err)
+	}
 	wantParts := []string{
-		"lark-acp-bridge [--config <path>] [--version] [run|start|stop|restart]",
-		"bots <list|add|register|create-lark-cli-profile|remove>",
-		"service <install|uninstall>",
-		"update [--check] [--version <tag>]",
-		"运行模式:",
-		"子命令:",
-		"-config string",
-		"-version",
+		"Usage:",
+		"Available Commands:",
+		"bots",
+		"service",
+		"update",
+		"run",
+		"start",
+		"stop",
+		"restart",
+		"--config string",
+		"--version",
 	}
 	for _, part := range wantParts {
 		if !strings.Contains(usage, part) {
-			t.Fatalf("topLevelUsage() missing %q in:\n%s", part, usage)
+			t.Fatalf("--help missing %q in:\n%s", part, usage)
 		}
 	}
 	if strings.Contains(usage, "daemon-child") {
-		t.Fatalf("topLevelUsage() exposes internal daemon flag:\n%s", usage)
+		t.Fatalf("--help exposes internal daemon flag:\n%s", usage)
 	}
+	if strings.Contains(usage, "completion") {
+		t.Fatalf("--help exposes completion command:\n%s", usage)
+	}
+}
+
+func TestTopLevelVersionFlag(t *testing.T) {
+	oldVersion := version
+	version = "v9.9.9"
+	t.Cleanup(func() {
+		version = oldVersion
+	})
+	out, err := commandOutput("--version")
+	if err != nil {
+		t.Fatalf("commandOutput(--version) error = %v", err)
+	}
+	if strings.TrimSpace(out) != "v9.9.9" {
+		t.Fatalf("--version output = %q, want v9.9.9", out)
+	}
+
+	out, err = commandOutput("-version")
+	if err != nil {
+		t.Fatalf("commandOutput(-version) error = %v", err)
+	}
+	if strings.TrimSpace(out) != "v9.9.9" {
+		t.Fatalf("-version output = %q, want v9.9.9", out)
+	}
+}
+
+func commandOutput(args ...string) (string, error) {
+	cmd := newRootCommand()
+	cmd.SetArgs(normalizeLegacyLongFlags(args))
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	return out.String(), err
 }
 
 func TestAppVersionFromBuildInfo(t *testing.T) {

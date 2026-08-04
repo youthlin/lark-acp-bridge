@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +39,16 @@ type botRegisterOptions struct {
 	LarkDomain   string
 }
 
+type botsAddOptions struct {
+	ID           string
+	AppID        string
+	StdinSecret  bool
+	Workspace    string
+	SecretFile   string
+	BotOpenID    string
+	OwnerOpenIDs string
+}
+
 func main() {
 	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logging.ProgramLevel(),
@@ -50,69 +59,40 @@ func main() {
 }
 
 func run() error {
-	flag.Usage = func() {
-		fmt.Fprint(flag.CommandLine.Output(), topLevelUsage())
+	if err := execute(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
 	}
-	var configPath string
-	var showVersion bool
-	flag.StringVar(&configPath, "config", "", "JSON 配置文件路径（默认：~/.lark-acp-bridge/config.json）")
-	flag.BoolVar(&showVersion, "version", false, "打印版本号并退出")
-	flag.Parse()
+	return nil
+}
 
-	if showVersion {
-		fmt.Println(appVersion())
-		return nil
-	}
-
-	args := flag.Args()
-	if err := validateTopLevelCommand(args); err != nil {
-		return reportCommandError(err)
-	}
-	if len(args) > 0 && args[0] == "bots" {
-		return reportCommandError(runBotsCommand(configPath, args[1:]))
-	}
-	if len(args) > 0 && args[0] == "service" {
-		return reportCommandError(runServiceCommand(configPath, args[1:]))
-	}
-	if len(args) > 0 && args[0] == "update" {
-		return reportCommandError(runUpdateCommand(args[1:]))
-	}
-	if len(args) > 0 && isBotsShorthand(args[0]) {
-		return reportCommandError(runBotsCommand(configPath, args))
-	}
-
+func runBridge(configPath, mode string) error {
 	loaded, err := config.LoadOrCreate(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "读取配置失败, err=%v\n", err)
-		return err
+		return fmt.Errorf("读取配置失败, err=%v", err)
 	}
 	if loaded.Created {
 		slog.Info("已创建默认配置文件", "路径", loaded.Path)
 	}
-	mode := runMode(flag.Args())
 	if !isDaemonChild() && mode == modeStop {
 		return runDaemon(mode, loaded.Path)
 	}
 	loaded.Config, err = ensureInitialBotRegistered(loaded.Path, loaded.Config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "注册 default bot 失败, err=%v\n", err)
-		return err
+		return fmt.Errorf("注册 default bot 失败, err=%v", err)
 	}
 	if loaded.Config.MissingBotConfig() {
 		msg := fmt.Sprintf(`
 未配置可用的 app_id/app_secret, 请编辑配置文件: %s
 可运行 lark-acp-bridge bots register default 创建并写入默认 bot`, loaded.Path)
-		fmt.Fprintln(os.Stderr, msg)
 		return errors.New(msg)
 	}
 	if err := loaded.Config.ResolveSecrets(); err != nil {
-		fmt.Fprintf(os.Stderr, "解析 bot secret 失败, err=%v\n", err)
-		return err
+		return fmt.Errorf("解析 bot secret 失败, err=%v", err)
 	}
 	filteredConfig, err := loaded.Config.FilterAvailableAgentCommands(os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "无法识别的acp命令失败, err=%v\n", err)
-		return err
+		return fmt.Errorf("无法识别的acp命令失败, err=%v", err)
 	}
 	loaded.Config = filteredConfig
 
@@ -120,83 +100,6 @@ func run() error {
 		return runDaemon(mode, loaded.Path)
 	}
 	return runForeground(loaded.Config, loaded.Path)
-}
-
-func validateTopLevelCommand(args []string) error {
-	if len(args) == 0 {
-		return nil
-	}
-	cmd := strings.TrimSpace(args[0])
-	if isRunMode(cmd) || isTopLevelSubcommand(cmd) || isBotsShorthand(cmd) {
-		return nil
-	}
-	return fmt.Errorf("无法识别的命令: lark-acp-bridge %s\n\n%s", args[0], topLevelUsage())
-}
-
-func isTopLevelSubcommand(command string) bool {
-	switch command {
-	case "bots", "service", "update":
-		return true
-	default:
-		return false
-	}
-}
-
-func topLevelUsage() string {
-	return `用法:
-  lark-acp-bridge [--config <path>] [--version] [run|start|stop|restart]
-  lark-acp-bridge [--config <path>] bots <list|add|register|create-lark-cli-profile|remove>
-  lark-acp-bridge [--config <path>] service <install|uninstall>
-  lark-acp-bridge update [--check] [--version <tag>] [--repo <owner/name>] [--gitee-repo <owner/name>|-] [--binary <path>]
-
-运行模式:
-  run       前台运行
-  start     后台启动
-  stop      停止后台服务
-  restart   重启后台服务（默认）
-
-子命令:
-  bots      管理 bot 配置
-  service   安装或卸载用户级服务
-  update    更新 bridge 二进制（只替换不重启）
-
-选项:
-  -config string
-        JSON 配置文件路径（默认：~/.lark-acp-bridge/config.json）
-  -version
-        打印版本号并退出
-`
-}
-
-func reportCommandError(err error) error {
-	if err != nil && !errors.Is(err, flag.ErrHelp) {
-		fmt.Fprintln(os.Stderr, err)
-	}
-	return err
-}
-
-func runBotsCommand(configPath string, args []string) error {
-	path, err := configPathOrDefault(configPath)
-	if err != nil {
-		return err
-	}
-	if len(args) == 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots <list|add|register|create-lark-cli-profile|remove>")
-	}
-	switch args[0] {
-	case "list":
-		return runBotsList(path, args[1:])
-	case "add":
-		return runBotsAdd(path, args[1:])
-	case "register":
-		return runBotsRegister(path, args[1:])
-	case "create-lark-cli-profile":
-		return runBotsCreateLarkCLIProfile(path, args[1:])
-	case "remove", "rm":
-		return runBotsRemove(path, args[1:])
-	default:
-		return fmt.Errorf("未知 bots 子命令: %s", args[0])
-	}
 }
 
 func isBotsShorthand(command string) bool {
@@ -215,19 +118,10 @@ func configPathOrDefault(configPath string) (string, error) {
 	return config.ExpandPath(configPath)
 }
 
-func runBotsList(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots list", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots list")
-	}
+func runBotsList(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "读取配置失败, err=%v\n", err)
-		return err
+		return fmt.Errorf("读取配置失败, err=%v", err)
 	}
 	for _, bot := range cfg.Bots {
 		fmt.Printf("%s\t%s\t%s\t%s\n", bot.ID, bot.AppID, bot.Workspace, bot.AppSecret.Summary())
@@ -235,41 +129,24 @@ func runBotsList(configPath string, args []string) error {
 	return nil
 }
 
-func runBotsAdd(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots add", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	stdinSecret := fs.Bool("stdin-secret", false, "从 stdin 读取 app secret")
-	workspace := fs.String("workspace", "", "bot workspace 路径（默认：$HOME/.lark-acp-bridge/bots/<id>）")
-	secretFile := fs.String("secret-file", "", "app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
-	botOpenID := fs.String("bot-open-id", "", "bot 自己的 open_id")
-	ownerOpenIDs := fs.String("owner-open-ids", "", "逗号分隔的 owner open_id 列表")
-	flagArgs, positional, err := splitBotsAddArgs(args)
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
-	}
-	if len(positional) != 2 {
-		return fmt.Errorf("用法: lark-acp-bridge bots add <id> <app_id> --stdin-secret")
-	}
-	if !*stdinSecret {
+func runBotsAdd(configPath string, options botsAddOptions) error {
+	if !options.StdinSecret {
 		return fmt.Errorf("请使用 --stdin-secret 从 stdin 读取 app_secret")
 	}
 	secretData, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("读取 stdin secret: %w", err)
 	}
-	id := positional[0]
+	id := options.ID
 	bot := config.BotConfig{
 		ID:           id,
-		AppID:        positional[1],
-		Workspace:    *workspace,
-		AppSecret:    config.FileSecret(*secretFile),
-		BotOpenID:    *botOpenID,
-		OwnerOpenIDs: splitCSV(*ownerOpenIDs),
+		AppID:        options.AppID,
+		Workspace:    options.Workspace,
+		AppSecret:    config.FileSecret(options.SecretFile),
+		BotOpenID:    options.BotOpenID,
+		OwnerOpenIDs: splitCSV(options.OwnerOpenIDs),
 	}
-	if strings.TrimSpace(*secretFile) == "" {
+	if strings.TrimSpace(options.SecretFile) == "" {
 		bot.AppSecret = config.FileSecret(config.DefaultBotSecretPath(id))
 	}
 	if err := config.AddBot(configPath, bot, string(secretData)); err != nil {
@@ -279,71 +156,25 @@ func runBotsAdd(configPath string, args []string) error {
 	return nil
 }
 
-func runBotsRegister(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots register", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	workspace := fs.String("workspace", "", "bot workspace 路径（默认：$HOME/.lark-acp-bridge/bots/<id>）")
-	secretFile := fs.String("secret-file", "", "app secret 文件路径（默认：$HOME/.lark-acp-bridge/secrets/<id>.appsecret）")
-	botOpenID := fs.String("bot-open-id", "", "bot 自己的 open_id")
-	ownerOpenIDs := fs.String("owner-open-ids", "", "逗号分隔的 owner open_id 列表（默认使用扫码用户 open_id）")
-	timeout := fs.Duration("timeout", 10*time.Minute, "等待用户完成一键创建的超时时间")
-	appName := fs.String("app-name", "", "预填应用名称（用户可在创建页修改）")
-	appDesc := fs.String("app-desc", "", "预填应用描述（用户可在创建页修改）")
-	createOnly := fs.Bool("create-only", true, "只允许创建新应用")
-	domain := fs.String("domain", "", "飞书认证域名（默认由 SDK 决定）")
-	larkDomain := fs.String("lark-domain", "", "Lark 认证域名（默认由 SDK 决定）")
-	flagArgs, positional, err := splitBotsRegisterArgs(args)
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
-	}
-	if len(positional) != 1 {
-		return fmt.Errorf("用法: lark-acp-bridge bots register <id>")
-	}
-	id := strings.TrimSpace(positional[0])
+func runBotsRegister(configPath string, options botRegisterOptions) error {
+	id := strings.TrimSpace(options.ID)
 	if id == "" {
 		return fmt.Errorf("bot id 不能为空")
 	}
-	if err := registerAndAddBot(configPath, botRegisterOptions{
-		ID:           id,
-		Workspace:    *workspace,
-		SecretFile:   *secretFile,
-		BotOpenID:    *botOpenID,
-		OwnerOpenIDs: splitCSV(*ownerOpenIDs),
-		Timeout:      *timeout,
-		AppName:      *appName,
-		AppDesc:      *appDesc,
-		CreateOnly:   *createOnly,
-		Domain:       *domain,
-		LarkDomain:   *larkDomain,
-	}); err != nil {
+	options.ID = id
+	if err := registerAndAddBot(configPath, options); err != nil {
 		return err
 	}
 	fmt.Printf("已注册并添加 bot %s，配置: %s\n", id, configPath)
 	return nil
 }
 
-func runBotsCreateLarkCLIProfile(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots create-lark-cli-profile", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	profile := fs.String("profile", "", "lark-cli profile 名称（默认：lark-acp-<bot-id>）")
-	flagArgs, positional, err := splitBotsCreateLarkCLIProfileArgs(args)
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
-	}
-	if len(positional) != 1 || fs.NArg() != 0 {
-		return fmt.Errorf("用法: lark-acp-bridge bots create-lark-cli-profile <id> [--profile <name>]")
-	}
-	id := strings.TrimSpace(positional[0])
+func runBotsCreateLarkCLIProfile(configPath, id, profile string) error {
+	id = strings.TrimSpace(id)
 	if id == "" {
 		return fmt.Errorf("bot id 不能为空")
 	}
-	profileName := strings.TrimSpace(*profile)
+	profileName := strings.TrimSpace(profile)
 	if profileName == "" {
 		profileName = "lark-acp-" + id
 	}
@@ -372,32 +203,6 @@ func runBotsCreateLarkCLIProfile(configPath string, args []string) error {
 	}
 	fmt.Printf("已创建 lark-cli profile %s（bot: %s, app_id: %s）。\n", profileName, id, appID)
 	return nil
-}
-
-func splitBotsCreateLarkCLIProfileArgs(args []string) ([]string, []string, error) {
-	valueFlags := map[string]struct{}{
-		"-profile":  {},
-		"--profile": {},
-	}
-	var flagArgs []string
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "-profile=") || strings.HasPrefix(arg, "--profile=") {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if _, ok := valueFlags[arg]; ok {
-			if i+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
-			}
-			flagArgs = append(flagArgs, arg, args[i+1])
-			i++
-			continue
-		}
-		positional = append(positional, arg)
-	}
-	return flagArgs, positional, nil
 }
 
 func findBotByID(cfg config.Config, id string) (config.BotConfig, bool) {
@@ -602,151 +407,15 @@ func registrationStatusLine(info *registration.StatusChangeInfo) string {
 	}
 }
 
-func splitBotsAddArgs(args []string) ([]string, []string, error) {
-	valueFlags := map[string]struct{}{
-		"-workspace":       {},
-		"--workspace":      {},
-		"-secret-file":     {},
-		"--secret-file":    {},
-		"-bot-open-id":     {},
-		"--bot-open-id":    {},
-		"-owner-open-ids":  {},
-		"--owner-open-ids": {},
-	}
-	boolFlags := map[string]struct{}{
-		"-stdin-secret":  {},
-		"--stdin-secret": {},
-	}
-	var flagArgs []string
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if _, ok := boolFlags[arg]; ok {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if strings.HasPrefix(arg, "-workspace=") ||
-			strings.HasPrefix(arg, "--workspace=") ||
-			strings.HasPrefix(arg, "-secret-file=") ||
-			strings.HasPrefix(arg, "--secret-file=") ||
-			strings.HasPrefix(arg, "-bot-open-id=") ||
-			strings.HasPrefix(arg, "--bot-open-id=") ||
-			strings.HasPrefix(arg, "-owner-open-ids=") ||
-			strings.HasPrefix(arg, "--owner-open-ids=") {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if _, ok := valueFlags[arg]; ok {
-			if i+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
-			}
-			flagArgs = append(flagArgs, arg, args[i+1])
-			i++
-			continue
-		}
-		positional = append(positional, arg)
-	}
-	return flagArgs, positional, nil
-}
-
-func splitBotsRegisterArgs(args []string) ([]string, []string, error) {
-	valueFlags := map[string]struct{}{
-		"-workspace":       {},
-		"--workspace":      {},
-		"-secret-file":     {},
-		"--secret-file":    {},
-		"-bot-open-id":     {},
-		"--bot-open-id":    {},
-		"-owner-open-ids":  {},
-		"--owner-open-ids": {},
-		"-timeout":         {},
-		"--timeout":        {},
-		"-app-name":        {},
-		"--app-name":       {},
-		"-app-desc":        {},
-		"--app-desc":       {},
-		"-domain":          {},
-		"--domain":         {},
-		"-lark-domain":     {},
-		"--lark-domain":    {},
-	}
-	boolFlags := map[string]struct{}{
-		"-create-only":  {},
-		"--create-only": {},
-	}
-	prefixes := []string{
-		"-workspace=",
-		"--workspace=",
-		"-secret-file=",
-		"--secret-file=",
-		"-bot-open-id=",
-		"--bot-open-id=",
-		"-owner-open-ids=",
-		"--owner-open-ids=",
-		"-timeout=",
-		"--timeout=",
-		"-app-name=",
-		"--app-name=",
-		"-app-desc=",
-		"--app-desc=",
-		"-create-only=",
-		"--create-only=",
-		"-domain=",
-		"--domain=",
-		"-lark-domain=",
-		"--lark-domain=",
-	}
-	var flagArgs []string
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if _, ok := boolFlags[arg]; ok {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if hasAnyPrefix(arg, prefixes) {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if _, ok := valueFlags[arg]; ok {
-			if i+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s 缺少参数值", arg)
-			}
-			flagArgs = append(flagArgs, arg, args[i+1])
-			i++
-			continue
-		}
-		positional = append(positional, arg)
-	}
-	return flagArgs, positional, nil
-}
-
-func hasAnyPrefix(value string, prefixes []string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func runBotsRemove(configPath string, args []string) error {
-	fs := flag.NewFlagSet("bots remove", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: lark-acp-bridge bots remove <id>")
-	}
-	removed, err := config.RemoveBot(configPath, fs.Arg(0))
+func runBotsRemove(configPath, id string) error {
+	removed, err := config.RemoveBot(configPath, id)
 	if err != nil {
 		return err
 	}
 	if !removed {
-		return fmt.Errorf("bot 不存在: %s", strings.TrimSpace(fs.Arg(0)))
+		return fmt.Errorf("bot 不存在: %s", strings.TrimSpace(id))
 	}
-	fmt.Printf("已删除 bot %s，配置: %s\n", strings.TrimSpace(fs.Arg(0)), configPath)
+	fmt.Printf("已删除 bot %s，配置: %s\n", strings.TrimSpace(id), configPath)
 	return nil
 }
 
