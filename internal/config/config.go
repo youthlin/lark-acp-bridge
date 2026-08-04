@@ -225,11 +225,6 @@ func decryptSecret(cipherText, keyText string) (string, error) {
 }
 
 func Default() Config {
-	traex := AgentConfig{
-		Command:    "traex",
-		Args:       []string{"acp", "serve", "-c", "permission_mode=auto"},
-		DefaultCwd: "$HOME",
-	}
 	return Config{
 		Bots: []BotConfig{
 			{
@@ -240,7 +235,26 @@ func Default() Config {
 			},
 		},
 		AgentList: []NamedAgentConfig{
-			{Name: "traex", AgentConfig: traex},
+			{Name: "traex", AgentConfig: AgentConfig{
+				Command:    "traex",
+				Args:       []string{"acp", "serve", "-c", "permission_mode=auto"},
+				DefaultCwd: "$HOME",
+			}},
+			{Name: "traecli", AgentConfig: AgentConfig{
+				Command:    "traecli",
+				Args:       []string{"acp", "serve", "-c", "permission_mode=auto"},
+				DefaultCwd: "$HOME",
+			}},
+			{Name: "codex", AgentConfig: AgentConfig{
+				Command:    "codex-acp",
+				Args:       []string{},
+				DefaultCwd: "$HOME",
+			}},
+			{Name: "omp", AgentConfig: AgentConfig{
+				Command:    "omp",
+				Args:       []string{"acp", "--auto-approve"},
+				DefaultCwd: "$HOME",
+			}},
 		},
 	}
 }
