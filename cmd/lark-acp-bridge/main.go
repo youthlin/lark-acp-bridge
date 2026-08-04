@@ -50,6 +50,9 @@ func main() {
 }
 
 func run() error {
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), topLevelUsage())
+	}
 	var configPath string
 	var showVersion bool
 	flag.StringVar(&configPath, "config", "", "JSON 配置文件路径（默认：~/.lark-acp-bridge/config.json）")
@@ -61,16 +64,20 @@ func run() error {
 		return nil
 	}
 
-	if args := flag.Args(); len(args) > 0 && args[0] == "bots" {
+	args := flag.Args()
+	if err := validateTopLevelCommand(args); err != nil {
+		return reportCommandError(err)
+	}
+	if len(args) > 0 && args[0] == "bots" {
 		return reportCommandError(runBotsCommand(configPath, args[1:]))
 	}
-	if args := flag.Args(); len(args) > 0 && args[0] == "service" {
+	if len(args) > 0 && args[0] == "service" {
 		return reportCommandError(runServiceCommand(configPath, args[1:]))
 	}
-	if args := flag.Args(); len(args) > 0 && args[0] == "update" {
+	if len(args) > 0 && args[0] == "update" {
 		return reportCommandError(runUpdateCommand(args[1:]))
 	}
-	if args := flag.Args(); len(args) > 0 && isBotsShorthand(args[0]) {
+	if len(args) > 0 && isBotsShorthand(args[0]) {
 		return reportCommandError(runBotsCommand(configPath, args))
 	}
 
@@ -113,6 +120,52 @@ func run() error {
 		return runDaemon(mode, loaded.Path)
 	}
 	return runForeground(loaded.Config, loaded.Path)
+}
+
+func validateTopLevelCommand(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	cmd := strings.TrimSpace(args[0])
+	if isRunMode(cmd) || isTopLevelSubcommand(cmd) || isBotsShorthand(cmd) {
+		return nil
+	}
+	return fmt.Errorf("无法识别的命令: lark-acp-bridge %s\n\n%s", args[0], topLevelUsage())
+}
+
+func isTopLevelSubcommand(command string) bool {
+	switch command {
+	case "bots", "service", "update":
+		return true
+	default:
+		return false
+	}
+}
+
+func topLevelUsage() string {
+	return `用法:
+  lark-acp-bridge [--config <path>] [--version] [run|start|stop|restart]
+  lark-acp-bridge [--config <path>] bots <list|add|register|create-lark-cli-profile|remove>
+  lark-acp-bridge [--config <path>] service <install|uninstall>
+  lark-acp-bridge update [--check] [--version <tag>] [--repo <owner/name>] [--gitee-repo <owner/name>|-] [--binary <path>]
+
+运行模式:
+  run       前台运行
+  start     后台启动
+  stop      停止后台服务
+  restart   重启后台服务（默认）
+
+子命令:
+  bots      管理 bot 配置
+  service   安装或卸载用户级服务
+  update    更新 bridge 二进制（只替换不重启）
+
+选项:
+  -config string
+        JSON 配置文件路径（默认：~/.lark-acp-bridge/config.json）
+  -version
+        打印版本号并退出
+`
 }
 
 func reportCommandError(err error) error {

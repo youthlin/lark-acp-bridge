@@ -15,10 +15,16 @@ func runMode(args []string) string {
 	if len(args) == 0 {
 		return modeRun
 	}
-	if args[0] == modeRun {
-		return modeRun
-	}
 	return args[0]
+}
+
+func isRunMode(command string) bool {
+	switch command {
+	case modeRun, modeStart, modeStop, modeRestart:
+		return true
+	default:
+		return false
+	}
 }
 
 func isDaemonChild() bool {

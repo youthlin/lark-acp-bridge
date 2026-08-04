@@ -20,7 +20,7 @@ func TestRunMode(t *testing.T) {
 		{name: "start", args: []string{modeStart}, want: modeStart},
 		{name: "stop", args: []string{modeStop}, want: modeStop},
 		{name: "restart", args: []string{modeRestart}, want: modeRestart},
-		{name: "unknown defaults restart", args: []string{"status"}, want: modeRestart},
+		{name: "unknown stays unknown", args: []string{"status"}, want: "status"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

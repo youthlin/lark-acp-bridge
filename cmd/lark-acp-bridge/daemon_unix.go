@@ -30,11 +30,15 @@ func runMode(args []string) string {
 	if len(args) == 0 {
 		return modeRestart
 	}
-	switch args[0] {
+	return args[0]
+}
+
+func isRunMode(command string) bool {
+	switch command {
 	case modeRun, modeStart, modeStop, modeRestart:
-		return args[0]
+		return true
 	default:
-		return modeRestart
+		return false
 	}
 }
 
