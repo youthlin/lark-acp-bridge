@@ -87,7 +87,7 @@ func runBridge(configPath, mode string) error {
 可运行 lark-acp-bridge bots register default 创建并写入默认 bot`, loaded.Path)
 		return errors.New(msg)
 	}
-	if err := loaded.Config.ResolveSecrets(); err != nil {
+	if err = loaded.Config.ResolveSecrets(); err != nil {
 		return fmt.Errorf("解析 bot secret 失败, err=%v", err)
 	}
 	filteredConfig, err := loaded.Config.FilterAvailableAgentCommands(os.Stderr)
@@ -249,7 +249,7 @@ func ensureInitialBotRegistered(configPath string, cfg config.Config) (config.Co
 	if err := registerAndAddBot(configPath, botRegisterOptions{
 		ID:         "default",
 		Timeout:    10 * time.Minute,
-		CreateOnly: true,
+		CreateOnly: false,
 	}); err != nil {
 		return config.Config{}, err
 	}

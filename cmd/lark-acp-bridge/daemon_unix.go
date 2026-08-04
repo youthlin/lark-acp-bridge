@@ -168,7 +168,7 @@ func writeDaemonPIDFile(configPath string) (func(), error) {
 
 func childArgs(args []string) []string {
 	out := make([]string, 0, len(os.Args))
-	out = append(out, "-daemon-child")
+	out = append(out, "--daemon-child")
 	skipNext := false
 	for _, arg := range args {
 		if skipNext {
