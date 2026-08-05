@@ -6,14 +6,22 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 )
 
 const workspaceBootstrapFile = "Bootstrap.md"
+const workspaceWikiPolicyMarker = "<!-- lark-acp-bridge:wiki-policy:v1 -->"
 
 type WorkspaceStatus struct {
 	Path         string
 	CreatedFiles []string
+}
+
+type WorkspaceUpgradeStatus struct {
+	Path         string
+	UpdatedFiles []string
 }
 
 func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
@@ -86,6 +94,116 @@ func workspaceHasManagedFiles(path string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func upgradeWorkspaceWikiPolicy(path string) (WorkspaceUpgradeStatus, error) {
+	if strings.TrimSpace(path) == "" {
+		return WorkspaceUpgradeStatus{}, fmt.Errorf("workspace 为空")
+	}
+	if err := ensureWorkspaceRoot(path); err != nil {
+		return WorkspaceUpgradeStatus{}, err
+	}
+	status := WorkspaceUpgradeStatus{Path: path}
+	files := map[string]string{
+		filepath.Join("knowledge", "AGENTS.md"):     workspaceKnowledgePolicyBlock(),
+		filepath.Join("knowledge", "lint.md"):       workspaceKnowledgeLintPolicyBlock(),
+		filepath.Join("skills", "wiki", "SKILL.md"): workspaceWikiSkillPolicyBlock(),
+	}
+	for _, name := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		updated, err := appendWorkspacePolicyBlock(filepath.Join(path, name), files[name])
+		if err != nil {
+			return WorkspaceUpgradeStatus{}, fmt.Errorf("更新 workspace 文件 %s: %w", name, err)
+		}
+		if updated {
+			status.UpdatedFiles = append(status.UpdatedFiles, name)
+		}
+	}
+	return status, nil
+}
+
+func appendWorkspacePolicyBlock(path string, block string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return false, err
+		}
+		data = nil
+	}
+	if strings.Contains(string(data), workspaceWikiPolicyMarker) {
+		return false, nil
+	}
+	next := strings.TrimRight(string(data), " \t\r\n")
+	if next != "" {
+		next += "\n\n"
+	}
+	next += strings.TrimSpace(block) + "\n"
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func workspaceKnowledgePolicyBlock() string {
+	return strings.Join([]string{
+		workspaceWikiPolicyMarker,
+		"",
+		"## Bridge Wiki Policy",
+		"",
+		"以下规则由 lark-acp-bridge 写入，用于让已有 workspace 跟随当前知识库维护约束：",
+		"",
+		"1. 同级文件或目录名称必须能区分用途；结构应服务检索，而不是为了分类本身增加层级。",
+		"2. 写入前先判断信息属于 L0 偏好、L1 项目知识还是 L2 可复用流程；不要把一次性任务结果写成长期知识。",
+		"3. 遇到矛盾或过时信息时，保留当前结论、依据和更新时间，不要静默覆盖重要背景。",
+	}, "\n")
+}
+
+func workspaceKnowledgeLintPolicyBlock() string {
+	return strings.Join([]string{
+		workspaceWikiPolicyMarker,
+		"",
+		"## Bridge Wiki Lint Policy",
+		"",
+		"执行知识库一致性检查时，除原有检查项外，还应检查：",
+		"",
+		"1. 同级文件或目录名称是否能区分用途，目录层级是否服务检索。",
+		"2. 是否有一次性任务结果、临时状态或可由源码直接读取的信息被写成长期知识。",
+	}, "\n")
+}
+
+func workspaceWikiSkillPolicyBlock() string {
+	return strings.Join([]string{
+		workspaceWikiPolicyMarker,
+		"",
+		"## Bridge Wiki Maintenance Policy",
+		"",
+		"维护 workspace 知识库时还应遵守：",
+		"",
+		"1. 保持 taxonomy 清晰：同级名称可区分、父级覆盖子级、相关内容位置相近，结构应服务检索。",
+		"2. 写入矛盾信息时保留当前结论、依据和更新时间；不确定时标注待确认。",
+	}, "\n")
+}
+
+func appendWorkspaceUpgradeLog(path string, status WorkspaceUpgradeStatus) error {
+	if len(status.UpdatedFiles) == 0 {
+		return nil
+	}
+	logPath := filepath.Join(path, "knowledge", "log.md")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return err
+	}
+	files := append([]string(nil), status.UpdatedFiles...)
+	slices.Sort(files)
+	line := fmt.Sprintf("[%s] 更新 workspace wiki policy 同步 bridge 当前知识库维护约束，涉及 %s", time.Now().Format("2006-01-02"), strings.Join(files, "、"))
+	text := strings.TrimRight(string(data), " \t\r\n") + "\n" + line + "\n"
+	return os.WriteFile(logPath, []byte(text), 0o644)
 }
 
 func workspaceBootstrapExists(path string) (bool, error) {
@@ -235,6 +353,9 @@ func workspaceFiles(botID string) []struct {
 3. 在 ` + "`log.md`" + ` 末尾追加变更记录，格式：` + "`[YYYY-MM-DD] 操作 文件 摘要`" + `。
 4. 文件名用小写短横线命名，体现主题。
 5. 保持简洁，避免冗余；过时知识及时修订或删除，并同步索引。
+6. 同级文件或目录名称必须能区分用途；结构应服务检索，而不是为了分类本身增加层级。
+7. 写入前先判断信息属于 L0 偏好、L1 项目知识还是 L2 可复用流程；不要把一次性任务结果写成长期知识。
+8. 遇到矛盾或过时信息时，保留当前结论、依据和更新时间，不要静默覆盖重要背景。
 `,
 		},
 		{
@@ -327,6 +448,8 @@ tags:
 2. ` + "`knowledge/core.md`" + ` 引用清单与实际知识文件是否同步。
 3. 不同文件中是否存在互相矛盾或明显过时的信息。
 4. 新增、删除、重命名文件后是否已在 ` + "`knowledge/log.md`" + ` 追加记录。
+5. 同级文件或目录名称是否能区分用途，目录层级是否服务检索。
+6. 是否有一次性任务结果、临时状态或可由源码直接读取的信息被写成长期知识。
 
 发现问题后直接修复，并在 ` + "`knowledge/log.md`" + ` 追加变更记录。
 `,
@@ -401,6 +524,8 @@ trigger: 当用户要求记住经验、沉淀知识、整理知识库、创建�
 3. 新增、删除、重命名知识或技能文件后，同步更新 ` + "`knowledge/index.md`" + `。
 4. 在 ` + "`knowledge/log.md`" + ` 末尾追加 [YYYY-MM-DD] 操作 文件 摘要。
 5. 保持内容简洁，避免记录一次性任务结果。
+6. 保持 taxonomy 清晰：同级名称可区分、父级覆盖子级、相关内容位置相近，结构应服务检索。
+7. 写入矛盾信息时保留当前结论、依据和更新时间；不确定时标注待确认。
 `,
 		},
 	}

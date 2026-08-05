@@ -76,6 +76,61 @@ func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T)
 	}
 }
 
+func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	markWorkspaceBootstrapped(t, workspace)
+	knowledgeAgents := filepath.Join(workspace, "knowledge", "AGENTS.md")
+	if err := os.WriteFile(knowledgeAgents, []byte("# Custom Knowledge Rules\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(knowledge/AGENTS.md) error = %v", err)
+	}
+
+	status, err := upgradeWorkspaceWikiPolicy(workspace)
+	if err != nil {
+		t.Fatalf("upgradeWorkspaceWikiPolicy() error = %v", err)
+	}
+	if len(status.UpdatedFiles) != 3 {
+		t.Fatalf("updated files = %+v, want three policy files", status.UpdatedFiles)
+	}
+	if err := appendWorkspaceUpgradeLog(workspace, status); err != nil {
+		t.Fatalf("appendWorkspaceUpgradeLog() error = %v", err)
+	}
+	for _, file := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		text := string(data)
+		if strings.Count(text, workspaceWikiPolicyMarker) != 1 {
+			t.Fatalf("%s marker count = %d, want one in:\n%s", file, strings.Count(text, workspaceWikiPolicyMarker), text)
+		}
+		if file == filepath.Join("knowledge", "AGENTS.md") && !strings.Contains(text, "# Custom Knowledge Rules") {
+			t.Fatalf("knowledge/AGENTS.md lost existing content:\n%s", text)
+		}
+	}
+	logData, err := os.ReadFile(filepath.Join(workspace, "knowledge", "log.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(knowledge/log.md) error = %v", err)
+	}
+	if !strings.Contains(string(logData), "同步 bridge 当前知识库维护约束") {
+		t.Fatalf("knowledge/log.md = %q, want upgrade log", logData)
+	}
+
+	status, err = upgradeWorkspaceWikiPolicy(workspace)
+	if err != nil {
+		t.Fatalf("second upgradeWorkspaceWikiPolicy() error = %v", err)
+	}
+	if len(status.UpdatedFiles) != 0 {
+		t.Fatalf("second updated files = %+v, want none", status.UpdatedFiles)
+	}
+}
+
 func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
 	oldWd, err := os.Getwd()
 	if err != nil {

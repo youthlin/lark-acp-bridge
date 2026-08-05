@@ -194,7 +194,7 @@ var slashRoutedCommandTable = []slashCommandSpec{
 	},
 	{
 		name:      "/wiki",
-		helpLines: []string{"/wiki on|off|status|interval <duration> - 管理当前聊天的自动知识沉淀"},
+		helpLines: []string{"/wiki on|off|status|lint|upgrade|interval <duration> - 管理当前聊天的自动知识沉淀和一致性检查"},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleWikiCommand(ctx, text, msg)
 		},

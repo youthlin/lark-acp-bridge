@@ -3,18 +3,22 @@ package bridge
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
 func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	rt := &fakeRuntime{promptReply: "NoReply"}
+	rt := &fakeRuntime{promptReply: "changed: yes\nfiles:\n- knowledge/core.md\nsummary: 更新知识入口\nreason: 用户要求长期保留"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
@@ -41,6 +45,489 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	}
 	if !status.lastSuccess || status.running {
 		t.Fatalf("wiki status = %+v, want completed success", status)
+	}
+	if !strings.Contains(status.lastSummary, "knowledge/core.md") {
+		t.Fatalf("wiki summary = %q, want changed files", status.lastSummary)
+	}
+}
+
+func TestWikiReflectionPromptRequestsAuditSummary(t *testing.T) {
+	prompt := wikiReflectionPrompt("/workspace")
+	for _, want := range []string{
+		"/workspace/skills/wiki/SKILL.md",
+		"changed: yes",
+		"files:",
+		"summary:",
+		"reason:",
+		"NoReply",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("wiki reflection prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestWikiLintRunsPromptRecordsSummaryAndKeepsTimer(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply: "changed: yes\nfiles:\n- knowledge/index.md\nsummary: 修复索引\nreason: lint 检查",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "正在检查索引。"},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	client := newFakeSentMessageClient("")
+	var cardsMu sync.Mutex
+	var cards []*fakeStreamCard
+	cardsSnapshot := func() []*fakeStreamCard {
+		cardsMu.Lock()
+		defer cardsMu.Unlock()
+		return append([]*fakeStreamCard(nil), cards...)
+	}
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cardsMu.Lock()
+		cards = append(cards, card)
+		cardsMu.Unlock()
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	session := Session{
+		Key:             key,
+		AgentName:       "traex",
+		ACPSessionID:    "acp-session-1",
+		Cwd:             t.TempDir(),
+		Workspace:       filepath.Join(t.TempDir(), "workspace"),
+		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.scheduleWikiAfterUserPrompt(session, mustConfigAgent(t, config.Default(), "traex"))
+	t.Cleanup(func() { svc.cancelWikiTimer(key) })
+	svc.taskMu.Lock()
+	beforeGeneration := svc.wikiGenerations[key]
+	_, beforeTimer := svc.wikiTimers[key]
+	svc.taskMu.Unlock()
+	if !beforeTimer {
+		t.Fatal("wiki timer should be scheduled before lint")
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/wiki lint",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki lint) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty direct reply when outbound can send acknowledgement", reply)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		if rt.promptCallCount() != 1 {
+			return false
+		}
+		client.mu.Lock()
+		sentCount := len(client.sent)
+		client.mu.Unlock()
+		gotCards := cardsSnapshot()
+		return sentCount == 1 && len(gotCards) == 1 && gotCards[0].isClosed()
+	})
+	client.mu.Lock()
+	sent := append([]string(nil), client.sent...)
+	client.mu.Unlock()
+	if !strings.Contains(sent[0], "wiki lint 已开始") {
+		t.Fatalf("sent[0] = %q, want lint start acknowledgement", sent[0])
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %q, want only lint start acknowledgement when stream card is used", sent)
+	}
+	gotCards := cardsSnapshot()
+	if len(gotCards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", gotCards)
+	}
+	if got := gotCards[0].textUpdatesSnapshot(); len(got) != 1 || !strings.Contains(got[0], "正在检查索引") {
+		t.Fatalf("stream text updates = %+v, want lint progress", got)
+	}
+	if got := gotCards[0].finalTextUpdatesSnapshot(); len(got) != 1 || !strings.Contains(got[0], "knowledge/index.md") {
+		t.Fatalf("stream final text = %+v, want lint summary", got)
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want one lint prompt", got)
+	}
+	rt.mu.Lock()
+	call := rt.promptCalls[0]
+	rt.mu.Unlock()
+	for _, want := range []string{"请检查并修复", "/workspace/knowledge/lint.md", "changed: yes/no"} {
+		if !strings.Contains(call.Text, want) {
+			t.Fatalf("lint prompt = %q, want %q", call.Text, want)
+		}
+	}
+	if !call.HasUpdateHandler || !call.HasPermissionHandler {
+		t.Fatalf("prompt call = %+v, want stream update and permission handlers", call)
+	}
+	svc.taskMu.Lock()
+	afterGeneration := svc.wikiGenerations[key]
+	_, afterTimer := svc.wikiTimers[key]
+	status := svc.wikiStatuses[key]
+	svc.taskMu.Unlock()
+	if !afterTimer {
+		t.Fatal("/wiki lint should keep pending wiki timer")
+	}
+	if afterGeneration != beforeGeneration {
+		t.Fatalf("wiki generation = %d, want unchanged %d", afterGeneration, beforeGeneration)
+	}
+	if !status.lastSuccess || !strings.Contains(status.lastSummary, "knowledge/index.md") {
+		t.Fatalf("wiki status = %+v, want lint summary recorded", status)
+	}
+}
+
+func TestWikiLintReturnsImmediatelyWhenPromptIsStillRunning(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply: "changed: no\nsummary: ok",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "lint running"},
+				},
+			},
+		},
+		blockPrompt: make(chan struct{}),
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	client := newFakeSentMessageClient("")
+	var cardsMu sync.Mutex
+	var cards []*fakeStreamCard
+	cardsSnapshot := func() []*fakeStreamCard {
+		cardsMu.Lock()
+		defer cardsMu.Unlock()
+		return append([]*fakeStreamCard(nil), cards...)
+	}
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cardsMu.Lock()
+		cards = append(cards, card)
+		cardsMu.Unlock()
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir(), Workspace: workspace}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki lint",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki lint) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want no direct reply while background lint runs", reply)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		client.mu.Lock()
+		sentCount := len(client.sent)
+		client.mu.Unlock()
+		return rt.promptCallCount() == 1 && sentCount == 1 && len(cardsSnapshot()) == 1
+	})
+	client.mu.Lock()
+	sent := append([]string(nil), client.sent...)
+	client.mu.Unlock()
+	if !strings.Contains(sent[0], "wiki lint 已开始") {
+		t.Fatalf("sent = %q, want start acknowledgement", sent)
+	}
+	gotCards := cardsSnapshot()
+	if len(gotCards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", gotCards)
+	}
+	if got := gotCards[0].textUpdatesSnapshot(); len(got) != 1 || !strings.Contains(got[0], "lint running") {
+		t.Fatalf("stream text updates = %+v, want lint progress", got)
+	}
+	svc.taskMu.Lock()
+	running := svc.tasks[key]
+	svc.taskMu.Unlock()
+	if running == nil || running.kind != taskKindWiki {
+		t.Fatalf("running task = %+v, want background wiki lint task", running)
+	}
+	close(rt.blockPrompt)
+	waitForCondition(t, time.Second, func() bool {
+		gotCards := cardsSnapshot()
+		return len(gotCards) == 1 && gotCards[0].isClosed()
+	})
+	client.mu.Lock()
+	sent = append([]string(nil), client.sent...)
+	client.mu.Unlock()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %q, want no final text reply when stream card is used", sent)
+	}
+}
+
+func TestWikiLintReportsBusyWithoutCancelingCurrentTask(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "changed: no\nsummary: ok"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	_, finish := svc.startTask(context.Background(), session, mustConfigAgent(t, config.Default(), "traex"), taskKindUser)
+	defer finish()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/wiki lint",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki lint) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话正在忙碌") {
+		t.Fatalf("reply = %q, want busy message", reply)
+	}
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no lint prompt", got)
+	}
+	if !svc.sessionHasRunningUserTask(key) {
+		t.Fatal("running user task should not be canceled by /wiki lint")
+	}
+}
+
+func TestWikiLintReportsBusyDuringBackgroundWikiTask(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "changed: no\nsummary: ok"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir(), Workspace: workspace}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	_, finish, _ := svc.startWikiTask(context.Background(), session, mustConfigAgent(t, config.Default(), "traex"), wikiRuntimeKey(key, 1, session.ACPSessionID))
+	defer finish()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki lint",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki lint) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话正在忙碌") {
+		t.Fatalf("reply = %q, want busy message", reply)
+	}
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no lint prompt", got)
+	}
+}
+
+func TestWikiUpgradeUpdatesExistingWorkspaceWithoutACPSession(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	cfg := config.Default()
+	cfg.Bots[0].Workspace = workspace
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := newTestService(cfg, store)
+	rt := &fakeRuntime{promptReply: "should not be called"}
+	svc.setRuntime(rt)
+	if _, err := ensureWorkspace(workspace, "default"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	markWorkspaceBootstrapped(t, workspace)
+	knowledgeAgents := filepath.Join(workspace, "knowledge", "AGENTS.md")
+	if err := os.WriteFile(knowledgeAgents, []byte("# Existing Knowledge Rules\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(knowledge/AGENTS.md) error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "default",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki upgrade",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki upgrade) error = %v", err)
+	}
+	if !strings.Contains(reply, "wiki upgrade 完成") || !strings.Contains(reply, "knowledge/AGENTS.md") {
+		t.Fatalf("reply = %q, want updated files", reply)
+	}
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no ACP prompt", got)
+	}
+	data, err := os.ReadFile(knowledgeAgents)
+	if err != nil {
+		t.Fatalf("ReadFile(knowledge/AGENTS.md) error = %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "# Existing Knowledge Rules") || !strings.Contains(text, workspaceWikiPolicyMarker) {
+		t.Fatalf("knowledge/AGENTS.md = %q, want existing content plus policy marker", text)
+	}
+	logData, err := os.ReadFile(filepath.Join(workspace, "knowledge", "log.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(knowledge/log.md) error = %v", err)
+	}
+	if !strings.Contains(string(logData), "同步 bridge 当前知识库维护约束") {
+		t.Fatalf("knowledge/log.md = %q, want upgrade log", logData)
+	}
+}
+
+func TestWikiUpgradeReportsAlreadyCurrent(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	cfg := config.Default()
+	cfg.Bots[0].Workspace = workspace
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := newTestService(cfg, store)
+	if _, err := ensureWorkspace(workspace, "default"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	if _, err := upgradeWorkspaceWikiPolicy(workspace); err != nil {
+		t.Fatalf("upgradeWorkspaceWikiPolicy() error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "default",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki upgrade",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki upgrade) error = %v", err)
+	}
+	if !strings.Contains(reply, "已包含最新 wiki 维护规则") {
+		t.Fatalf("reply = %q, want already current", reply)
+	}
+}
+
+func TestWikiUpgradeReportsBusyDuringWorkspaceTask(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := newTestService(cfg, store)
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	markWorkspaceBootstrapped(t, workspace)
+	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherSession := Session{Key: otherKey, AgentName: "traex", ACPSessionID: "acp-other", Cwd: t.TempDir(), Workspace: workspace}
+	_, finish := svc.startTask(context.Background(), otherSession, mustConfigAgent(t, cfg, "traex"), taskKindUser)
+	defer finish()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki upgrade",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki upgrade) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话正在忙碌") {
+		t.Fatalf("reply = %q, want busy message", reply)
+	}
+	for _, file := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		if strings.Contains(string(data), workspaceWikiPolicyMarker) {
+			t.Fatalf("%s contains policy marker despite busy upgrade:\n%s", file, data)
+		}
+	}
+}
+
+func TestWikiUpgradeReportsBusyDuringBackgroundWikiTask(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := newTestService(cfg, store)
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	markWorkspaceBootstrapped(t, workspace)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-wiki", Cwd: t.TempDir(), Workspace: workspace}
+	_, finish, _ := svc.startWikiTask(context.Background(), session, mustConfigAgent(t, cfg, "traex"), wikiRuntimeKey(key, 1, session.ACPSessionID))
+	defer finish()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Workspace: workspace,
+		Text:      "/wiki upgrade",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki upgrade) error = %v", err)
+	}
+	if !strings.Contains(reply, "当前会话正在忙碌") {
+		t.Fatalf("reply = %q, want busy message", reply)
+	}
+}
+
+func TestWikiStatusIncludesLastSummary(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := newTestService(config.Default(), store)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	svc.taskMu.Lock()
+	svc.wikiStatuses[key] = wikiRunStatus{
+		lastStarted: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
+		lastEnded:   time.Date(2026, 8, 5, 12, 0, 2, 0, time.UTC),
+		lastSuccess: true,
+		lastSummary: "changed: yes files: knowledge/core.md",
+	}
+	svc.taskMu.Unlock()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    "bot-a",
+		ChatID:   "oc_chat",
+		ChatType: "p2p",
+		Text:     "/wiki status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/wiki status) error = %v", err)
+	}
+	if !strings.Contains(reply, "最近摘要：changed: yes files: knowledge/core.md") {
+		t.Fatalf("reply = %q, want summary", reply)
 	}
 }
 
@@ -80,7 +567,7 @@ func TestWikiStatusSnapshotSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "读取后台 wiki runtime",
 			setup: func(t *testing.T, svc *Service) {
-				_, finish := svc.startWikiTask(context.Background(), Session{Key: normalizedKey, AgentName: "traex", ACPSessionID: "acp-wiki"}, agent, wikiRuntimeKey(normalizedKey, 1, "acp-wiki"))
+				_, finish, _ := svc.startWikiTask(context.Background(), Session{Key: normalizedKey, AgentName: "traex", ACPSessionID: "acp-wiki"}, agent, wikiRuntimeKey(normalizedKey, 1, "acp-wiki"))
 				t.Cleanup(finish)
 			},
 			wantBackgroundTask: true,
@@ -439,7 +926,7 @@ func TestBeginWikiTimerRunSessionWorkBoundaries(t *testing.T) {
 			}
 			svc.taskMu.Unlock()
 
-			state := svc.beginWikiTimerRun(key, tt.generation)
+			state := svc.beginWikiTimerRun(key, tt.generation, "")
 
 			svc.taskMu.Lock()
 			_, hasKey := svc.wikiTimers[normalizedKey]
@@ -516,7 +1003,7 @@ func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "markWikiFinished nil error 视为成功",
 			run: func(svc *Service) {
-				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, nil)
+				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, acp.PromptResult{Text: "changed: yes\nsummary: ok"}, nil)
 			},
 			wantRunning:   false,
 			wantSuccess:   true,
@@ -526,7 +1013,7 @@ func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "markWikiFinished context canceled 视为成功",
 			run: func(svc *Service) {
-				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, context.Canceled)
+				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, acp.PromptResult{}, context.Canceled)
 			},
 			wantRunning:   false,
 			wantSuccess:   true,
@@ -536,7 +1023,7 @@ func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "markWikiFinished 普通错误记录失败原因",
 			run: func(svc *Service) {
-				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, errors.New("wiki failed"))
+				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, acp.PromptResult{}, errors.New("wiki failed"))
 			},
 			wantRunning:   false,
 			wantSuccess:   false,
@@ -600,11 +1087,11 @@ func TestWikiTaskLifecycleSessionWorkBoundaries(t *testing.T) {
 			wantOtherTask:  true,
 		},
 		{
-			name:           "同 runtime 已替换 task 时旧 task finish 不删除新 task",
+			name:           "同 runtime 重复登记后台 wiki 被拒绝且旧 task 仍可 finish",
 			replaceTask:    true,
 			finishRuntime:  runtime,
-			wantFinished:   false,
-			wantTargetTask: "acp-new",
+			wantFinished:   true,
+			wantTargetTask: "",
 			wantOtherTask:  true,
 		},
 		{
@@ -630,8 +1117,12 @@ func TestWikiTaskLifecycleSessionWorkBoundaries(t *testing.T) {
 				session: Session{Key: otherRuntime.SessionKey, AgentName: "traex", ACPSessionID: "acp-b"},
 				agent:   config.AgentConfig{Command: "traex"},
 			}
-			svc.beginWikiTask(runtime, task)
-			svc.beginWikiTask(otherRuntime, otherTask)
+			if !svc.beginWikiTask(runtime, task) {
+				t.Fatal("beginWikiTask(runtime) = false, want true")
+			}
+			if !svc.beginWikiTask(otherRuntime, otherTask) {
+				t.Fatal("beginWikiTask(otherRuntime) = false, want true")
+			}
 			if tt.replaceTask {
 				newTask := &runningTask{
 					kind:    taskKindWiki,
@@ -639,7 +1130,9 @@ func TestWikiTaskLifecycleSessionWorkBoundaries(t *testing.T) {
 					session: Session{Key: normalizedKey, AgentName: "traex", ACPSessionID: "acp-new"},
 					agent:   config.AgentConfig{Command: "traex"},
 				}
-				svc.beginWikiTask(runtime, newTask)
+				if svc.beginWikiTask(runtime, newTask) {
+					t.Fatal("beginWikiTask(duplicate runtime) = true, want false")
+				}
 			}
 
 			finished := svc.finishWikiTask(tt.finishRuntime, task)
@@ -715,7 +1208,7 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 			},
 		},
 		{
-			name: "取消同 session 下多个后台 wiki",
+			name: "同 session 下第二个后台 wiki 不登记",
 			cancelKey: SessionKey{
 				BotID:  "bot-a",
 				ChatID: "chat-a",
@@ -726,11 +1219,6 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 					SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"},
 					Scope:      runtimeScopeWiki,
 					RunID:      "1:acp-a",
-				},
-				{
-					SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"},
-					Scope:      runtimeScopeWiki,
-					RunID:      "2:acp-a2",
 				},
 			},
 			wantRemainingRuntime: runtimeKey{
@@ -763,13 +1251,23 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 			runtimeA := wikiRuntimeKey(sessionA.Key, 1, sessionA.ACPSessionID)
 			runtimeA2 := wikiRuntimeKey(sessionA2.Key, 2, sessionA2.ACPSessionID)
 			runtimeB := wikiRuntimeKey(sessionB.Key, 1, sessionB.ACPSessionID)
-			ctxA, finishA := svc.startWikiTask(context.Background(), sessionA, agent, runtimeA)
+			ctxA, finishA, okA := svc.startWikiTask(context.Background(), sessionA, agent, runtimeA)
+			if !okA {
+				t.Fatal("startWikiTask(session A) = false, want true")
+			}
 			var ctxA2 context.Context
 			var finishA2 func()
+			var okA2 bool
 			if tt.includeSecondWiki {
-				ctxA2, finishA2 = svc.startWikiTask(context.Background(), sessionA2, agent, runtimeA2)
+				ctxA2, finishA2, okA2 = svc.startWikiTask(context.Background(), sessionA2, agent, runtimeA2)
+				if okA2 {
+					t.Fatal("startWikiTask(second session A) = true, want false")
+				}
 			}
-			ctxB, finishB := svc.startWikiTask(context.Background(), sessionB, agent, runtimeB)
+			ctxB, finishB, okB := svc.startWikiTask(context.Background(), sessionB, agent, runtimeB)
+			if !okB {
+				t.Fatal("startWikiTask(session B) = false, want true")
+			}
 			t.Cleanup(finishA)
 			if finishA2 != nil {
 				t.Cleanup(finishA2)
@@ -787,7 +1285,7 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 					t.Fatal("session A wiki task was not cancelled")
 				}
 			}
-			if ctxA2 != nil {
+			if ctxA2 != nil && okA2 {
 				select {
 				case <-ctxA2.Done():
 					if !slices.Contains(tt.wantCanceledRuntimes, runtimeA2) {

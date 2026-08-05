@@ -300,7 +300,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session list`：列出当前聊天里的历史 ACP 会话，序号从 1 开始，`*` 表示当前会话。
 - `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；普通群和私聊恢复到当前 chat，话题群恢复到当前话题。
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
-- `/wiki on`、`/wiki off`、`/wiki status`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
+- `/wiki on`、`/wiki off`、`/wiki status`、`/wiki lint`、`/wiki upgrade`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀；可主动检查 workspace 知识库一致性，也可把当前内置 wiki 维护规则同步到已有 workspace。`/wiki lint` 会异步执行，并像普通 prompt 一样用流式卡片展示处理过程和结果。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。

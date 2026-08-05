@@ -312,8 +312,8 @@ func TestEnsureInitialBotRegisteredRegistersDefaultPlaceholder(t *testing.T) {
 	if !strings.Contains(out, "当前未配置可用 bot") || !strings.Contains(out, "https://example.test/startup-register") {
 		t.Fatalf("stdout = %q, want startup register notice and URL", out)
 	}
-	if gotOpts == nil || !gotOpts.CreateOnly {
-		t.Fatalf("opts = %+v, want create-only registration", gotOpts)
+	if gotOpts == nil || gotOpts.CreateOnly {
+		t.Fatalf("opts = %+v, want startup registration to allow existing apps", gotOpts)
 	}
 
 	cfg, err := config.Load(configPath)

@@ -43,7 +43,7 @@ func TestDaemonFilesUseConfigDirectory(t *testing.T) {
 
 func TestChildArgsDropsMode(t *testing.T) {
 	args := childArgs([]string{"-config", "/tmp/config.json", modeRestart})
-	want := []string{"-daemon-child", "-config", "/tmp/config.json"}
+	want := []string{"--daemon-child", "-config", "/tmp/config.json"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("childArgs() = %#v, want %#v", args, want)
 	}
@@ -51,7 +51,7 @@ func TestChildArgsDropsMode(t *testing.T) {
 
 func TestChildArgsKeepsDoubleDashConfigValue(t *testing.T) {
 	args := childArgs([]string{"--config", modeRestart, modeRestart})
-	want := []string{"-daemon-child", "--config", modeRestart}
+	want := []string{"--daemon-child", "--config", modeRestart}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("childArgs() = %#v, want %#v", args, want)
 	}

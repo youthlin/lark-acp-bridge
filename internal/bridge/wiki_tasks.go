@@ -33,6 +33,7 @@ type wikiRunStatus struct {
 	lastEnded   time.Time
 	lastSuccess bool
 	lastError   string
+	lastSummary string
 }
 
 type wikiStatusSnapshot struct {
@@ -53,7 +54,7 @@ const (
 func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		return "可用命令：/wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
+		return wikiCommandUsage()
 	}
 	store := s.storeForMessage(msg)
 	if store == nil {
@@ -85,6 +86,10 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		return "已关闭当前聊天的自动知识沉淀。"
 	case "status":
 		return s.wikiStatus(msg, chat)
+	case "lint":
+		return s.runWikiLint(ctx, msg)
+	case "upgrade":
+		return s.runWikiUpgrade(ctx, msg)
 	case "interval":
 		if len(fields) < 3 {
 			return "请使用 /wiki interval <duration> 指定时间，例如 /wiki interval 5m。"
@@ -107,8 +112,12 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		}
 		return "已设置当前聊天自动知识沉淀延迟：" + formatDuration(interval) + "。"
 	default:
-		return "暂不支持这个 wiki 命令。可用 /wiki on、/wiki off、/wiki status 或 /wiki interval <duration>。"
+		return "暂不支持这个 wiki 命令。" + wikiCommandUsage()
 	}
+}
+
+func wikiCommandUsage() string {
+	return "可用命令：/wiki on、/wiki off、/wiki status、/wiki lint、/wiki upgrade 或 /wiki interval <duration>。"
 }
 
 func parseWikiInterval(raw string) (time.Duration, error) {
@@ -170,6 +179,9 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 		if snapshot.status.lastError != "" {
 			lines = append(lines, "错误："+snapshot.status.lastError)
 		}
+		if snapshot.status.lastSummary != "" {
+			lines = append(lines, "最近摘要："+snapshot.status.lastSummary)
+		}
 	} else {
 		lines = append(lines, "状态：尚未触发")
 	}
@@ -205,12 +217,196 @@ func wikiReflectionPrompt(workspace string) string {
 		"## 操作规范",
 		"先阅读 `" + workspace + "/skills/wiki/SKILL.md` 了解完整的知识维护规范，然后按其中的流程执行。",
 		"如果没有值得沉淀的新信息，不要修改文件。",
-		"本轮是系统内部反思轮次，无需回复用户；如果必须输出文本，只输出 NoReply。",
+		"若修改了文件，请用下面的结构输出简短审计摘要；若没有修改，只输出 NoReply。",
+		"",
+		"```text",
+		"changed: yes",
+		"files:",
+		"- path/to/file.md",
+		"summary: <本次沉淀的内容>",
+		"reason: <为什么值得长期保留>",
+		"```",
+		"",
+		"本轮是系统内部反思轮次，无需回复用户；输出仅供 bridge 记录最近一次 wiki 摘要。",
 	}, "\n")
 }
 
-func (s *Service) startWikiTask(ctx context.Context, session Session, agent config.AgentConfig, runtime runtimeKey) (context.Context, func()) {
+func wikiLintPrompt(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		workspace = "$BOT_WORKSPACE"
+	}
+	return strings.Join([]string{
+		"请检查并修复当前 workspace 知识库的一致性。",
+		"",
+		"## 操作规范",
+		"先阅读 `" + workspace + "/skills/wiki/SKILL.md` 和 `" + workspace + "/knowledge/lint.md`。",
+		"检查 `knowledge/index.md` 列出的文件是否存在、实际 knowledge/skills 文件是否都被索引、`knowledge/core.md` 引用清单是否同步、`knowledge/log.md` 是否记录新增/删除/重命名、frontmatter 是否齐全，以及是否存在明显重复或冲突。",
+		"如发现可直接修复的问题，请修改文件并同步索引和日志；如仅发现需要用户判断的问题，请不要臆断，列为待确认。",
+		"",
+		"## 输出格式",
+		"请用下面结构输出简短结果：",
+		"",
+		"```text",
+		"changed: yes/no",
+		"files:",
+		"- path/to/file.md",
+		"summary: <检查和修复摘要>",
+		"reason: <主要依据或待确认事项>",
+		"```",
+	}, "\n")
+}
+
+func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return "当前聊天还没有可用于 wiki lint 的 ACP 会话；先发送普通消息或使用 /new 创建会话。"
+	}
+	agent, ok := s.registry.Get(session.AgentName)
+	if !ok {
+		return "当前会话的 ACP agent 不存在：" + session.AgentName
+	}
+	session.Workspace = sessionWorkspace(session, msg)
+	if s.wikiWorkspaceBusy(session.Key, session.Workspace) {
+		return "当前会话正在忙碌，稍后再执行 /wiki lint。"
+	}
+	taskCtx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, runningTaskOptions{
+		keepWikiTimer:       true,
+		queuedContinuation:  true,
+		blockWorkspaceTasks: true,
+	})
+	if err != nil {
+		if errors.Is(err, errSessionTaskBusy) {
+			return "当前会话正在忙碌，稍后再执行 /wiki lint。"
+		}
+		return "启动 wiki lint 失败：" + err.Error()
+	}
+	ack := "wiki lint 已开始，完成后会回复检查摘要。"
+	replyCtx := context.WithoutCancel(ctx)
+	if ok, sendErr := s.sendIntermediateReply(replyCtx, msg, ack); sendErr != nil {
+		finish()
+		return "启动 wiki lint 失败：发送开始通知失败：" + sendErr.Error()
+	} else if ok {
+		go s.runWikiLintTask(replyCtx, taskCtx, finish, msg, session, agent)
+		return ""
+	}
+	go s.runWikiLintTask(context.WithoutCancel(ctx), taskCtx, finish, msg, session, agent)
+	return ack
+}
+
+func (s *Service) runWikiLintTask(replyCtx context.Context, taskCtx context.Context, finish func(), msg feishu.Message, session Session, agent config.AgentConfig) {
+	defer finish()
+	key := normalizeSessionKey(session.Key)
+	s.markWikiStarted(key)
+	result, sentProgress, rawResult, _, err := s.promptRuntimeWithProgressRaw(taskCtx, msg, session, agent, wikiLintPrompt(sessionWorkspace(session, msg)))
+	statusResult := result
+	if strings.TrimSpace(rawResult.Text) != "" {
+		statusResult = rawResult
+	}
+	s.markWikiFinished(key, session, statusResult, err)
+	if sentProgress {
+		return
+	}
+	reply := ""
+	if err != nil {
+		reply = "wiki lint 执行失败：" + err.Error()
+	} else if summary := wikiResultSummary(result); summary != "" {
+		reply = "wiki lint 完成：\n" + summary
+	} else {
+		reply = "wiki lint 完成：未返回摘要。"
+	}
+	if ok, sendErr := s.sendIntermediateReply(replyCtx, msg, reply); sendErr != nil {
+		slog.WarnContext(replyCtx, "发送 wiki lint 结果失败", "session", session.ACPSessionID, "错误", sendErr)
+	} else if !ok {
+		slog.WarnContext(replyCtx, "缺少 wiki lint 结果回复发送器", "session", session.ACPSessionID)
+	}
+}
+
+func (s *Service) runWikiUpgrade(ctx context.Context, msg feishu.Message) string {
+	workspace := s.workspaceForWikiUpgrade(msg)
+	if strings.TrimSpace(workspace) == "" {
+		return "当前 bot workspace 未初始化，无法执行 wiki upgrade。"
+	}
+	key := sessionKeyFromMessage(msg)
+	finish, ok := s.beginWikiUpgradeTask(key, workspace)
+	if !ok {
+		return "当前会话正在忙碌，稍后再执行 /wiki upgrade。"
+	}
+	defer finish()
+	if _, err := ensureWorkspace(workspace, msg.BotID); err != nil {
+		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", workspace, "错误", err)
+		return "初始化 workspace 失败：" + err.Error()
+	}
+	status, err := upgradeWorkspaceWikiPolicy(workspace)
+	if err != nil {
+		slog.ErrorContext(ctx, "升级 workspace wiki 规则失败", "workspace", workspace, "错误", err)
+		return "wiki upgrade 失败：" + err.Error()
+	}
+	if err := appendWorkspaceUpgradeLog(workspace, status); err != nil {
+		slog.ErrorContext(ctx, "记录 workspace wiki upgrade 日志失败", "workspace", workspace, "错误", err)
+		return "wiki upgrade 写入日志失败：" + err.Error()
+	}
+	if len(status.UpdatedFiles) == 0 {
+		return "wiki upgrade 完成：当前 workspace 已包含最新 wiki 维护规则。"
+	}
+	return "wiki upgrade 完成：已更新\n- " + strings.Join(status.UpdatedFiles, "\n- ")
+}
+
+func (s *Service) beginWikiUpgradeTask(key SessionKey, workspace string) (func(), bool) {
+	key = normalizeSessionKey(key)
+	task := &runningTask{
+		kind:    taskKindWiki,
+		runtime: currentRuntimeKey(key),
+		done:    make(chan struct{}),
+		session: Session{
+			Key:       key,
+			Workspace: workspace,
+		},
+	}
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if s.hasWorkspaceTaskLocked(key, workspace) {
+		task.closeDone()
+		return func() {}, false
+	}
+	if s.tasks == nil {
+		s.tasks = make(map[SessionKey]*runningTask)
+	}
+	s.tasks[key] = task
+	s.setWorkspaceLockLocked(workspace, task)
+	return func() {
+		s.taskMu.Lock()
+		if s.tasks[key] == task {
+			delete(s.tasks, key)
+		}
+		s.clearWorkspaceLockLocked(workspace, task)
+		s.taskMu.Unlock()
+		task.closeDone()
+	}, true
+}
+
+func (s *Service) wikiWorkspaceBusy(key SessionKey, workspace string) bool {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	return s.hasWorkspaceTaskLocked(key, workspace)
+}
+
+func (s *Service) workspaceForWikiUpgrade(msg feishu.Message) string {
+	if session, ok := s.findSession(msg); ok {
+		if workspace := sessionWorkspace(session, msg); strings.TrimSpace(workspace) != "" {
+			return workspace
+		}
+	}
+	if workspace := strings.TrimSpace(msg.Workspace); workspace != "" {
+		return workspace
+	}
+	return s.botWorkspace(msg.BotID)
+}
+
+func (s *Service) startWikiTask(ctx context.Context, session Session, agent config.AgentConfig, runtime runtimeKey) (context.Context, func(), bool) {
 	session.Key = normalizeSessionKey(session.Key)
+	session.Workspace = s.workspaceForSessionTask(session)
 	runtime = normalizeRuntimeKey(runtime)
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
@@ -222,23 +418,32 @@ func (s *Service) startWikiTask(ctx context.Context, session Session, agent conf
 		agent:   agent,
 	}
 
-	s.beginWikiTask(runtime, task)
+	if !s.beginWikiTask(runtime, task) {
+		cancel()
+		task.closeDone()
+		return ctx, func() {}, false
+	}
 
 	return ctx, func() {
 		s.finishWikiTask(runtime, task)
 		cancel()
 		task.closeDone()
-	}
+	}, true
 }
 
-func (s *Service) beginWikiTask(runtime runtimeKey, task *runningTask) {
+func (s *Service) beginWikiTask(runtime runtimeKey, task *runningTask) bool {
 	runtime = normalizeRuntimeKey(runtime)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
+	if s.hasWorkspaceTaskLocked(task.session.Key, task.session.Workspace) {
+		return false
+	}
 	if s.wikiTasks == nil {
 		s.wikiTasks = make(map[runtimeKey]*runningTask)
 	}
 	s.wikiTasks[runtime] = task
+	s.setWorkspaceLockLocked(task.session.Workspace, task)
+	return true
 }
 
 func (s *Service) finishWikiTask(runtime runtimeKey, task *runningTask) bool {
@@ -246,9 +451,13 @@ func (s *Service) finishWikiTask(runtime runtimeKey, task *runningTask) bool {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	if s.wikiTasks[runtime] != task {
+		if !s.taskRegisteredLocked(task) {
+			s.clearWorkspaceLockLocked(task.session.Workspace, task)
+		}
 		return false
 	}
 	delete(s.wikiTasks, runtime)
+	s.clearWorkspaceLockLocked(task.session.Workspace, task)
 	return true
 }
 
@@ -272,6 +481,7 @@ func (s *Service) takeWikiTasks(key SessionKey) []*runningTask {
 		if runtime.SessionKey == key {
 			tasks = append(tasks, task)
 			delete(s.wikiTasks, runtime)
+			s.clearWorkspaceLockLocked(task.session.Workspace, task)
 		}
 	}
 	return tasks
@@ -388,7 +598,7 @@ func (s *Service) wikiConfigForSession(session Session) ChatConfig {
 func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {
 	key = normalizeSessionKey(key)
 	session.Key = normalizeSessionKey(session.Key)
-	switch s.beginWikiTimerRun(key, generation) {
+	switch s.beginWikiTimerRun(key, generation, session.Workspace) {
 	case wikiTimerRunStale:
 		return
 	case wikiTimerRunBusy:
@@ -396,14 +606,25 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		return
 	}
 
-	ctx, finish := s.startTask(context.Background(), session, agent, taskKindWiki)
+	ctx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, runningTaskOptions{
+		keepWikiTimer:       true,
+		blockWorkspaceTasks: true,
+	})
+	if err != nil {
+		if errors.Is(err, errSessionTaskBusy) {
+			s.scheduleWikiAfterUserPrompt(session, agent)
+		} else {
+			slog.Warn("启动 wiki 自动知识沉淀失败", "session", session.ACPSessionID, "错误", err)
+		}
+		return
+	}
 	s.markWikiStarted(key)
-	_, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
+	result, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
 	finish()
-	s.markWikiFinished(key, session, err)
+	s.markWikiFinished(key, session, result, err)
 }
 
-func (s *Service) beginWikiTimerRun(key SessionKey, generation int64) wikiTimerRunState {
+func (s *Service) beginWikiTimerRun(key SessionKey, generation int64, workspace string) wikiTimerRunState {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
@@ -411,7 +632,7 @@ func (s *Service) beginWikiTimerRun(key SessionKey, generation int64) wikiTimerR
 		return wikiTimerRunStale
 	}
 	delete(s.wikiTimers, key)
-	if current := s.tasks[key]; current != nil {
+	if s.hasWorkspaceTaskLocked(key, workspace) {
 		s.wikiGenerations[key]++
 		return wikiTimerRunBusy
 	}
@@ -429,7 +650,11 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	key := pending.session.Key
 	runtime := wikiRuntimeKey(key, pending.generation, pending.session.ACPSessionID)
-	ctx, finish := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
+	ctx, finish, ok := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
+	if !ok {
+		s.scheduleWikiAfterUserPrompt(pending.session, pending.agent)
+		return
+	}
 	defer func() {
 		finish()
 		if err := s.runtime.CloseRuntimeKey(runtime); err != nil {
@@ -437,8 +662,8 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 		}
 	}()
 	s.markWikiStarted(key)
-	_, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), acp.PromptOptions{})
-	s.markWikiFinished(key, pending.session, err)
+	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), acp.PromptOptions{})
+	s.markWikiFinished(key, pending.session, result, err)
 }
 
 func (s *Service) markWikiStarted(key SessionKey) {
@@ -449,12 +674,13 @@ func (s *Service) markWikiStarted(key SessionKey) {
 	status.lastStarted = time.Now()
 	status.lastEnded = time.Time{}
 	status.lastError = ""
+	status.lastSummary = ""
 	status.lastSuccess = false
 	s.wikiStatuses[key] = status
 	s.taskMu.Unlock()
 }
 
-func (s *Service) markWikiFinished(key SessionKey, session Session, err error) {
+func (s *Service) markWikiFinished(key SessionKey, session Session, result acp.PromptResult, err error) {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	status := s.wikiStatuses[key]
@@ -466,10 +692,23 @@ func (s *Service) markWikiFinished(key SessionKey, session Session, err error) {
 	} else {
 		status.lastError = ""
 		status.lastSuccess = true
+		status.lastSummary = wikiResultSummary(result)
 	}
 	s.wikiStatuses[key] = status
 	s.taskMu.Unlock()
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Warn("wiki 自动知识沉淀失败", "session", session.ACPSessionID, "错误", err)
 	}
+}
+
+func wikiResultSummary(result acp.PromptResult) string {
+	text := strings.TrimSpace(result.Text)
+	if text == "" || strings.EqualFold(text, "NoReply") {
+		return ""
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	return truncateRunes(strings.Join(fields, " "), 240)
 }
