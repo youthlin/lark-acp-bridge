@@ -217,6 +217,7 @@ func (s *Service) startWikiTask(ctx context.Context, session Session, agent conf
 		kind:    taskKindWiki,
 		runtime: runtime,
 		cancel:  cancel,
+		done:    make(chan struct{}),
 		session: session,
 		agent:   agent,
 	}
@@ -226,6 +227,7 @@ func (s *Service) startWikiTask(ctx context.Context, session Session, agent conf
 	return ctx, func() {
 		s.finishWikiTask(runtime, task)
 		cancel()
+		task.closeDone()
 	}
 }
 

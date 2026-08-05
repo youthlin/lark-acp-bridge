@@ -5,13 +5,19 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
-var errSessionTaskBusy = errors.New("session task busy")
+var (
+	errSessionTaskBusy      = errors.New("session task busy")
+	replacedTaskDoneTimeout = 10 * time.Second
+)
+
+var closedRunningTaskDone = makeClosedTaskDone()
 
 type taskKind string
 
@@ -22,13 +28,20 @@ const (
 )
 
 type runningTask struct {
-	kind               taskKind
-	runtime            runtimeKey
-	cancel             context.CancelFunc
-	session            Session
-	agent              config.AgentConfig
-	drainPendingAtAuto bool
-	onCancel           func(context.Context, string)
+	kind                  taskKind
+	runtime               runtimeKey
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	doneOnce              sync.Once
+	predecessorDone       <-chan struct{}
+	predecessorDetached   chan struct{}
+	predecessorDetachOnce sync.Once
+	completed             chan struct{}
+	completedOnce         sync.Once
+	session               Session
+	agent                 config.AgentConfig
+	drainPendingAtAuto    bool
+	onCancel              func(context.Context, string)
 }
 
 type runningTaskOptions struct {
@@ -72,30 +85,118 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 	s.cancelWikiTimer(session.Key)
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
-		kind:               kind,
-		runtime:            currentRuntimeKey(session.Key),
-		cancel:             cancel,
-		session:            session,
-		agent:              agent,
-		drainPendingAtAuto: opts.drainPendingAtAuto,
+		kind:                kind,
+		runtime:             currentRuntimeKey(session.Key),
+		cancel:              cancel,
+		done:                make(chan struct{}),
+		predecessorDetached: make(chan struct{}),
+		session:             session,
+		agent:               agent,
+		drainPendingAtAuto:  opts.drainPendingAtAuto,
 	}
 
 	previous, busy := s.beginRunningTask(session.Key, task, opts)
 	if busy {
 		cancel()
+		task.closeDone()
 		return ctx, func() {}, errSessionTaskBusy
 	}
 	if previous != nil && !opts.queuedContinuation {
-		s.cancelTask(ctx, previous, true)
+		completed := s.cancelTask(ctx, previous, true)
+		if err := s.waitForReplacedTaskCompleted(ctx, previous, task, completed); err != nil {
+			shouldDrainQueue := s.finishRunningTask(session.Key, task, kind, opts)
+			cancel()
+			task.closeDone()
+			if shouldDrainQueue {
+				s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
+			}
+			return ctx, func() {}, err
+		}
 	}
 
 	return ctx, func() {
 		shouldDrainQueue := s.finishRunningTask(session.Key, task, kind, opts)
 		cancel()
+		task.closeDone()
 		if shouldDrainQueue {
 			s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
 		}
 	}, nil
+}
+
+func (task *runningTask) detachPredecessor() {
+	if task == nil || task.predecessorDetached == nil {
+		return
+	}
+	task.predecessorDetachOnce.Do(func() {
+		close(task.predecessorDetached)
+	})
+}
+
+func (task *runningTask) closeDone() {
+	if task == nil || task.done == nil {
+		return
+	}
+	task.doneOnce.Do(func() {
+		close(task.done)
+	})
+}
+
+func runningTaskDone(task *runningTask) <-chan struct{} {
+	if task == nil || task.done == nil {
+		return closedRunningTaskDone
+	}
+	return task.done
+}
+
+func runningTaskCompleted(task *runningTask) <-chan struct{} {
+	if task == nil {
+		return closedRunningTaskDone
+	}
+	task.completedOnce.Do(func() {
+		task.completed = make(chan struct{})
+		go func() {
+			if task.predecessorDone != nil {
+				select {
+				case <-task.predecessorDone:
+				case <-task.predecessorDetached:
+				}
+			}
+			<-runningTaskDone(task)
+			close(task.completed)
+		}()
+	})
+	return task.completed
+}
+
+func makeClosedTaskDone() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+func (s *Service) waitForReplacedTaskCompleted(ctx context.Context, previous *runningTask, incoming *runningTask, completed <-chan struct{}) error {
+	if completed == nil {
+		return nil
+	}
+	timer := time.NewTimer(replacedTaskDoneTimeout)
+	defer timer.Stop()
+	select {
+	case <-completed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		sessionID := ""
+		var kind taskKind
+		if previous != nil {
+			sessionID = previous.session.ACPSessionID
+			kind = previous.kind
+		}
+		incoming.detachPredecessor()
+		slog.WarnContext(ctx, "等待旧任务结束超时，可能导致新消息被排队", "session", sessionID, "kind", kind)
+		return nil
+	}
 }
 
 func (s *Service) beginRunningTask(key SessionKey, task *runningTask, opts runningTaskOptions) (*runningTask, bool) {
@@ -106,6 +207,7 @@ func (s *Service) beginRunningTask(key SessionKey, task *runningTask, opts runni
 	if previous != nil && opts.queuedContinuation {
 		return previous, true
 	}
+	task.predecessorDone = runningTaskCompleted(previous)
 	s.tasks[key] = task
 	return previous, false
 }
@@ -321,21 +423,24 @@ func (s *Service) takeRunningTaskOfKind(key SessionKey, kind taskKind) *runningT
 	return task
 }
 
-func (s *Service) cancelTask(ctx context.Context, task *runningTask, syncRuntimeCancel bool) {
+func (s *Service) cancelTask(ctx context.Context, task *runningTask, syncRuntimeCancel bool) <-chan struct{} {
 	if task == nil {
-		return
+		return runningTaskCompleted(nil)
 	}
 	reason := replacementCancelReason(task)
-	task.cancel()
+	if task.cancel != nil {
+		task.cancel()
+	}
 	s.markCanceledTask(task, reason)
 	if task.onCancel != nil {
 		task.onCancel(ctx, reason)
 	}
 	if syncRuntimeCancel {
 		s.cancelRuntimeTask(ctx, task)
-		return
+		return runningTaskCompleted(task)
 	}
 	go s.cancelRuntimeTask(ctx, task)
+	return runningTaskCompleted(task)
 }
 
 func replacementCancelReason(task *runningTask) string {

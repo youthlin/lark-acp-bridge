@@ -589,30 +589,36 @@ func TestOnceScheduleSpecFiresOnceThenExpires(t *testing.T) {
 }
 
 func TestParseOnceAtSpecUsesLocalAndRFC3339(t *testing.T) {
+	now := time.Now()
+
 	// RFC3339 保留绝对时刻与时区偏移。
-	rfc, err := parseOnceAtSpec("2026-08-05T09:00:00+08:00", "")
+	rfcAt := now.In(time.FixedZone("UTC+8", 8*60*60)).Add(48 * time.Hour).Truncate(time.Second)
+	rfcValue := rfcAt.Format(time.RFC3339)
+	rfc, err := parseOnceAtSpec(rfcValue, "")
 	if err != nil {
 		t.Fatalf("parseOnceAtSpec(RFC3339) error = %v", err)
 	}
-	next, ok := rfc.Next(time.Now())
+	next, ok := rfc.Next(now)
 	if !ok {
 		t.Fatal("RFC3339 Next = false, want true")
 	}
-	want, _ := time.Parse(time.RFC3339, "2026-08-05T09:00:00+08:00")
+	want, _ := time.Parse(time.RFC3339, rfcValue)
 	if !next.Equal(want) {
 		t.Fatalf("RFC3339 next = %s, want %s", next, want)
 	}
 
 	// "YYYY-MM-DD HH:MM" 按给定（或 local）时区解释。
-	local, err := parseOnceAtSpec("2026-08-05 09:00", "")
+	localAt := now.In(time.Local).Add(48 * time.Hour).Truncate(time.Minute)
+	localValue := localAt.Format("2006-01-02 15:04")
+	local, err := parseOnceAtSpec(localValue, "")
 	if err != nil {
 		t.Fatalf("parseOnceAtSpec(local) error = %v", err)
 	}
-	nextLocal, ok := local.Next(time.Now())
+	nextLocal, ok := local.Next(now)
 	if !ok {
 		t.Fatal("local Next = false, want true")
 	}
-	wantLocal, _ := time.ParseInLocation("2006-01-02 15:04", "2026-08-05 09:00", time.Local)
+	wantLocal, _ := time.ParseInLocation("2006-01-02 15:04", localValue, time.Local)
 	if !nextLocal.Equal(wantLocal) {
 		t.Fatalf("local next = %s, want %s", nextLocal, wantLocal)
 	}

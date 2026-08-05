@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -44,24 +45,33 @@ func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 		cancelled <- reason
 	})
 
-	_, err := runUserTask(svc, context.Background(), session, agent, runningTaskOptions{}, func(context.Context) (struct{}, error) {
-		return struct{}{}, nil
-	})
-	if err != nil {
-		t.Fatalf("second runUserTask() error = %v", err)
-	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := runUserTask(svc, context.Background(), session, agent, runningTaskOptions{}, func(context.Context) (struct{}, error) {
+			return struct{}{}, nil
+		})
+		secondDone <- err
+	}()
 	select {
 	case reason := <-cancelled:
 		if reason != "已取消" {
 			t.Fatalf("cancel reason = %q, want 已取消", reason)
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("previous task was not cancelled")
+	}
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second runUserTask finished before previous task exited: %v", err)
+	default:
 	}
 
 	close(release)
 	if err := <-done; err != context.Canceled {
 		t.Fatalf("first runUserTask() error = %v, want context.Canceled", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second runUserTask() error = %v", err)
 	}
 	svc.taskMu.Lock()
 	remaining := svc.tasks[normalizeSessionKey(key)]
@@ -83,6 +93,144 @@ func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 		default:
 			time.Sleep(time.Millisecond)
 		}
+	}
+}
+
+func TestStartTaskWithOptionsWaitsForReplacedTaskDone(t *testing.T) {
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
+	agent := config.AgentConfig{Command: "traex"}
+	previousCtx, previousFinish := svc.startTask(context.Background(), session, agent, taskKindUser)
+	incomingDone := make(chan error, 1)
+
+	go func() {
+		_, incomingFinish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{})
+		if err == nil {
+			incomingFinish()
+		}
+		incomingDone <- err
+	}()
+
+	select {
+	case <-previousCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("previous task context was not cancelled")
+	}
+	select {
+	case err := <-incomingDone:
+		t.Fatalf("incoming task started before previous task finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	previousFinish()
+	select {
+	case err := <-incomingDone:
+		if err != nil {
+			t.Fatalf("incoming startTaskWithOptions() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incoming task did not start after previous task finished")
+	}
+}
+
+func TestStartTaskWithOptionsWaitsForReplacedTaskChain(t *testing.T) {
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
+	agent := config.AgentConfig{Command: "traex"}
+	previousCtx, previousFinish := svc.startTask(context.Background(), session, agent, taskKindUser)
+	secondDone := make(chan error, 1)
+	thirdDone := make(chan error, 1)
+
+	go func() {
+		_, finish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{})
+		if err == nil {
+			finish()
+		}
+		secondDone <- err
+	}()
+	select {
+	case <-previousCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("previous task context was not cancelled by second task")
+	}
+
+	go func() {
+		_, finish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{})
+		if err == nil {
+			finish()
+		}
+		thirdDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second startTaskWithOptions() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second task was not cancelled by third task")
+	}
+	select {
+	case err := <-thirdDone:
+		t.Fatalf("third task started before first task finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	previousFinish()
+	select {
+	case err := <-thirdDone:
+		if err != nil {
+			t.Fatalf("third startTaskWithOptions() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("third task did not start after replacement chain finished")
+	}
+}
+
+func TestStartTaskWithOptionsDetachesTimedOutPredecessorChain(t *testing.T) {
+	oldTimeout := replacedTaskDoneTimeout
+	replacedTaskDoneTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		replacedTaskDoneTimeout = oldTimeout
+	})
+
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
+	agent := config.AgentConfig{Command: "traex"}
+	previousCtx, _ := svc.startTask(context.Background(), session, agent, taskKindUser)
+	secondDone := make(chan error, 1)
+
+	go func() {
+		_, finish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{})
+		if err == nil {
+			finish()
+		}
+		secondDone <- err
+	}()
+	select {
+	case <-previousCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("previous task context was not cancelled by second task")
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second startTaskWithOptions() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second task did not start after predecessor timeout")
+	}
+
+	start := time.Now()
+	_, thirdFinish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{})
+	if err != nil {
+		t.Fatalf("third startTaskWithOptions() error = %v", err)
+	}
+	thirdFinish()
+	if elapsed := time.Since(start); elapsed >= replacedTaskDoneTimeout {
+		t.Fatalf("third start waited %s, want detached from timed out predecessor chain", elapsed)
 	}
 }
 
@@ -172,6 +320,7 @@ func TestStartTaskWithOptionsSessionWorkBoundaries(t *testing.T) {
 			cancelled := make(chan string, 1)
 			svc.setTaskCancelHandler(key, func(_ context.Context, reason string) {
 				cancelled <- reason
+				existingFinish()
 			})
 
 			ctx, incomingFinish, err := svc.startTaskWithOptions(context.Background(), session, agent, tt.incomingKind, tt.incomingOptions)
