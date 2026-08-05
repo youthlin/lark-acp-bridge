@@ -51,7 +51,7 @@ type serviceTasks struct {
 	wikiTimers      map[SessionKey]*pendingWikiRun
 	wikiGenerations map[SessionKey]int64
 	wikiStatuses    map[SessionKey]wikiRunStatus
-	workspaceLocks  map[string]*runningTask
+	workspaceLocks  workspaceTaskLocks
 	loopStatuses    map[SessionKey]loopRunStatus
 	acpErrors       map[SessionKey]acpErrorSnapshot
 	pendingAtTexts  map[ChatKey][]pendingAtMessage
@@ -95,7 +95,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			wikiTimers:      make(map[SessionKey]*pendingWikiRun),
 			wikiGenerations: make(map[SessionKey]int64),
 			wikiStatuses:    make(map[SessionKey]wikiRunStatus),
-			workspaceLocks:  make(map[string]*runningTask),
+			workspaceLocks:  newWorkspaceTaskLocks(),
 			loopStatuses:    make(map[SessionKey]loopRunStatus),
 			acpErrors:       make(map[SessionKey]acpErrorSnapshot),
 			pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),

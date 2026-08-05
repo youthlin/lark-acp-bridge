@@ -466,6 +466,45 @@ func TestHandleScheduleCommandAddSupportsExplicitCwdAndAgent(t *testing.T) {
 	}
 }
 
+func TestHandleScheduleOnceCommandSupportsExplicitFlags(t *testing.T) {
+	workspace := t.TempDir()
+	defaultCwd := t.TempDir()
+	explicitCwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{
+			{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: defaultCwd}},
+			{Name: "claude", AgentConfig: config.AgentConfig{Command: "claude", DefaultCwd: t.TempDir()}},
+		},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+
+	at := time.Now().UTC().Add(48 * time.Hour).Format("2006-01-02 15:04")
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_once",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule once --cwd=" + explicitCwd + " --agent=claude --tz=UTC " + at + " 生成指定项目一次性早报",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule once explicit flags) error = %v", err)
+	}
+	for _, want := range []string{"已创建一次性任务：task-", "触发：@at " + at, "agent：claude", "cwd：" + explicitCwd} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+	tasks := svc.scheduledTaskStoreForBotID("bot-a").List()
+	if len(tasks) != 1 || !tasks[0].Once || tasks[0].Spec != "@at "+at || tasks[0].Timezone != "UTC" || tasks[0].AgentName != "claude" || tasks[0].Cwd != explicitCwd || tasks[0].Prompt != "生成指定项目一次性早报" {
+		t.Fatalf("tasks = %+v, want explicit once flags persisted", tasks)
+	}
+}
+
 func TestHandleScheduleHowCommandReturnsRecommendedAddCommand(t *testing.T) {
 	workspace := t.TempDir()
 	cwd := t.TempDir()

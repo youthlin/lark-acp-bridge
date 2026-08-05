@@ -82,18 +82,17 @@ func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T)
 		t.Fatalf("TransitionCurrentSession() = %+v, %v; want session-1", session, changed)
 	}
 	r.mu.Lock()
-	activeSessionID := r.sessionIDs[currentRuntimeKey(key)]
-	client := r.clients[currentRuntimeKey(key)]
+	slot := r.slots[currentRuntimeKey(key)]
 	r.mu.Unlock()
-	if activeSessionID != "session-1" || client != nil {
-		t.Fatalf("runtime marker/client = %q/%v, want session-1 marker without client", activeSessionID, client)
+	if slot.sessionID != "session-1" || slot.client != nil {
+		t.Fatalf("runtime slot = %+v, want session-1 marker without client", slot)
 	}
 
 	if err := r.CloseSession(key); err != nil {
 		t.Fatalf("CloseSession() error = %v", err)
 	}
 	r.mu.Lock()
-	_, markerExists := r.sessionIDs[currentRuntimeKey(key)]
+	_, markerExists := r.slots[currentRuntimeKey(key)]
 	r.mu.Unlock()
 	if markerExists {
 		t.Fatal("CloseSession() left runtime session marker")

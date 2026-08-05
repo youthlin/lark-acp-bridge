@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +53,51 @@ type runningTaskOptions struct {
 	blockWorkspaceTasks bool
 }
 
+func userPromptTaskOptions() runningTaskOptions {
+	return runningTaskOptions{}
+}
+
+func atAutoUserPromptTaskOptions() runningTaskOptions {
+	return runningTaskOptions{drainPendingAtAuto: true}
+}
+
+func queuedPromptTaskOptions() runningTaskOptions {
+	return runningTaskOptions{
+		queuedContinuation: true,
+		skipPostPromptWork: true,
+	}
+}
+
+func autoCompactTaskOptions() runningTaskOptions {
+	return runningTaskOptions{
+		skipPostPromptWork: true,
+		silentPrompt:       true,
+	}
+}
+
+func triggerPromptTaskOptions() runningTaskOptions {
+	return runningTaskOptions{}
+}
+
+func loopTaskOptions() runningTaskOptions {
+	return runningTaskOptions{}
+}
+
+func wikiLintTaskOptions() runningTaskOptions {
+	return runningTaskOptions{
+		keepWikiTimer:       true,
+		queuedContinuation:  true,
+		blockWorkspaceTasks: true,
+	}
+}
+
+func wikiReflectionTaskOptions() runningTaskOptions {
+	return runningTaskOptions{
+		keepWikiTimer:       true,
+		blockWorkspaceTasks: true,
+	}
+}
+
 type promptTaskRunResult struct {
 	result       acp.PromptResult
 	sentProgress bool
@@ -79,8 +123,24 @@ type acpErrorSnapshot struct {
 }
 
 func (s *Service) startTask(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind) (context.Context, func()) {
-	ctx, finish, _ := s.startTaskWithOptions(ctx, session, agent, kind, runningTaskOptions{})
+	ctx, finish, _ := s.startTaskWithOptions(ctx, session, agent, kind, defaultTaskOptions(kind))
 	return ctx, finish
+}
+
+func (s *Service) startLoopTask(ctx context.Context, session Session, agent config.AgentConfig) (context.Context, func()) {
+	ctx, finish, _ := s.startTaskWithOptions(ctx, session, agent, taskKindLoop, loopTaskOptions())
+	return ctx, finish
+}
+
+func defaultTaskOptions(kind taskKind) runningTaskOptions {
+	switch kind {
+	case taskKindLoop:
+		return loopTaskOptions()
+	case taskKindUser:
+		return userPromptTaskOptions()
+	default:
+		return runningTaskOptions{}
+	}
 }
 
 func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func(), error) {
@@ -218,76 +278,12 @@ func (s *Service) beginRunningTask(key SessionKey, task *runningTask, opts runni
 	}
 	task.predecessorDone = runningTaskCompleted(previous)
 	s.tasks[key] = task
-	s.setWorkspaceLockLocked(task.session.Workspace, task)
+	s.workspaceLocks.set(task.session.Workspace, task)
 	return previous, false
 }
 
 func (s *Service) hasWorkspaceTaskLocked(key SessionKey, workspace string) bool {
-	key = normalizeSessionKey(key)
-	workspace = normalizeWorkspaceLockPath(workspace)
-	if workspace != "" {
-		if task := s.workspaceLocks[workspace]; task != nil {
-			return true
-		}
-	}
-	for taskKey, task := range s.tasks {
-		if task == nil {
-			continue
-		}
-		if normalizeSessionKey(taskKey) == key {
-			return true
-		}
-		if sameWorkspaceLockPath(workspace, task.session.Workspace) {
-			return true
-		}
-	}
-	for runtime, task := range s.wikiTasks {
-		if task == nil {
-			continue
-		}
-		if normalizeSessionKey(runtime.SessionKey) == key {
-			return true
-		}
-		if sameWorkspaceLockPath(workspace, task.session.Workspace) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) setWorkspaceLockLocked(workspace string, task *runningTask) {
-	workspace = normalizeWorkspaceLockPath(workspace)
-	if workspace == "" || task == nil {
-		return
-	}
-	if s.workspaceLocks == nil {
-		s.workspaceLocks = make(map[string]*runningTask)
-	}
-	s.workspaceLocks[workspace] = task
-}
-
-func (s *Service) clearWorkspaceLockLocked(workspace string, task *runningTask) {
-	workspace = normalizeWorkspaceLockPath(workspace)
-	if workspace == "" || task == nil || s.workspaceLocks == nil {
-		return
-	}
-	if s.workspaceLocks[workspace] == task {
-		delete(s.workspaceLocks, workspace)
-	}
-}
-
-func normalizeWorkspaceLockPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	return filepath.Clean(path)
-}
-
-func sameWorkspaceLockPath(a string, b string) bool {
-	a = normalizeWorkspaceLockPath(a)
-	b = normalizeWorkspaceLockPath(b)
-	return a != "" && b != "" && a == b
+	return s.workspaceLocks.busy(key, workspace, s.tasks, s.wikiTasks)
 }
 
 func (s *Service) workspaceForSessionTask(session Session) string {
@@ -320,12 +316,12 @@ func (s *Service) finishRunningTask(key SessionKey, task *runningTask, kind task
 	defer s.taskMu.Unlock()
 	if s.tasks[key] != task {
 		if !s.taskRegisteredLocked(task) {
-			s.clearWorkspaceLockLocked(task.session.Workspace, task)
+			s.workspaceLocks.clear(task.session.Workspace, task)
 		}
 		return false
 	}
 	delete(s.tasks, key)
-	s.clearWorkspaceLockLocked(task.session.Workspace, task)
+	s.workspaceLocks.clear(task.session.Workspace, task)
 	return kind == taskKindUser && !opts.queuedContinuation
 }
 
@@ -524,7 +520,7 @@ func (s *Service) takeRunningTask(key SessionKey) *runningTask {
 	task := s.tasks[key]
 	delete(s.tasks, key)
 	if task != nil {
-		s.clearWorkspaceLockLocked(task.session.Workspace, task)
+		s.workspaceLocks.clear(task.session.Workspace, task)
 	}
 	return task
 }
@@ -538,7 +534,7 @@ func (s *Service) takeRunningTaskOfKind(key SessionKey, kind taskKind) *runningT
 		return nil
 	}
 	delete(s.tasks, key)
-	s.clearWorkspaceLockLocked(task.session.Workspace, task)
+	s.workspaceLocks.clear(task.session.Workspace, task)
 	return task
 }
 
@@ -655,8 +651,6 @@ func (s *Service) takeAllSessionWork() sessionWorkSnapshot {
 		}
 		delete(s.wikiTasks, runtime)
 	}
-	for workspace := range s.workspaceLocks {
-		delete(s.workspaceLocks, workspace)
-	}
+	s.workspaceLocks.clearAll()
 	return snapshot
 }

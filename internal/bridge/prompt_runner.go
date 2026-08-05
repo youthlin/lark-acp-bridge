@@ -39,6 +39,96 @@ type promptStreamRun struct {
 	err           error
 }
 
+type promptRunOutcome struct {
+	session      Session
+	result       acp.PromptResult
+	reply        string
+	sentProgress bool
+	err          error
+}
+
+type promptPostWorkOptions struct {
+	botID                    string
+	msg                      feishu.Message
+	agent                    config.AgentConfig
+	operation                string
+	skipPostPromptWork       bool
+	scheduleWiki             bool
+	allowReplySuppression    bool
+	updateTitle              func(context.Context, Session) Session
+	updateTitleOnSuccessOnly bool
+	runAutoCompact           bool
+	recordACPError           bool
+}
+
+type promptPostWorkResult struct {
+	session    Session
+	reply      string
+	suppressed bool
+}
+
+func (out promptRunOutcome) replyText() string {
+	if out.reply != "" {
+		return out.reply
+	}
+	return out.result.Text
+}
+
+func (s *Service) executePromptWithRecovery(ctx context.Context, session Session, run func(context.Context, Session) promptRunOutcome, refresh func(context.Context, Session) (Session, error)) promptRunOutcome {
+	out := run(ctx, session)
+	if out.session.Key == (SessionKey{}) {
+		out.session = session
+	}
+	if errors.Is(out.err, errACPSessionUnavailable) && !out.sentProgress && refresh != nil {
+		refreshed, refreshErr := refresh(ctx, out.session)
+		if refreshErr != nil {
+			return promptRunOutcome{session: out.session, err: refreshErr}
+		}
+		out = run(ctx, refreshed)
+		if out.session.Key == (SessionKey{}) {
+			out.session = refreshed
+		}
+	}
+	return out
+}
+
+func (s *Service) finishPromptPostWork(ctx context.Context, out promptRunOutcome, opts promptPostWorkOptions) promptPostWorkResult {
+	reply := out.replyText()
+	session := out.session
+	s.recordPromptTokenUsage(ctx, opts.botID, session, out.result)
+	if !opts.skipPostPromptWork && opts.scheduleWiki && out.err == nil {
+		s.scheduleWikiAfterUserPrompt(session, opts.agent)
+	}
+	if opts.allowReplySuppression && s.shouldSuppressAtAutoReply(opts.msg, reply) {
+		return promptPostWorkResult{session: session, suppressed: true}
+	}
+	if !opts.skipPostPromptWork && shouldUpdatePromptTitle(out.err, reply, out.sentProgress, opts.updateTitleOnSuccessOnly) && opts.updateTitle != nil {
+		session = opts.updateTitle(ctx, session)
+		out.session = session
+	}
+	if !opts.skipPostPromptWork && opts.runAutoCompact {
+		s.maybeRunAutoCompact(ctx, opts.msg, session, opts.agent, out.result, out.err)
+	}
+	if opts.recordACPError && shouldRecordPromptError(out.err) {
+		s.recordACPError(session, opts.operation, out.err)
+	}
+	return promptPostWorkResult{session: session, reply: reply}
+}
+
+func shouldUpdatePromptTitle(err error, reply string, sentProgress bool, successOnly bool) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if successOnly {
+		return err == nil
+	}
+	return err == nil || strings.TrimSpace(reply) != "" || sentProgress
+}
+
+func shouldRecordPromptError(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errSessionTaskBusy)
+}
+
 func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (string, error) {
 	return s.promptWithOptions(ctx, msg, text, promptSessionOptions{})
 }
@@ -90,48 +180,48 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string, opts promptSessionOptions) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
-	result, sentProgress, err := s.runUserPrompt(ctx, msg, session, agent, text)
-	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
-		refreshed, refreshErr := s.refreshACPSession(ctx, msg, session, agent)
-		if refreshErr != nil {
-			return "", refreshErr
-		}
-		session = refreshed
-		result, sentProgress, err = s.runUserPrompt(ctx, msg, session, agent, text)
-	}
-	reply := result.Text
-	s.recordPromptTokenUsage(ctx, msg.BotID, session, result)
-	if !opts.SkipPostPromptWork && err == nil {
-		s.scheduleWikiAfterUserPrompt(session, agent)
-	}
-	if s.shouldSuppressAtAutoReply(msg, reply) {
+	out := s.executePromptWithRecovery(ctx, session, func(runCtx context.Context, runSession Session) promptRunOutcome {
+		result, sentProgress, err := s.runUserPrompt(runCtx, msg, runSession, agent, text)
+		return promptRunOutcome{session: runSession, result: result, sentProgress: sentProgress, err: err}
+	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
+		return s.refreshACPSession(refreshCtx, msg, refreshSession, agent)
+	})
+	post := s.finishPromptPostWork(ctx, out, promptPostWorkOptions{
+		botID:                 msg.BotID,
+		msg:                   msg,
+		agent:                 agent,
+		operation:             "prompt",
+		skipPostPromptWork:    opts.SkipPostPromptWork,
+		scheduleWiki:          true,
+		allowReplySuppression: true,
+		updateTitle: func(titleCtx context.Context, current Session) Session {
+			return s.updateAutomaticSessionTitle(titleCtx, msg, current, userText)
+		},
+		runAutoCompact: true,
+		recordACPError: true,
+	})
+	session = post.session
+	reply := post.reply
+	if post.suppressed {
 		return "", nil
 	}
-	if !opts.SkipPostPromptWork && !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
-		session = s.updateAutomaticSessionTitle(ctx, msg, session, userText)
-	}
-	if !opts.SkipPostPromptWork {
-		s.maybeRunAutoCompact(ctx, msg, session, agent, result, err)
-	}
-	if sentProgress {
+	if out.sentProgress {
 		reply = ""
-		result.Text = ""
 	}
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
+	if out.err != nil {
+		if errors.Is(out.err, context.Canceled) {
 			return "", nil
 		}
-		s.recordACPError(session, "prompt", err)
 		if strings.TrimSpace(reply) != "" {
 			return reply, nil
 		}
-		if sentProgress {
+		if out.sentProgress {
 			return "", nil
 		}
-		return "", err
+		return "", out.err
 	}
 	if strings.TrimSpace(reply) == "" {
-		if sentProgress {
+		if out.sentProgress {
 			return "", nil
 		}
 		return "ACP session 已完成，但没有返回文本。", nil
@@ -212,9 +302,11 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
-	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, runningTaskOptions{
-		drainPendingAtAuto: isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg),
-	})
+	opts := userPromptTaskOptions()
+	if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
+		opts = atAutoUserPromptTaskOptions()
+	}
+	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, opts)
 }
 
 func (s *Service) runUserPromptWithOptions(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) (acp.PromptResult, bool, error) {

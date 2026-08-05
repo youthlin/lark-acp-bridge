@@ -77,20 +77,44 @@ func normalizeRuntimeKey(key runtimeKey) runtimeKey {
 
 type runtimeManager struct {
 	mu            sync.Mutex
-	clients       map[runtimeKey]*acp.Client
-	sessionIDs    map[runtimeKey]string
+	slots         map[runtimeKey]runtimeClientSlot
 	subscriptions map[SessionKey]map[int64]acp.UpdateHandler
-	clientUnsub   map[runtimeKey]func()
 	nextSubID     int64
 	transitions   [64]sync.Mutex
 }
 
+type runtimeClientSlot struct {
+	client    *acp.Client
+	sessionID string
+	unsub     func()
+}
+
+func (slot runtimeClientSlot) unsubscribe() {
+	if slot.unsub != nil {
+		slot.unsub()
+	}
+}
+
+func (slot runtimeClientSlot) close(manager *runtimeManager) error {
+	slot.unsubscribe()
+	if slot.client == nil {
+		return nil
+	}
+	return manager.closeClient(slot.client, slot.sessionID)
+}
+
+func (slot runtimeClientSlot) closeReplacedBy(manager *runtimeManager, replacement *acp.Client) error {
+	if slot.client == replacement {
+		slot.unsubscribe()
+		return nil
+	}
+	return slot.close(manager)
+}
+
 func newRuntimeManager() *runtimeManager {
 	return &runtimeManager{
-		clients:       make(map[runtimeKey]*acp.Client),
-		sessionIDs:    make(map[runtimeKey]string),
+		slots:         make(map[runtimeKey]runtimeClientSlot),
 		subscriptions: make(map[SessionKey]map[int64]acp.UpdateHandler),
-		clientUnsub:   make(map[runtimeKey]func()),
 	}
 }
 
@@ -161,17 +185,12 @@ func (c *runtimeSessionCandidate) Commit(persist func() error) error {
 			return err
 		}
 	}
-	old, oldSessionID, oldUnsub := c.manager.swapClient(c.key, c.client, c.info.SessionID)
+	old := c.manager.swapClient(c.key, c.client, c.info.SessionID)
 	c.manager.attachClientSubscriptions(c.key, c.client)
 	c.committed = true
 	transition.Unlock()
 
-	if oldUnsub != nil {
-		oldUnsub()
-	}
-	if old != nil && old != c.client {
-		_ = c.manager.closeClient(old, oldSessionID)
-	}
+	_ = old.closeReplacedBy(c.manager, c.client)
 	return nil
 }
 
@@ -348,7 +367,7 @@ func (t *promptActivityTimeout) expire(cause error) {
 func (r *runtimeManager) CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error {
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
-	client := r.clients[key]
+	client := r.slots[key].client
 	r.mu.Unlock()
 	if client == nil {
 		return nil
@@ -397,7 +416,7 @@ func (r *runtimeManager) SubscribeUpdates(key SessionKey, handler acp.UpdateHand
 		r.subscriptions[key] = make(map[int64]acp.UpdateHandler)
 	}
 	r.subscriptions[key][id] = handler
-	client := r.clients[currentRuntimeKey(key)]
+	client := r.slots[currentRuntimeKey(key)].client
 	r.mu.Unlock()
 	if client != nil {
 		r.attachClientSubscriptions(currentRuntimeKey(key), client)
@@ -421,7 +440,7 @@ func (r *runtimeManager) TransitionCurrentSession(key SessionKey, expectedSessio
 	lock.Lock()
 
 	r.mu.Lock()
-	activeSessionID := r.sessionIDs[runtime]
+	activeSessionID := r.slots[runtime].sessionID
 	r.mu.Unlock()
 	if activeSessionID != "" && activeSessionID != expectedSessionID {
 		lock.Unlock()
@@ -432,72 +451,37 @@ func (r *runtimeManager) TransitionCurrentSession(key SessionKey, expectedSessio
 		lock.Unlock()
 		return session, changed, err
 	}
-	clients := r.detachSessionClients(key)
+	slots := r.detachSessionClients(key)
 	r.setRuntimeSessionID(runtime, session.ACPSessionID)
 	lock.Unlock()
-	var firstErr error
-	for _, client := range clients {
-		if client.unsub != nil {
-			client.unsub()
-		}
-		if client.client != nil {
-			if err := r.closeClient(client.client, client.sessionID); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-	return session, true, firstErr
+	return session, true, r.closeSlots(slots)
 }
 
 func (r *runtimeManager) CloseRuntimeKey(key runtimeKey) error {
 	key = normalizeRuntimeKey(key)
 	lock := r.transitionLock(key)
 	lock.Lock()
-	client, sessionID, unsub := r.detachClient(key)
+	slot := r.detachClient(key)
 	lock.Unlock()
-	if unsub != nil {
-		unsub()
-	}
-	if client != nil {
-		return r.closeClient(client, sessionID)
-	}
-	return nil
+	return slot.close(r)
 }
 
 func (r *runtimeManager) CloseSession(key SessionKey) error {
 	key = normalizeSessionKey(key)
 	lock := r.transitionLock(currentRuntimeKey(key))
 	lock.Lock()
-	clients := r.detachSessionClients(key)
+	slots := r.detachSessionClients(key)
 	lock.Unlock()
-	var firstErr error
-	for _, client := range clients {
-		if client.unsub != nil {
-			client.unsub()
-		}
-		if client.client != nil {
-			if err := r.closeClient(client.client, client.sessionID); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-	return firstErr
+	return r.closeSlots(slots)
 }
 
 func (r *runtimeManager) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
-	unsubs := r.clientUnsub
-	r.clientUnsub = make(map[runtimeKey]func())
-	keys := make([]runtimeKey, 0, len(r.clients))
-	for key := range r.clients {
+	keys := make([]runtimeKey, 0, len(r.slots))
+	for key := range r.slots {
 		keys = append(keys, key)
 	}
 	r.mu.Unlock()
-	for _, unsub := range unsubs {
-		if unsub != nil {
-			unsub()
-		}
-	}
 	var firstErr error
 	for _, key := range keys {
 		if err := r.CloseRuntimeKey(key); err != nil && firstErr == nil {
@@ -516,8 +500,9 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	lock := r.transitionLock(key)
 	lock.Lock()
 	r.mu.Lock()
-	client := r.clients[key]
-	activeSessionID := r.sessionIDs[key]
+	slot := r.slots[key]
+	client := slot.client
+	activeSessionID := slot.sessionID
 	r.mu.Unlock()
 	if client != nil && activeSessionID == session.ACPSessionID {
 		lock.Unlock()
@@ -550,43 +535,30 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 			sessionInfo = loadInfo
 		}
 	}
-	old, oldSessionID, oldUnsub := r.swapClient(key, client, session.ACPSessionID)
+	old := r.swapClient(key, client, session.ACPSessionID)
 	r.attachClientSubscriptions(key, client)
 	lock.Unlock()
-	if oldUnsub != nil {
-		oldUnsub()
-	}
-	if old != nil && old != client {
-		_ = r.closeClient(old, oldSessionID)
-	}
+	_ = old.closeReplacedBy(r, client)
 	r.dispatchSessionInfo(session.Key, session.ACPSessionID, sessionInfo)
 	return client, nil
 }
 
-func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) (*acp.Client, string, func()) {
+func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) runtimeClientSlot {
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	old := r.clients[key]
-	oldSessionID := r.sessionIDs[key]
-	oldUnsub := r.clientUnsub[key]
-	delete(r.clientUnsub, key)
-	r.clients[key] = client
-	r.sessionIDs[key] = sessionID
-	return old, oldSessionID, oldUnsub
+	old := r.slots[key]
+	r.slots[key] = runtimeClientSlot{client: client, sessionID: sessionID}
+	return old
 }
 
-func (r *runtimeManager) detachClient(key runtimeKey) (*acp.Client, string, func()) {
+func (r *runtimeManager) detachClient(key runtimeKey) runtimeClientSlot {
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	client := r.clients[key]
-	sessionID := r.sessionIDs[key]
-	unsub := r.clientUnsub[key]
-	delete(r.clients, key)
-	delete(r.sessionIDs, key)
-	delete(r.clientUnsub, key)
-	return client, sessionID, unsub
+	slot := r.slots[key]
+	delete(r.slots, key)
+	return slot
 }
 
 func (r *runtimeManager) detachBrokenRuntimeClient(key runtimeKey, broken *acp.Client) {
@@ -594,26 +566,15 @@ func (r *runtimeManager) detachBrokenRuntimeClient(key runtimeKey, broken *acp.C
 	lock := r.transitionLock(key)
 	lock.Lock()
 	r.mu.Lock()
-	client := r.clients[key]
-	sessionID := r.sessionIDs[key]
-	unsub := r.clientUnsub[key]
-	if client == broken {
-		delete(r.clients, key)
-		delete(r.sessionIDs, key)
-		delete(r.clientUnsub, key)
+	slot := r.slots[key]
+	if slot.client == broken {
+		delete(r.slots, key)
 	} else {
-		client = nil
-		sessionID = ""
-		unsub = nil
+		slot = runtimeClientSlot{}
 	}
 	r.mu.Unlock()
 	lock.Unlock()
-	if unsub != nil {
-		unsub()
-	}
-	if client != nil {
-		_ = r.closeClient(client, sessionID)
-	}
+	_ = slot.close(r)
 }
 
 func isBrokenACPClientPipeError(err error) bool {
@@ -627,52 +588,38 @@ func isBrokenACPClientPipeError(err error) bool {
 		strings.Contains(strings.ToLower(err.Error()), "broken pipe")
 }
 
-type detachedRuntimeClient struct {
-	client    *acp.Client
-	sessionID string
-	unsub     func()
-}
-
-func (r *runtimeManager) detachSessionClients(key SessionKey) []detachedRuntimeClient {
+func (r *runtimeManager) detachSessionClients(key SessionKey) []runtimeClientSlot {
 	key = normalizeSessionKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	keys := make(map[runtimeKey]struct{})
-	for runtime := range r.clients {
-		if runtime.SessionKey == key {
-			keys[runtime] = struct{}{}
-		}
-	}
-	for runtime := range r.sessionIDs {
-		if runtime.SessionKey == key {
-			keys[runtime] = struct{}{}
-		}
-	}
-	for runtime := range r.clientUnsub {
+	slots := make([]runtimeClientSlot, 0)
+	for runtime, slot := range r.slots {
 		if runtime.SessionKey != key {
 			continue
 		}
-		keys[runtime] = struct{}{}
+		slots = append(slots, slot)
+		delete(r.slots, runtime)
 	}
-	clients := make([]detachedRuntimeClient, 0, len(keys))
-	for runtime := range keys {
-		clients = append(clients, detachedRuntimeClient{
-			client:    r.clients[runtime],
-			sessionID: r.sessionIDs[runtime],
-			unsub:     r.clientUnsub[runtime],
-		})
-		delete(r.clients, runtime)
-		delete(r.sessionIDs, runtime)
-		delete(r.clientUnsub, runtime)
+	return slots
+}
+
+func (r *runtimeManager) closeSlots(slots []runtimeClientSlot) error {
+	var firstErr error
+	for _, slot := range slots {
+		if err := slot.close(r); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return clients
+	return firstErr
 }
 
 func (r *runtimeManager) setRuntimeSessionID(key runtimeKey, sessionID string) {
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sessionIDs[key] = sessionID
+	slot := r.slots[key]
+	slot.sessionID = sessionID
+	r.slots[key] = slot
 }
 
 func (r *runtimeManager) transitionLock(key runtimeKey) *sync.Mutex {
@@ -713,8 +660,13 @@ func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.C
 	}
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()
-	if old := r.clientUnsub[key]; old != nil {
-		old()
+	slot := r.slots[key]
+	if slot.client != client {
+		r.mu.Unlock()
+		return
+	}
+	if slot.unsub != nil {
+		slot.unsub()
 	}
 	unsub := client.SubscribeUpdates(func(sessionID string, update acp.SessionUpdate) {
 		r.mu.Lock()
@@ -727,7 +679,8 @@ func (r *runtimeManager) attachClientSubscriptions(key runtimeKey, client *acp.C
 			handler(sessionID, update)
 		}
 	})
-	r.clientUnsub[key] = unsub
+	slot.unsub = unsub
+	r.slots[key] = slot
 	r.mu.Unlock()
 }
 

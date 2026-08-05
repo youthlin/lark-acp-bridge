@@ -114,7 +114,7 @@ func (s *Service) startLoop(ctx context.Context, msg feishu.Message, anchor loop
 	if anchor.started.IsZero() {
 		anchor.started = started
 	}
-	ctx, finish := s.startTask(context.WithoutCancel(ctx), session, agent, taskKindLoop)
+	ctx, finish := s.startLoopTask(context.WithoutCancel(ctx), session, agent)
 	s.markLoopStarted(session.Key, started, req)
 	s.setTaskCancelHandler(session.Key, func(cancelCtx context.Context, reason string) {
 		s.updateLoopAnchor(cancelCtx, anchor, loopProgressFinished, 0, reason)

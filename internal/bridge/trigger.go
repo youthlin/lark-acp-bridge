@@ -141,28 +141,36 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 	}
 	s.subscribeTriggerStateUpdates(ctx, prepared)
 
-	result, err := s.runPreparedTriggerPrompt(ctx, prepared)
-	if errors.Is(err, errACPSessionUnavailable) {
-		slog.WarnContext(ctx, "trigger ACP session 不可恢复，准备重建", triggerLogArgs(req, prepared.session)...)
-		session, refreshErr := s.refreshTriggerSession(ctx, prepared)
-		if refreshErr != nil {
-			result = newTriggerResult(req, prepared.session, acp.PromptResult{}, "", false, refreshErr)
-			err = refreshErr
-		} else {
-			prepared.session = session
-			result, err = s.runPreparedTriggerPrompt(ctx, prepared)
+	out := s.executePromptWithRecovery(ctx, prepared.session, func(runCtx context.Context, runSession Session) promptRunOutcome {
+		prepared.session = runSession
+		result, err := s.runPreparedTriggerPrompt(runCtx, prepared)
+		return promptRunOutcome{
+			session:      result.Session,
+			result:       result.ACPResult,
+			reply:        result.Text,
+			sentProgress: result.SentProgress,
+			err:          err,
 		}
-	}
-	if err == nil {
-		result.Session = s.updateTriggerAutomaticTitle(ctx, prepared, result.Session)
-		result.ACPSessionID = result.Session.ACPSessionID
-		result.ACPSessionMeta = maps.Clone(result.Session.ACPMeta)
-		if req.EnableWikiReflection {
-			if agent, ok := s.registry.Get(result.Session.AgentName); ok {
-				s.scheduleWikiAfterUserPrompt(result.Session, agent)
-			}
-		}
-	}
+	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
+		slog.WarnContext(refreshCtx, "trigger ACP session 不可恢复，准备重建", triggerLogArgs(req, refreshSession)...)
+		prepared.session = refreshSession
+		return s.refreshTriggerSession(refreshCtx, prepared)
+	})
+	agent, agentOK := s.registry.Get(out.session.AgentName)
+	post := s.finishPromptPostWork(ctx, out, promptPostWorkOptions{
+		botID:                    req.BotID,
+		operation:                "trigger prompt",
+		agent:                    agent,
+		scheduleWiki:             req.EnableWikiReflection && agentOK,
+		updateTitleOnSuccessOnly: true,
+		recordACPError:           true,
+		updateTitle: func(titleCtx context.Context, current Session) Session {
+			prepared.session = current
+			return s.updateTriggerAutomaticTitle(titleCtx, prepared, current)
+		},
+	})
+	result := newTriggerResult(req, post.session, out.result, post.reply, out.sentProgress, out.err)
+	err = out.err
 	if req.Sink != nil {
 		if err != nil {
 			_ = req.Sink.OnError(ctx, result)
@@ -331,7 +339,7 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 		return newTriggerResult(req, session, acp.PromptResult{}, "", false, err), err
 	}
 	chunks := &triggerTextAccumulator{}
-	out, err := runPromptTask(s, ctx, session, agent, runningTaskOptions{}, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+	out, err := runPromptTask(s, ctx, session, agent, triggerPromptTaskOptions(), func(taskCtx context.Context) (acp.PromptResult, bool, error) {
 		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, acp.PromptOptions{
 			OnUpdate: func(update acp.PromptUpdate) {
 				chunks.add(update)
@@ -350,7 +358,6 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 		out.result.Text = text
 	}
 	result := newTriggerResult(req, session, out.result, text, out.sentProgress, err)
-	s.recordPromptTokenUsage(ctx, req.BotID, session, result.ACPResult)
 	return result, err
 }
 

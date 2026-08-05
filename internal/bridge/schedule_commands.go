@@ -12,11 +12,23 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
-type scheduleAddArgs struct {
+type scheduleTaskArgs struct {
 	Spec      string
+	Timezone  string
 	Prompt    string
 	AgentName string
 	Cwd       string
+	At        string
+}
+
+type scheduleFlagParseOptions struct {
+	commandName   string
+	allowTimezone bool
+}
+
+type scheduleTaskDefaults struct {
+	agentName string
+	cwd       string
 }
 
 func (s *Service) handleScheduleCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -97,56 +109,23 @@ func (s *Service) handleScheduleAddCommand(ctx context.Context, text string, msg
 	if _, err := parseScheduleSpec(args.Spec, ""); err != nil {
 		return "定时任务 spec 无效：" + err.Error()
 	}
-	agentName := args.AgentName
-	if agentName == "" {
-		agentName = s.chatAgentName(msg)
-	}
-	if _, ok := s.registry.Get(agentName); !ok {
-		return "未知 agent：" + agentName
-	}
-	cwd := args.Cwd
-	if cwd == "" {
-		cwd, _, errText = s.defaultNewSessionCwd(msg)
-		if errText != "" {
-			return errText
-		}
-	}
-	id := newScheduledTaskID()
-	task, err := store.Upsert(ScheduledTask{
-		ID:                   id,
-		BotID:                msg.BotID,
-		Enabled:              true,
-		Spec:                 args.Spec,
-		AgentName:            agentName,
-		Cwd:                  cwd,
-		Prompt:               args.Prompt,
-		CreatorOpenID:        msg.SenderID,
-		CreatedFromChatID:    msg.ChatID,
-		CreatedFromThreadID:  msg.ThreadID,
-		CreatedFromMessageID: msg.MessageID,
-		ResultSink: ScheduledTaskResultSink{
-			Type:   "im",
-			ChatID: msg.ChatID,
-		},
-		OverlapPolicy: scheduleOverlapSkipIfRunning,
+	agentName, cwd, errText := s.resolveScheduleTaskAgentAndCwd(args, msg, scheduleTaskDefaults{
+		agentName: s.chatAgentName(msg),
 	})
-	if err != nil {
-		slog.ErrorContext(ctx, "保存定时任务失败", "错误", err)
-		return "保存定时任务失败：" + err.Error()
+	if errText != "" {
+		return errText
 	}
-	if err := s.startScheduledTask(context.Background(), task, msg.Workspace); err != nil {
-		slog.ErrorContext(ctx, "注册定时任务失败", "task_id", task.ID, "错误", err)
-		return "定时任务已保存，但注册到当前进程失败：" + err.Error()
+	task := newScheduledTaskFromCommand(msg, scheduleTaskArgs{
+		Spec:      args.Spec,
+		Prompt:    args.Prompt,
+		AgentName: agentName,
+		Cwd:       cwd,
+	})
+	task, errText = s.saveAndStartScheduledTask(ctx, store, task, msg.Workspace, "定时任务")
+	if errText != "" {
+		return errText
 	}
 	return formatScheduledTaskCreated(task)
-}
-
-type scheduleOnceArgs struct {
-	At        string
-	Timezone  string
-	Prompt    string
-	AgentName string
-	Cwd       string
 }
 
 func (s *Service) handleScheduleOnceCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -158,9 +137,7 @@ func (s *Service) handleScheduleOnceCommand(ctx context.Context, text string, ms
 	if errText != "" {
 		return errText
 	}
-	// 先按解析出的 timezone 构造 @at spec 并校验。
-	spec := "@at " + args.At
-	parsed, err := parseScheduleSpec(spec, args.Timezone)
+	parsed, err := parseScheduleSpec(args.Spec, args.Timezone)
 	if err != nil {
 		return "一次性任务时间无效：" + err.Error()
 	}
@@ -168,117 +145,50 @@ func (s *Service) handleScheduleOnceCommand(ctx context.Context, text string, ms
 	if !ok || !next.After(time.Now()) {
 		return "一次性任务的执行时间必须在将来：" + args.At
 	}
-	agentName := args.AgentName
-	if agentName == "" {
-		agentName = s.chatAgentName(msg)
-	}
-	if _, ok := s.registry.Get(agentName); !ok {
-		return "未知 agent：" + agentName
-	}
-	cwd := args.Cwd
-	if cwd == "" {
-		cwd, _, errText = s.defaultNewSessionCwd(msg)
-		if errText != "" {
-			return errText
-		}
-	}
-	id := newScheduledTaskID()
-	task, err := store.Upsert(ScheduledTask{
-		ID:                   id,
-		BotID:                msg.BotID,
-		Enabled:              true,
-		Once:                 true,
-		Spec:                 spec,
-		Timezone:             args.Timezone,
-		AgentName:            agentName,
-		Cwd:                  cwd,
-		Prompt:               args.Prompt,
-		CreatorOpenID:        msg.SenderID,
-		CreatedFromChatID:    msg.ChatID,
-		CreatedFromThreadID:  msg.ThreadID,
-		CreatedFromMessageID: msg.MessageID,
-		ResultSink: ScheduledTaskResultSink{
-			Type:   "im",
-			ChatID: msg.ChatID,
-		},
-		OverlapPolicy: scheduleOverlapSkipIfRunning,
+	agentName, cwd, errText := s.resolveScheduleTaskAgentAndCwd(args, msg, scheduleTaskDefaults{
+		agentName: s.chatAgentName(msg),
 	})
-	if err != nil {
-		slog.ErrorContext(ctx, "保存一次性任务失败", "错误", err)
-		return "保存一次性任务失败：" + err.Error()
+	if errText != "" {
+		return errText
 	}
-	if err := s.startScheduledTask(context.Background(), task, msg.Workspace); err != nil {
-		slog.ErrorContext(ctx, "注册一次性任务失败", "task_id", task.ID, "错误", err)
-		return "一次性任务已保存，但注册到当前进程失败：" + err.Error()
+	task := newScheduledTaskFromCommand(msg, scheduleTaskArgs{
+		Spec:      args.Spec,
+		Timezone:  args.Timezone,
+		Prompt:    args.Prompt,
+		AgentName: agentName,
+		Cwd:       cwd,
+	})
+	task.Once = true
+	task, errText = s.saveAndStartScheduledTask(ctx, store, task, msg.Workspace, "一次性任务")
+	if errText != "" {
+		return errText
 	}
 	return formatScheduledTaskCreated(task)
 }
 
-func (s *Service) parseScheduleOnceArgs(args string, msg feishu.Message) (scheduleOnceArgs, string) {
+func (s *Service) parseScheduleOnceArgs(args string, msg feishu.Message) (scheduleTaskArgs, string) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return scheduleOnceArgs{}, "请使用 /schedule once [--cwd <path>] [--agent <name>] [--tz <zone>] <时间> <prompt>。"
+		return scheduleTaskArgs{}, "请使用 /schedule once [--cwd <path>] [--agent <name>] [--tz <zone>] <时间> <prompt>。"
 	}
-	fields := strings.Fields(args)
-	parsed := scheduleOnceArgs{}
-	index := 0
-	for index < len(fields) {
-		field := strings.TrimSpace(fields[index])
-		switch {
-		case field == "--cwd":
-			if index+1 >= len(fields) {
-				return scheduleOnceArgs{}, "请为 --cwd 指定工作目录。"
-			}
-			cwd, isPath, errText := s.resolveNewSessionCwdArg(fields[index+1], msg)
-			if errText != "" {
-				return scheduleOnceArgs{}, errText
-			}
-			if !isPath || cwd == "" {
-				return scheduleOnceArgs{}, "请为 --cwd 指定有效工作目录。"
-			}
-			parsed.Cwd = cwd
-			index += 2
-		case strings.HasPrefix(field, "--cwd="):
-			value := strings.TrimSpace(strings.TrimPrefix(field, "--cwd="))
-			cwd, isPath, errText := s.resolveNewSessionCwdArg(value, msg)
-			if errText != "" {
-				return scheduleOnceArgs{}, errText
-			}
-			if !isPath || cwd == "" {
-				return scheduleOnceArgs{}, "请为 --cwd 指定有效工作目录。"
-			}
-			parsed.Cwd = cwd
-			index++
-		case field == "--agent":
-			if index+1 >= len(fields) {
-				return scheduleOnceArgs{}, "请为 --agent 指定 agent 名称。"
-			}
-			parsed.AgentName = strings.TrimSpace(fields[index+1])
-			index += 2
-		case strings.HasPrefix(field, "--agent="):
-			parsed.AgentName = strings.TrimSpace(strings.TrimPrefix(field, "--agent="))
-			index++
-		case field == "--tz":
-			if index+1 >= len(fields) {
-				return scheduleOnceArgs{}, "请为 --tz 指定时区，例如 Asia/Shanghai。"
-			}
-			parsed.Timezone = strings.TrimSpace(fields[index+1])
-			index += 2
-		case strings.HasPrefix(field, "--tz="):
-			parsed.Timezone = strings.TrimSpace(strings.TrimPrefix(field, "--tz="))
-			index++
-		case strings.HasPrefix(field, "-"):
-			return scheduleOnceArgs{}, "未知 schedule once 参数：" + field
-		default:
-			// 剩余部分解析时间（RFC3339 一段，或 YYYY-MM-DD HH:MM 两段）+ prompt。
-			rest := strings.Join(fields[index:], " ")
-			return parseOnceTimeAndPrompt(rest)
-		}
+	parsed, rest, errText := s.parseScheduleFlags(args, msg, scheduleFlagParseOptions{commandName: "once", allowTimezone: true})
+	if errText != "" {
+		return scheduleTaskArgs{}, errText
 	}
-	return scheduleOnceArgs{}, "请提供一次性任务的执行时间和 prompt。"
+	if len(rest) == 0 {
+		return scheduleTaskArgs{}, "请提供一次性任务的执行时间和 prompt。"
+	}
+	once, errText := parseOnceTimeAndPrompt(strings.Join(rest, " "))
+	if errText != "" {
+		return scheduleTaskArgs{}, errText
+	}
+	parsed.At = once.At
+	parsed.Spec = once.Spec
+	parsed.Prompt = once.Prompt
+	return parsed, ""
 }
 
-func parseOnceTimeAndPrompt(rest string) (scheduleOnceArgs, string) {
+func parseOnceTimeAndPrompt(rest string) (scheduleTaskArgs, string) {
 	rest = strings.TrimSpace(rest)
 	// RFC3339：首个空白前的 token 含 'T'。
 	firstEnd := strings.IndexAny(rest, " \t")
@@ -288,26 +198,27 @@ func parseOnceTimeAndPrompt(rest string) (scheduleOnceArgs, string) {
 			if t, err := time.Parse(time.RFC3339, first); err == nil {
 				prompt := strings.TrimSpace(rest[firstEnd:])
 				if prompt == "" {
-					return scheduleOnceArgs{}, "一次性任务 prompt 不能为空。"
+					return scheduleTaskArgs{}, "一次性任务 prompt 不能为空。"
 				}
-				return scheduleOnceArgs{At: t.Format(time.RFC3339), Prompt: prompt}, ""
+				at := t.Format(time.RFC3339)
+				return scheduleTaskArgs{At: at, Spec: "@at " + at, Prompt: prompt}, ""
 			}
 		}
 	}
 	// YYYY-MM-DD HH:MM：前两个空白分隔字段。
 	fields := strings.Fields(rest)
 	if len(fields) < 3 {
-		return scheduleOnceArgs{}, "请使用 /schedule once <YYYY-MM-DD HH:MM | RFC3339> <prompt>。"
+		return scheduleTaskArgs{}, "请使用 /schedule once <YYYY-MM-DD HH:MM | RFC3339> <prompt>。"
 	}
 	at := fields[0] + " " + fields[1]
 	if _, err := time.ParseInLocation("2006-01-02 15:04", at, time.Local); err != nil {
-		return scheduleOnceArgs{}, "时间需为 YYYY-MM-DD HH:MM 或 RFC3339：" + err.Error()
+		return scheduleTaskArgs{}, "时间需为 YYYY-MM-DD HH:MM 或 RFC3339：" + err.Error()
 	}
 	prompt := strings.TrimSpace(strings.TrimPrefix(rest, at))
 	if prompt == "" {
-		return scheduleOnceArgs{}, "一次性任务 prompt 不能为空。"
+		return scheduleTaskArgs{}, "一次性任务 prompt 不能为空。"
 	}
-	return scheduleOnceArgs{At: at, Prompt: prompt}, ""
+	return scheduleTaskArgs{At: at, Spec: "@at " + at, Prompt: prompt}, ""
 }
 func (s *Service) handleScheduleHowCommand(ctx context.Context, text string, msg feishu.Message) string {
 	prompt, err := scheduleHowPrompt(strings.TrimSpace(commandRemainder(text, 2)))
@@ -370,38 +281,70 @@ func scheduleHowPrompt(goal string) (string, error) {
 	}, "\n"), nil
 }
 
-func (s *Service) parseScheduleAddArgs(args string, msg feishu.Message) (scheduleAddArgs, string) {
+func (s *Service) parseScheduleAddArgs(args string, msg feishu.Message) (scheduleTaskArgs, string) {
 	return s.parseScheduleTaskArgs(args, msg, "add")
 }
 
-func (s *Service) parseScheduleTaskArgs(args string, msg feishu.Message, commandName string) (scheduleAddArgs, string) {
+func (s *Service) parseScheduleTaskArgs(args string, msg feishu.Message, commandName string) (scheduleTaskArgs, string) {
 	args = strings.TrimSpace(args)
 	commandName = strings.TrimSpace(commandName)
 	if commandName == "" {
 		commandName = "add"
 	}
 	if args == "" {
-		return scheduleAddArgs{}, "请使用 /schedule " + commandName + " <spec> <prompt>。"
+		return scheduleTaskArgs{}, "请使用 /schedule " + commandName + " <spec> <prompt>。"
 	}
-	fields := strings.Fields(args)
+	parsed, fields, errText := s.parseScheduleFlags(args, msg, scheduleFlagParseOptions{commandName: commandName})
+	if errText != "" {
+		return scheduleTaskArgs{}, errText
+	}
 	if len(fields) < 2 {
-		return scheduleAddArgs{}, "请提供定时任务 spec 和 prompt。"
+		return scheduleTaskArgs{}, "请提供定时任务 spec 和 prompt。"
 	}
-	parsed := scheduleAddArgs{}
+	rest := strings.Join(fields, " ")
+	if strings.EqualFold(fields[0], "@every") {
+		if len(fields) < 3 {
+			return scheduleTaskArgs{}, "请使用 /schedule add @every <duration> <prompt>。"
+		}
+		parsed.Spec = "@every " + fields[1]
+		parsed.Prompt = strings.TrimSpace(strings.TrimPrefix(rest, fields[0]+" "+fields[1]))
+		if parsed.Prompt == "" {
+			return scheduleTaskArgs{}, "定时任务 prompt 不能为空。"
+		}
+		return parsed, ""
+	}
+	if len(fields) < 6 {
+		return scheduleTaskArgs{}, "cron spec 需要 5 段，并在后面提供 prompt。"
+	}
+	parsed.Spec = strings.Join(fields[:5], " ")
+	parsed.Prompt = strings.TrimSpace(strings.TrimPrefix(rest, parsed.Spec))
+	if parsed.Prompt == "" {
+		return scheduleTaskArgs{}, "定时任务 prompt 不能为空。"
+	}
+	return parsed, ""
+}
+
+func (s *Service) parseScheduleFlags(args string, msg feishu.Message, opts scheduleFlagParseOptions) (scheduleTaskArgs, []string, string) {
+	fields := strings.Fields(strings.TrimSpace(args))
+	parsed := scheduleTaskArgs{}
+	commandName := strings.TrimSpace(opts.commandName)
+	if commandName == "" {
+		commandName = "add"
+	}
 	index := 0
 	for index < len(fields) {
 		field := strings.TrimSpace(fields[index])
 		switch {
 		case field == "--cwd":
 			if index+1 >= len(fields) {
-				return scheduleAddArgs{}, "请为 --cwd 指定工作目录。"
+				return scheduleTaskArgs{}, nil, "请为 --cwd 指定工作目录。"
 			}
 			cwd, isPath, errText := s.resolveNewSessionCwdArg(fields[index+1], msg)
 			if errText != "" {
-				return scheduleAddArgs{}, errText
+				return scheduleTaskArgs{}, nil, errText
 			}
 			if !isPath || cwd == "" {
-				return scheduleAddArgs{}, "请为 --cwd 指定有效工作目录。"
+				return scheduleTaskArgs{}, nil, "请为 --cwd 指定有效工作目录。"
 			}
 			parsed.Cwd = cwd
 			index += 2
@@ -409,54 +352,117 @@ func (s *Service) parseScheduleTaskArgs(args string, msg feishu.Message, command
 			value := strings.TrimSpace(strings.TrimPrefix(field, "--cwd="))
 			cwd, isPath, errText := s.resolveNewSessionCwdArg(value, msg)
 			if errText != "" {
-				return scheduleAddArgs{}, errText
+				return scheduleTaskArgs{}, nil, errText
 			}
 			if !isPath || cwd == "" {
-				return scheduleAddArgs{}, "请为 --cwd 指定有效工作目录。"
+				return scheduleTaskArgs{}, nil, "请为 --cwd 指定有效工作目录。"
 			}
 			parsed.Cwd = cwd
 			index++
 		case field == "--agent":
 			if index+1 >= len(fields) {
-				return scheduleAddArgs{}, "请为 --agent 指定 agent 名称。"
+				return scheduleTaskArgs{}, nil, "请为 --agent 指定 agent 名称。"
 			}
 			parsed.AgentName = strings.TrimSpace(fields[index+1])
 			index += 2
 		case strings.HasPrefix(field, "--agent="):
 			parsed.AgentName = strings.TrimSpace(strings.TrimPrefix(field, "--agent="))
 			index++
+		case field == "--tz" && opts.allowTimezone:
+			if index+1 >= len(fields) {
+				return scheduleTaskArgs{}, nil, "请为 --tz 指定时区，例如 Asia/Shanghai。"
+			}
+			parsed.Timezone = strings.TrimSpace(fields[index+1])
+			index += 2
+		case strings.HasPrefix(field, "--tz=") && opts.allowTimezone:
+			parsed.Timezone = strings.TrimSpace(strings.TrimPrefix(field, "--tz="))
+			index++
 		case strings.HasPrefix(field, "-"):
-			return scheduleAddArgs{}, "未知 schedule " + commandName + " 参数：" + field
+			return scheduleTaskArgs{}, nil, "未知 schedule " + commandName + " 参数：" + field
 		default:
-			fields = fields[index:]
-			args = strings.Join(fields, " ")
-			index = 0
-			goto parseSpec
+			return parsed, fields[index:], ""
 		}
 	}
-	return scheduleAddArgs{}, "请提供定时任务 spec 和 prompt。"
+	return parsed, nil, ""
+}
 
-parseSpec:
-	if strings.EqualFold(fields[0], "@every") {
-		if len(fields) < 3 {
-			return scheduleAddArgs{}, "请使用 /schedule add @every <duration> <prompt>。"
+func (s *Service) resolveScheduleTaskAgentAndCwd(args scheduleTaskArgs, msg feishu.Message, defaults scheduleTaskDefaults) (string, string, string) {
+	agentName := strings.TrimSpace(args.AgentName)
+	if agentName == "" {
+		agentName = strings.TrimSpace(defaults.agentName)
+	}
+	if _, ok := s.registry.Get(agentName); !ok {
+		return "", "", "未知 agent：" + agentName
+	}
+	cwd := strings.TrimSpace(args.Cwd)
+	if cwd == "" {
+		cwd = strings.TrimSpace(defaults.cwd)
+	}
+	if cwd == "" {
+		var errText string
+		cwd, _, errText = s.defaultNewSessionCwd(msg)
+		if errText != "" {
+			return "", "", errText
 		}
-		parsed.Spec = "@every " + fields[1]
-		parsed.Prompt = strings.TrimSpace(strings.TrimPrefix(args, fields[0]+" "+fields[1]))
-		if parsed.Prompt == "" {
-			return scheduleAddArgs{}, "定时任务 prompt 不能为空。"
+	}
+	return agentName, cwd, ""
+}
+
+func newScheduledTaskFromCommand(msg feishu.Message, args scheduleTaskArgs) ScheduledTask {
+	return ScheduledTask{
+		ID:                   newScheduledTaskID(),
+		BotID:                msg.BotID,
+		Enabled:              true,
+		Spec:                 args.Spec,
+		Timezone:             args.Timezone,
+		AgentName:            args.AgentName,
+		Cwd:                  args.Cwd,
+		Prompt:               args.Prompt,
+		CreatorOpenID:        msg.SenderID,
+		CreatedFromChatID:    msg.ChatID,
+		CreatedFromThreadID:  msg.ThreadID,
+		CreatedFromMessageID: msg.MessageID,
+		ResultSink: ScheduledTaskResultSink{
+			Type:   "im",
+			ChatID: msg.ChatID,
+		},
+		OverlapPolicy: scheduleOverlapSkipIfRunning,
+	}
+}
+
+func (s *Service) saveAndStartScheduledTask(ctx context.Context, store *ScheduledTaskStore, task ScheduledTask, workspace string, kind string) (ScheduledTask, string) {
+	task, err := store.Upsert(task)
+	if err != nil {
+		slog.ErrorContext(ctx, "保存"+kind+"失败", "错误", err)
+		return ScheduledTask{}, "保存" + kind + "失败：" + err.Error()
+	}
+	if err := s.startScheduledTask(context.Background(), task, workspace); err != nil {
+		slog.ErrorContext(ctx, "注册"+kind+"失败", "task_id", task.ID, "错误", err)
+		return ScheduledTask{}, kind + "已保存，但注册到当前进程失败：" + err.Error()
+	}
+	return task, ""
+}
+
+func (s *Service) scheduleTaskWorkspace(task ScheduledTask, msg feishu.Message) string {
+	workspace := strings.TrimSpace(s.botWorkspace(task.BotID))
+	if workspace == "" {
+		workspace = strings.TrimSpace(msg.Workspace)
+	}
+	return workspace
+}
+
+func (s *Service) startImmediateScheduleRun(ctx context.Context, task ScheduledTask, workspace string) string {
+	triggeredAt := time.Now()
+	runID := scheduledTaskRunID(task, triggeredAt)
+	runKey := scheduledTaskRunKey(task, runID)
+	s.markScheduleRunPending(task, runID, runKey, triggeredAt)
+	runCtx := context.WithoutCancel(ctx)
+	go func() {
+		if _, err := s.runScheduledTaskOnce(runCtx, task, runID, triggeredAt, workspace, nil); err != nil {
+			slog.ErrorContext(runCtx, "立即执行定时任务失败", "task_id", task.ID, "run_id", runID, "错误", err)
 		}
-		return parsed, ""
-	}
-	if len(fields) < 6 {
-		return scheduleAddArgs{}, "cron spec 需要 5 段，并在后面提供 prompt。"
-	}
-	parsed.Spec = strings.Join(fields[:5], " ")
-	parsed.Prompt = strings.TrimSpace(strings.TrimPrefix(args, strings.Join(fields[:5], " ")))
-	if parsed.Prompt == "" {
-		return scheduleAddArgs{}, "定时任务 prompt 不能为空。"
-	}
-	return parsed, ""
+	}()
+	return runID
 }
 
 func (s *Service) handleScheduleListCommand(msg feishu.Message) string {
@@ -541,16 +547,12 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 	if !existing.Once && isOnceSpec {
 		return "@at <时间> 仅用于 /schedule once 创建的一次性任务；请用 /schedule add 创建循环任务。"
 	}
-	agentName := args.AgentName
-	if agentName == "" {
-		agentName = existing.AgentName
-	}
-	if _, ok := s.registry.Get(agentName); !ok {
-		return "未知 agent：" + agentName
-	}
-	cwd := args.Cwd
-	if cwd == "" {
-		cwd = existing.Cwd
+	agentName, cwd, errText := s.resolveScheduleTaskAgentAndCwd(args, msg, scheduleTaskDefaults{
+		agentName: existing.AgentName,
+		cwd:       existing.Cwd,
+	})
+	if errText != "" {
+		return errText
 	}
 	task, ok, err := store.Update(id, func(task *ScheduledTask) {
 		task.Spec = args.Spec
@@ -566,10 +568,7 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 		return "定时任务不存在：" + id
 	}
 	if task.Enabled {
-		workspace := strings.TrimSpace(s.botWorkspace(task.BotID))
-		if workspace == "" {
-			workspace = strings.TrimSpace(msg.Workspace)
-		}
+		workspace := s.scheduleTaskWorkspace(task, msg)
 		if err := s.startScheduledTask(context.Background(), task, workspace); err != nil {
 			slog.ErrorContext(ctx, "重新注册定时任务失败", "task_id", task.ID, "错误", err)
 			return "定时任务已保存，但重新注册到当前进程失败：" + err.Error()
@@ -589,23 +588,11 @@ func (s *Service) handleScheduleRunCommand(ctx context.Context, msg feishu.Messa
 	if !ok {
 		return "定时任务不存在：" + strings.TrimSpace(id)
 	}
-	workspace := strings.TrimSpace(s.botWorkspace(task.BotID))
-	if workspace == "" {
-		workspace = strings.TrimSpace(msg.Workspace)
-	}
+	workspace := s.scheduleTaskWorkspace(task, msg)
 	if workspace == "" {
 		return "定时任务 workspace 为空，无法执行：" + task.ID
 	}
-	triggeredAt := time.Now()
-	runID := scheduledTaskRunID(task, triggeredAt)
-	runKey := scheduledTaskRunKey(task, runID)
-	s.markScheduleRunPending(task, runID, runKey, triggeredAt)
-	runCtx := context.WithoutCancel(ctx)
-	go func() {
-		if _, err := s.runScheduledTaskOnce(runCtx, task, runID, triggeredAt, workspace, nil); err != nil {
-			slog.ErrorContext(runCtx, "立即执行定时任务失败", "task_id", task.ID, "run_id", runID, "错误", err)
-		}
-	}()
+	runID := s.startImmediateScheduleRun(ctx, task, workspace)
 	return strings.Join([]string{
 		"已开始立即执行定时任务：" + task.ID,
 		"run：" + runID,

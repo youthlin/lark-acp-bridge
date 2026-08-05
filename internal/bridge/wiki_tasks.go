@@ -270,11 +270,7 @@ func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
 	if s.wikiWorkspaceBusy(session.Key, session.Workspace) {
 		return "当前会话正在忙碌，稍后再执行 /wiki lint。"
 	}
-	taskCtx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, runningTaskOptions{
-		keepWikiTimer:       true,
-		queuedContinuation:  true,
-		blockWorkspaceTasks: true,
-	})
+	taskCtx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, wikiLintTaskOptions())
 	if err != nil {
 		if errors.Is(err, errSessionTaskBusy) {
 			return "当前会话正在忙碌，稍后再执行 /wiki lint。"
@@ -373,13 +369,13 @@ func (s *Service) beginWikiUpgradeTask(key SessionKey, workspace string) (func()
 		s.tasks = make(map[SessionKey]*runningTask)
 	}
 	s.tasks[key] = task
-	s.setWorkspaceLockLocked(workspace, task)
+	s.workspaceLocks.set(workspace, task)
 	return func() {
 		s.taskMu.Lock()
 		if s.tasks[key] == task {
 			delete(s.tasks, key)
 		}
-		s.clearWorkspaceLockLocked(workspace, task)
+		s.workspaceLocks.clear(workspace, task)
 		s.taskMu.Unlock()
 		task.closeDone()
 	}, true
@@ -442,7 +438,7 @@ func (s *Service) beginWikiTask(runtime runtimeKey, task *runningTask) bool {
 		s.wikiTasks = make(map[runtimeKey]*runningTask)
 	}
 	s.wikiTasks[runtime] = task
-	s.setWorkspaceLockLocked(task.session.Workspace, task)
+	s.workspaceLocks.set(task.session.Workspace, task)
 	return true
 }
 
@@ -452,12 +448,12 @@ func (s *Service) finishWikiTask(runtime runtimeKey, task *runningTask) bool {
 	defer s.taskMu.Unlock()
 	if s.wikiTasks[runtime] != task {
 		if !s.taskRegisteredLocked(task) {
-			s.clearWorkspaceLockLocked(task.session.Workspace, task)
+			s.workspaceLocks.clear(task.session.Workspace, task)
 		}
 		return false
 	}
 	delete(s.wikiTasks, runtime)
-	s.clearWorkspaceLockLocked(task.session.Workspace, task)
+	s.workspaceLocks.clear(task.session.Workspace, task)
 	return true
 }
 
@@ -481,7 +477,7 @@ func (s *Service) takeWikiTasks(key SessionKey) []*runningTask {
 		if runtime.SessionKey == key {
 			tasks = append(tasks, task)
 			delete(s.wikiTasks, runtime)
-			s.clearWorkspaceLockLocked(task.session.Workspace, task)
+			s.workspaceLocks.clear(task.session.Workspace, task)
 		}
 	}
 	return tasks
@@ -606,10 +602,7 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		return
 	}
 
-	ctx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, runningTaskOptions{
-		keepWikiTimer:       true,
-		blockWorkspaceTasks: true,
-	})
+	ctx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, wikiReflectionTaskOptions())
 	if err != nil {
 		if errors.Is(err, errSessionTaskBusy) {
 			s.scheduleWikiAfterUserPrompt(session, agent)

@@ -314,10 +314,7 @@ func shouldAutoCompact(session Session) bool {
 }
 
 func (s *Service) runAutoCompact(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) {
-	_, _, err := s.runUserPromptWithOptions(ctx, msg, session, agent, "/compact", runningTaskOptions{
-		skipPostPromptWork: true,
-		silentPrompt:       true,
-	})
+	_, _, err := s.runUserPromptWithOptions(ctx, msg, session, agent, "/compact", autoCompactTaskOptions())
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.recordACPError(session, "auto compact", err)
 		slog.WarnContext(ctx, "自动 compact 失败", "session", session.ACPSessionID, "错误", err)

@@ -482,6 +482,96 @@ func TestRunTriggerPromptUpdatesAutomaticTitle(t *testing.T) {
 	}
 }
 
+func TestRunTriggerPromptRecordsTokenUsage(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	usageStore := NewTokenUsageStore(filepath.Join(workspace, "token_usage.json"))
+	cfg := config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	svc := NewService(cfg, store)
+	svc.usageStores["bot-a"] = usageStore
+	svc.setRuntime(&fakeRuntime{
+		newSessionInfo: acp.SessionInfo{
+			SessionID: "acp-trigger",
+			ConfigOptions: []acp.SessionConfigOption{
+				{ID: "model", Category: "model", CurrentValue: "gpt-5.5"},
+			},
+		},
+		promptResult: acp.PromptResult{
+			Text: "done",
+			Usage: acp.TokenUsage{
+				InputTokens:  10,
+				OutputTokens: 5,
+			},
+		},
+	})
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: workspace,
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "generate daily report",
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	usageStore.mu.Lock()
+	records := append([]TokenUsageRecord(nil), usageStore.records...)
+	usageStore.mu.Unlock()
+	if len(records) != 1 {
+		t.Fatalf("usage records = %+v, want one trigger usage record", records)
+	}
+	record := records[0]
+	if record.BotID != "bot-a" || record.Source != "schedule" || record.MainID != "task:daily" || record.SubID != "run:1" {
+		t.Fatalf("usage record key = %+v, want trigger key fields", record)
+	}
+	if record.SessionID != "acp-trigger" || record.AgentName != "traex" || record.Model != "gpt-5.5" || record.Usage.TotalTokens != 15 {
+		t.Fatalf("usage record = %+v, want trigger session token usage", record)
+	}
+}
+
+func TestRunTriggerPromptRecordsSanitizedACPError(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-existing", Cwd: t.TempDir()}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	cfg := config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(&fakeRuntime{
+		promptErrors: []error{errors.New("trigger failed token secret-token")},
+	})
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: t.TempDir(),
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "generate daily report",
+	})
+	if err == nil {
+		t.Fatal("runTriggerPrompt() error = nil, want trigger failure")
+	}
+	snapshot, ok := svc.acpErrorSnapshot(session)
+	if !ok {
+		t.Fatal("acpErrorSnapshot() missing after trigger failure")
+	}
+	if snapshot.operation != "trigger prompt" || !strings.Contains(snapshot.message, "trigger failed") || !strings.Contains(snapshot.message, "token [已隐藏]") {
+		t.Fatalf("snapshot = %+v, want sanitized trigger prompt error", snapshot)
+	}
+	if strings.Contains(snapshot.message, "secret-token") {
+		t.Fatalf("snapshot = %+v, should not include raw token", snapshot)
+	}
+}
+
 func TestRunTriggerPromptKeepsManualTitle(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Config{

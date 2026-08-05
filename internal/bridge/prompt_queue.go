@@ -115,7 +115,6 @@ func (s *Service) drainPromptQueue(ctx context.Context, key SessionKey) {
 			return
 		}
 		if err != nil {
-			s.recordACPError(item.session, "queue prompt", err)
 			slog.WarnContext(ctx, "执行队列 prompt 失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", err)
 			reply = "队列任务执行失败：" + err.Error()
 		}
@@ -189,37 +188,33 @@ func (s *Service) canRestartPromptQueueDrainLocked(key SessionKey) bool {
 }
 
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {
-	result, sentProgress, err := s.runUserPromptWithOptions(ctx, item.msg, item.session, item.agent, item.text, runningTaskOptions{
-		queuedContinuation: true,
-		skipPostPromptWork: true,
+	out := s.executePromptWithRecovery(ctx, item.session, func(runCtx context.Context, runSession Session) promptRunOutcome {
+		result, sentProgress, err := s.runUserPromptWithOptions(runCtx, item.msg, runSession, item.agent, item.text, queuedPromptTaskOptions())
+		return promptRunOutcome{session: runSession, result: result, sentProgress: sentProgress, err: err}
+	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
+		return s.refreshACPSession(refreshCtx, item.msg, refreshSession, item.agent)
 	})
-	if errors.Is(err, errACPSessionUnavailable) && !sentProgress {
-		refreshed, refreshErr := s.refreshACPSession(ctx, item.msg, item.session, item.agent)
-		if refreshErr != nil {
-			return "", refreshErr
-		}
-		item.session = refreshed
-		result, sentProgress, err = s.runUserPromptWithOptions(ctx, item.msg, item.session, item.agent, item.text, runningTaskOptions{
-			queuedContinuation: true,
-			skipPostPromptWork: true,
-		})
-	}
-	reply := result.Text
-	s.recordPromptTokenUsage(ctx, item.msg.BotID, item.session, result)
-	if err == nil {
-		s.scheduleWikiAfterUserPrompt(item.session, item.agent)
-	}
-	if s.shouldSuppressAtAutoReply(item.msg, reply) {
+	post := s.finishPromptPostWork(ctx, out, promptPostWorkOptions{
+		botID:                 item.msg.BotID,
+		msg:                   item.msg,
+		agent:                 item.agent,
+		operation:             "queue prompt",
+		scheduleWiki:          true,
+		allowReplySuppression: true,
+		updateTitle: func(titleCtx context.Context, current Session) Session {
+			return s.updateAutomaticSessionTitle(titleCtx, item.msg, current, item.userText)
+		},
+		recordACPError: true,
+	})
+	if post.suppressed {
 		return "", nil
 	}
-	if !errors.Is(err, context.Canceled) && (err == nil || strings.TrimSpace(reply) != "" || sentProgress) {
-		item.session = s.updateAutomaticSessionTitle(ctx, item.msg, item.session, item.userText)
+	reply := post.reply
+	if out.sentProgress {
+		return "", out.err
 	}
-	if sentProgress {
-		return "", err
+	if out.err != nil && strings.TrimSpace(reply) == "" {
+		return "", out.err
 	}
-	if err != nil && strings.TrimSpace(reply) == "" {
-		return "", err
-	}
-	return reply, err
+	return reply, out.err
 }
