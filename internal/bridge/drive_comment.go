@@ -182,7 +182,7 @@ func driveCommentShouldSuppressReply(comment feishu.DriveComment, reply string) 
 		return false
 	}
 	reply = strings.TrimSpace(reply)
-	return reply == "" || strings.EqualFold(reply, "SILENT")
+	return reply == "" || isSilentReplySentinel(reply)
 }
 
 func driveCommentMetadata(comment feishu.DriveComment) map[string]string {

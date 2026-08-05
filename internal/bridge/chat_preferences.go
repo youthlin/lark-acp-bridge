@@ -406,7 +406,7 @@ func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
 }
 
 func (s *Service) shouldSuppressAtAutoReply(msg feishu.Message, reply string) bool {
-	return s.shouldHandleAtAutoMessage(msg) && strings.EqualFold(strings.TrimSpace(reply), "SILENT")
+	return s.shouldHandleAtAutoMessage(msg) && isSilentReplySentinel(reply)
 }
 
 func (s *Service) shouldDelayAtAutoProgress(msg feishu.Message) bool {

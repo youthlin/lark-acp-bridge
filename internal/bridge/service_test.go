@@ -4096,7 +4096,10 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 
 	rt.mu.Lock()
 	rt.promptCalls = nil
-	rt.promptResults = []acp.PromptResult{{Text: "SILENT"}, {Text: "需要回复"}}
+	rt.promptResults = []acp.PromptResult{
+		{Text: "Context compacted Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.SILENT"},
+		{Text: "需要回复"},
+	}
 	rt.promptUpdates = []acp.PromptUpdate{
 		{
 			SessionID: "acp-session-1",

@@ -242,7 +242,10 @@ func TestDriveCommentUnmentionedUsesSilentAutoJudgement(t *testing.T) {
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
 		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
 	}, store)
-	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "需要回复"}}}
+	rt := &fakeRuntime{promptResults: []acp.PromptResult{
+		{Text: "Context compacted Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.SILENT"},
+		{Text: "需要回复"},
+	}}
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
 	svc.setOutbound("bot-a", replies)
