@@ -24,8 +24,8 @@ func (s *Service) Start(ctx context.Context) error {
 		if workspace == "" {
 			continue
 		}
-		if err := migrateWorkspaceLocalState(workspace); err != nil {
-			return fmt.Errorf("迁移 bot %q 的 workspace 本地状态: %w", bot.ID, err)
+		if _, err := prepareWorkspaceLocalState(workspace); err != nil {
+			return fmt.Errorf("准备 bot %q 的 workspace 本地状态: %w", bot.ID, err)
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,13 @@ func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(workspace, ".local", name)); err != nil {
 			t.Fatalf("local %s err = %v, want migrated", name, err)
 		}
+	}
+	gitignore, err := os.ReadFile(filepath.Join(workspace, ".gitignore"))
+	if err != nil {
+		t.Fatalf("ReadFile(.gitignore) error = %v", err)
+	}
+	if !strings.Contains(string(gitignore), ".local/") {
+		t.Fatalf(".gitignore = %q, want .local/", gitignore)
 	}
 	store := svc.stores["bot-a"]
 	if store == nil {

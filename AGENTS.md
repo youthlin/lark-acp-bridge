@@ -44,7 +44,7 @@
 
 ## Workspace 与知识沉淀
 
-- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json`、`processed_messages.json` 和图片 `cache/`。服务启动和 workspace 初始化时会把旧根目录运行态一次性移动进 `.local/`，但如果目标已存在则不覆盖旧副本。
+- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json`、`processed_messages.json` 和图片 `cache/`。服务启动和 workspace 初始化时会确保 `.gitignore` 包含 `.local/`，并把旧根目录运行态一次性移动进 `.local/`，但如果目标已存在则不覆盖旧副本。
 - 首次对话且 workspace 未 ready 时，bridge 创建基础模板文件和 `Bootstrap.md`；第一条 `session/prompt` 把 ready workspace 内容注入给 ACP agent，由 agent 完成一次性初始化询问并写入文件后删除 `Bootstrap.md`。bridge 不实现多轮 onboarding 状态机，也不做旧记忆文件名迁移。
 - bridge 只负责创建模板、注入 workspace 内容和提供受限 workspace 文件读写能力；长期记忆、知识和技能文件由 ACP agent 用自身本地工具维护。新增/删除/重命名知识或技能文件需同步 `knowledge/index.md` 并追加 `knowledge/log.md`。
 - 自动知识沉淀（wiki）默认开启，普通消息完整回复后启动分钟级定时器（默认 5 分钟），向同一 ACP session 发送 internal/silent 反思 prompt，不创建飞书卡片、不转发输出。

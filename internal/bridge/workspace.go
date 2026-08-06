@@ -53,10 +53,8 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 	if strings.TrimSpace(path) == "" {
 		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
 	}
-	if err := ensureWorkspaceRoot(path); err != nil {
-		return WorkspaceStatus{}, err
-	}
-	if err := migrateWorkspaceLocalState(path); err != nil {
+	gitignoreUpdated, err := prepareWorkspaceLocalState(path)
+	if err != nil {
 		return WorkspaceStatus{}, err
 	}
 	hadManagedFiles, err := workspaceHasManagedFiles(path)
@@ -80,10 +78,6 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 			return WorkspaceStatus{}, fmt.Errorf("创建 workspace 文件 %s: %w", file.name, err)
 		}
 		status.CreatedFiles = append(status.CreatedFiles, file.name)
-	}
-	gitignoreUpdated, err := ensureWorkspaceLocalGitignore(path)
-	if err != nil {
-		return WorkspaceStatus{}, err
 	}
 	if gitignoreUpdated {
 		status.CreatedFiles = append(status.CreatedFiles, ".gitignore")
@@ -116,6 +110,21 @@ func ensureWorkspaceRoot(path string) error {
 		return fmt.Errorf("创建 bot workspace: %w", err)
 	}
 	return nil
+}
+
+func prepareWorkspaceLocalState(path string) (bool, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false, fmt.Errorf("workspace 为空")
+	}
+	if err := migrateWorkspaceLocalState(path); err != nil {
+		return false, err
+	}
+	gitignoreUpdated, err := ensureWorkspaceLocalGitignore(path)
+	if err != nil {
+		return false, err
+	}
+	return gitignoreUpdated, nil
 }
 
 func migrateWorkspaceLocalState(path string) error {
