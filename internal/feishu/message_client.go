@@ -51,6 +51,9 @@ func (c larkMessageClient) GetMessage(ctx context.Context, messageID string, wor
 	}
 	msg.Workspace = workspace
 	msg.Images = hydrateMessageImages(ctx, c, msg.MessageID, workspace, msg.Images)
+	if strings.EqualFold(msg.MsgType, "merge_forward") {
+		expandMergedForwardMessage(ctx, c, msg, resp.Data.Items[1:], workspace)
+	}
 	setMessagePrimaryImage(msg)
 	return msg, nil
 }
@@ -60,8 +63,9 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 		return nil
 	}
 	msg := &Message{
-		MessageID: value(item.MessageId),
-		MsgType:   value(item.MsgType),
+		MessageID:      value(item.MessageId),
+		MsgType:        value(item.MsgType),
+		UpperMessageID: value(item.UpperMessageId),
 	}
 	if item.Sender != nil {
 		msg.SenderID = value(item.Sender.Id)
@@ -98,6 +102,66 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 		return nil
 	}
 	return msg
+}
+
+func messagesFromLarkMessages(items []*larkim.Message) []Message {
+	messages := make([]Message, 0, len(items))
+	for _, item := range items {
+		msg := messageFromLarkMessage(item)
+		if msg == nil {
+			continue
+		}
+		messages = append(messages, *msg)
+	}
+	return messages
+}
+
+func expandMergedForwardMessage(ctx context.Context, client messageClient, msg *Message, items []*larkim.Message, workspace string) {
+	if msg == nil {
+		return
+	}
+	children := messagesFromLarkMessages(items)
+	for i := range children {
+		children[i].Images = hydrateMessageImages(ctx, client, children[i].MessageID, workspace, children[i].Images)
+		setMessagePrimaryImage(&children[i])
+		msg.Images = append(msg.Images, children[i].Images...)
+	}
+	msg.Text = formatMergedForwardText(msg, children)
+}
+
+func formatMergedForwardText(root *Message, children []Message) string {
+	if len(children) == 0 {
+		if root == nil {
+			return "[合并转发消息]"
+		}
+		text := strings.TrimSpace(root.Text)
+		if text != "" && !strings.EqualFold(text, "Merged and Forwarded Message") {
+			return text
+		}
+		return "[合并转发消息]"
+	}
+	lines := []string{"[合并转发消息]"}
+	for _, child := range children {
+		text := strings.TrimSpace(child.PromptText())
+		if text == "" {
+			text = labeledMessageText("暂不支持的子消息", messageFields(map[string]any{"msg_type": child.MsgType}, "msg_type")...)
+		}
+		lines = append(lines, formatMergedForwardChildText(child, text))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n\n"))
+}
+
+func formatMergedForwardChildText(child Message, text string) string {
+	var prefix string
+	if sender := strings.TrimSpace(child.SenderID); sender != "" {
+		prefix = "用户(" + sender + ")"
+	} else {
+		prefix = "子消息"
+	}
+	if msgType := strings.TrimSpace(child.MsgType); msgType != "" {
+		prefix += " [" + msgType + "]"
+	}
+	return prefix + ":\n" + strings.TrimSpace(text)
 }
 
 func (c larkMessageClient) DownloadImage(ctx context.Context, messageID string, imageKey string, workspace string) (string, error) {

@@ -60,6 +60,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	msg.Images = hydrateMessageImages(ctx, a.messages, msg.MessageID, msg.Workspace, msg.Images)
 	setMessagePrimaryImage(&msg)
+	msg = a.withMergedForwardContent(ctx, msg)
 	msg = a.withReplyContext(ctx, msg)
 
 	handler := a.handler
@@ -91,6 +92,28 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	slog.InfoContext(ctx, "回复飞书消息成功")
 	return nil
+}
+
+func (a *Adapter) withMergedForwardContent(ctx context.Context, msg Message) Message {
+	if !strings.EqualFold(msg.MsgType, "merge_forward") || a.messages == nil {
+		return msg
+	}
+	detail, err := a.messages.GetMessage(ctx, msg.MessageID, msg.Workspace)
+	if err != nil {
+		slog.WarnContext(ctx, "读取合并转发飞书消息失败", "错误", err)
+		return msg
+	}
+	if detail == nil {
+		return msg
+	}
+	text := strings.TrimSpace(detail.Text)
+	if text == "" {
+		return msg
+	}
+	msg.Text = text
+	msg.Images = append([]MessageImage(nil), detail.Images...)
+	setMessagePrimaryImage(&msg)
+	return msg
 }
 
 func isStaleIncomingMessage(createdAt, now time.Time, maxAge time.Duration) bool {

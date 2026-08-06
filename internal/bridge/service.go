@@ -204,6 +204,10 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return errText, nil
 	}
 	if incoming.promptText == "" {
+		if s.shouldSilenceAtAutoUnsupported(incoming.msg) {
+			slog.InfoContext(ctx, "at-auto 群消息内容为空或暂不支持，静默跳过")
+			return "", nil
+		}
 		return "暂不支持的消息类型。", nil
 	}
 	if strings.HasPrefix(incoming.text, "/") {
@@ -253,6 +257,10 @@ func (s *Service) ensureIncomingWorkspace(ctx context.Context, msg feishu.Messag
 }
 
 func (s *Service) handleSlashCommandMessage(ctx context.Context, msg feishu.Message, text string) string {
+	if s.shouldSilenceAtAutoUnsupportedCommand(msg, text) {
+		slog.InfoContext(ctx, "at-auto 群消息命中不支持的 slash 命令，静默跳过", "command", firstSlashCommandName(text))
+		return ""
+	}
 	if !s.slashCommandAllowed(msg) {
 		if len(s.ownerOpenIDs(msg.BotID)) == 0 {
 			return "未配置 bot owner，不能执行斜杠命令。"
@@ -260,6 +268,30 @@ func (s *Service) handleSlashCommandMessage(ctx context.Context, msg feishu.Mess
 		return "只有 bot owner 可以执行斜杠命令。"
 	}
 	return s.handleCommand(ctx, text, msg)
+}
+
+func (s *Service) shouldSilenceAtAutoUnsupported(msg feishu.Message) bool {
+	return s.shouldHandleAtAutoMessage(msg)
+}
+
+func (s *Service) shouldSilenceAtAutoUnsupportedCommand(msg feishu.Message, text string) bool {
+	if !s.shouldSilenceAtAutoUnsupported(msg) {
+		return false
+	}
+	command := firstSlashCommandName(text)
+	if command == "" || strings.HasPrefix(command, "//") {
+		return false
+	}
+	_, ok := lookupSlashCommand(command)
+	return !ok
+}
+
+func firstSlashCommandName(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(fields[0])
 }
 
 func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingPromptMessage) (string, error) {

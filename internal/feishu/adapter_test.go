@@ -553,6 +553,50 @@ func TestAdapterHydratesCurrentImageMessage(t *testing.T) {
 	}
 }
 
+func TestAdapterExpandsMergedForwardMessage(t *testing.T) {
+	handler := &countingHandler{}
+	messages := &fakeMessageClient{
+		messages: map[string]*Message{
+			"om_forward": {
+				MessageID: "om_forward",
+				MsgType:   "merge_forward",
+				Text: strings.Join([]string{
+					"[合并转发消息]",
+					"用户(ou_alice) [text]:\n第一条",
+					"用户(ou_bob) [image]:\n[图片消息]\nimage_key: img_forwarded\nlocal_path: /workspace/.local/cache/img_forwarded.png",
+				}, "\n\n"),
+				Images: []MessageImage{
+					{ImageKey: "img_forwarded", LocalPath: "/workspace/.local/cache/img_forwarded.png"},
+				},
+			},
+		},
+	}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a", Workspace: "/workspace"}, handler)
+	adapter.messages = messages
+
+	if err := adapter.handleMessage(context.Background(), mergeForwardEvent("om_forward", "oc_1")); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+
+	if len(messages.calls) != 1 || messages.calls[0] != "om_forward" {
+		t.Fatalf("message get calls = %+v, want merge_forward root", messages.calls)
+	}
+	for _, want := range []string{
+		"[合并转发消息]",
+		"用户(ou_alice) [text]:",
+		"第一条",
+		"用户(ou_bob) [image]:",
+		"local_path: /workspace/.local/cache/img_forwarded.png",
+	} {
+		if !strings.Contains(handler.msg.Text, want) {
+			t.Fatalf("message text = %q, want %q", handler.msg.Text, want)
+		}
+	}
+	if handler.msg.ImageKey != "img_forwarded" || handler.msg.LocalPath != "/workspace/.local/cache/img_forwarded.png" {
+		t.Fatalf("message images = %+v image/local = %q/%q, want forwarded image as primary", handler.msg.Images, handler.msg.ImageKey, handler.msg.LocalPath)
+	}
+}
+
 func TestAdapterHydratesAppReplyContext(t *testing.T) {
 	handler := &countingHandler{}
 	messages := &fakeMessageClient{
@@ -1202,6 +1246,23 @@ func imageEvent(messageID, chatID, imageKey string) *larkim.P2MessageReceiveV1 {
 				ChatType:    ptr("p2p"),
 				MessageType: ptr("image"),
 				Content:     ptr(`{"image_key":"` + imageKey + `"}`),
+			},
+		},
+	}
+}
+
+func mergeForwardEvent(messageID, chatID string) *larkim.P2MessageReceiveV1 {
+	return &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: ptr("ou_sender")},
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   ptr(messageID),
+				ChatId:      ptr(chatID),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("merge_forward"),
+				Content:     ptr(`{"content":"Merged and Forwarded Message"}`),
 			},
 		},
 	}

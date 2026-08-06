@@ -3283,6 +3283,52 @@ func TestHandleFeishuUnsupportedEmptyMessageDoesNotPrompt(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuAtAutoUnsupportedMessageStaysSilent(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		Workspace: filepath.Join(t.TempDir(), "workspace"),
+		MessageID: "om_unsupported_auto",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		MsgType:   "unsupported",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent at-auto unsupported message", reply)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want no ACP calls", rt.newCalls, rt.promptCalls)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_unknown_command_auto",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		Text:      "/unknown",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/unknown) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent at-auto unsupported command", reply)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = new %+v prompt %+v, want still no ACP calls", rt.newCalls, rt.promptCalls)
+	}
+}
+
 func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	firstDir := t.TempDir()

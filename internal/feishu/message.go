@@ -30,6 +30,7 @@ type Message struct {
 	SenderID         string
 	SenderType       string
 	MsgType          string
+	UpperMessageID   string
 	Text             string
 	ImageKey         string
 	LocalPath        string

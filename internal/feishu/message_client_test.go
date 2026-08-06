@@ -3,9 +3,12 @@ package feishu
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 type concurrentMessageClient struct {
@@ -121,5 +124,119 @@ func TestHydrateMessageImagesKeepsOrderOnFailure(t *testing.T) {
 	}
 	if len(client.downloaded) != 1 || client.downloaded[0] != "img-2" {
 		t.Fatalf("downloaded = %v, want only [img-2]", client.downloaded)
+	}
+}
+
+func TestMessageFromLarkMessageKeepsMergedForwardUpperID(t *testing.T) {
+	msg := messageFromLarkMessage(&larkim.Message{
+		MessageId:      ptr("om_child"),
+		MsgType:        ptr("text"),
+		UpperMessageId: ptr("om_root"),
+		Sender: &larkim.Sender{
+			Id:         ptr("ou_sender"),
+			SenderType: ptr("user"),
+		},
+		Body: &larkim.MessageBody{
+			Content: ptr(`{"text":"你好 @_user_1"}`),
+		},
+		Mentions: []*larkim.Mention{
+			{
+				Key:    ptr("@_user_1"),
+				Id:     ptr("ou_bot"),
+				IdType: ptr("open_id"),
+				Name:   ptr("智能助手"),
+			},
+		},
+	})
+
+	if msg == nil {
+		t.Fatal("messageFromLarkMessage() = nil")
+	}
+	if msg.UpperMessageID != "om_root" {
+		t.Fatalf("UpperMessageID = %q, want om_root", msg.UpperMessageID)
+	}
+	if msg.Text != "你好 @智能助手" {
+		t.Fatalf("Text = %q, want mention replaced", msg.Text)
+	}
+}
+
+func TestFormatMergedForwardTextIncludesChildren(t *testing.T) {
+	got := formatMergedForwardText(&Message{
+		MessageID: "om_root",
+		MsgType:   "merge_forward",
+		Text:      "Merged and Forwarded Message",
+	}, []Message{
+		{
+			MessageID: "om_child_text",
+			SenderID:  "ou_alice",
+			MsgType:   "text",
+			Text:      "第一条",
+		},
+		{
+			MessageID: "om_child_image",
+			SenderID:  "ou_bob",
+			MsgType:   "image",
+			Images: []MessageImage{
+				{ImageKey: "img_forwarded", LocalPath: "/workspace/.local/cache/img_forwarded.png"},
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"[合并转发消息]",
+		"用户(ou_alice) [text]:",
+		"第一条",
+		"用户(ou_bob) [image]:",
+		"image_key: img_forwarded",
+		"local_path: /workspace/.local/cache/img_forwarded.png",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatMergedForwardText() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestExpandMergedForwardMessagePropagatesChildImages(t *testing.T) {
+	client := &concurrentMessageClient{}
+	msg := &Message{
+		MessageID: "om_root",
+		MsgType:   "merge_forward",
+		Text:      "Merged and Forwarded Message",
+	}
+	expandMergedForwardMessage(context.Background(), client, msg, []*larkim.Message{
+		larkim.NewMessageBuilder().
+			MessageId("om_child_text").
+			MsgType("text").
+			UpperMessageId("om_root").
+			Sender(larkim.NewSenderBuilder().Id("ou_alice").SenderType("user").Build()).
+			Body(larkim.NewMessageBodyBuilder().Content(`{"text":"第一条"}`).Build()).
+			Build(),
+		larkim.NewMessageBuilder().
+			MessageId("om_child_image").
+			MsgType("image").
+			UpperMessageId("om_root").
+			Sender(larkim.NewSenderBuilder().Id("ou_bob").SenderType("user").Build()).
+			Body(larkim.NewMessageBodyBuilder().Content(`{"image_key":"img_forwarded"}`).Build()).
+			Build(),
+	}, "/workspace")
+
+	if len(msg.Images) != 1 {
+		t.Fatalf("root images = %+v, want one propagated child image", msg.Images)
+	}
+	if msg.Images[0].ImageKey != "img_forwarded" || msg.Images[0].LocalPath != filepath.Join("/workspace", ".local", "cache", "img_forwarded.png") {
+		t.Fatalf("root image = %+v, want hydrated child image propagated", msg.Images[0])
+	}
+	for _, want := range []string{
+		"用户(ou_alice) [text]:",
+		"第一条",
+		"用户(ou_bob) [image]:",
+		"local_path: " + filepath.Join("/workspace", ".local", "cache", "img_forwarded.png"),
+	} {
+		if !strings.Contains(msg.Text, want) {
+			t.Fatalf("message text = %q, want %q", msg.Text, want)
+		}
+	}
+	if len(client.downloaded) != 1 || client.downloaded[0] != "img_forwarded" {
+		t.Fatalf("downloaded = %+v, want forwarded child image downloaded", client.downloaded)
 	}
 }
