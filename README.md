@@ -147,7 +147,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 
 自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不创建飞书卡片，也不把 agent 输出转发给用户；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新普通消息进入，会取消旧定时器并在新消息完成后重新计时；如果用户发送 `/new` 重开会话，bridge 会取出尚未触发的上一轮 wiki 反思并用独立 wiki runtime key 在后台执行，不阻塞新会话创建和后续消息处理。这个后台 wiki 轮次属于上一轮会话收尾，不会被新会话里的后续普通消息取消；它仍纳入 service/runtime 生命周期，可随 `/wiki off`、会话关闭或服务退出取消并关闭对应 ACP client。
 
-bridge 不在本地实现多轮 onboarding 状态机，也不做旧文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名作为 L0 记忆入口。
+bridge 不在本地实现多轮 onboarding 状态机，也不做旧记忆文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名作为 L0 记忆入口。
 
 会话映射会持久化到每个 bot 的 workspace 下：
 
@@ -156,10 +156,11 @@ $BOT_WORKSPACE/.local/sessions.json
 $BOT_WORKSPACE/.local/scheduled_tasks.json
 $BOT_WORKSPACE/.local/token_usage.json
 $BOT_WORKSPACE/.local/restart_ack.json
+$BOT_WORKSPACE/.local/processed_messages.json
 $BOT_WORKSPACE/.local/cache/
 ```
 
-workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；会话、定时任务、token 用量、重启回执和飞书图片缓存这类本地运行态统一写入 `.local/`。bridge 会确保新建 workspace 的 `.gitignore` 包含 `.local/`，方便后续直接对 workspace 做 git 管理。升级前已经存在于 workspace 根目录的 `sessions.json`、`scheduled_tasks.json`、`token_usage.json` 和 `restart_ack.json` 会兼容读取；下一次写入会落到 `.local/` 下。
+workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；会话、定时任务、token 用量、重启回执、飞书消息去重记录和飞书图片缓存这类本地运行态统一写入 `.local/`。bridge 会确保新建 workspace 的 `.gitignore` 包含 `.local/`，方便后续直接对 workspace 做 git 管理。服务启动和 workspace 初始化时会把升级前已经存在于 workspace 根目录的 `sessions.json`、`scheduled_tasks.json`、`token_usage.json`、`restart_ack.json`、`processed_messages.json` 和 `cache/` 一次性移动到 `.local/` 下，并删除外层旧路径；如果 `.local/` 下已经存在同名目标，为避免覆盖数据，会跳过该项并保留外层旧副本，同时记录 warning 日志。
 
 会话映射使用 JSON 文件保存 `bot_id + source + main_id + sub_id -> ACP session`。当前聊天入口使用 `source=im`，普通群和私聊的 `main_id` 是 `chat_id`、`sub_id` 为空，表示整个 chat 共用一个 ACP session；话题群的 `main_id` 是 `chat_id`、`sub_id` 是当前话题的 `thread_id`。旧版 IM 记录中的 `chat_id + thread_id` 会兼容读取，写盘时也尽量保持旧 JSON 形态。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`.local/sessions.json` 还会保留同一主资源里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`，并保存 chat 维度的 `/agent`、`/show`、`/at`、`/wiki` 配置。服务进程内会为活跃飞书会话维护对应的 ACP agent 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
 

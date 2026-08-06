@@ -19,6 +19,15 @@ func (s *Service) Start(ctx context.Context) error {
 	if len(s.registry.Names()) == 0 {
 		return fmt.Errorf("未配置 ACP agent")
 	}
+	for _, bot := range s.cfg.Bots {
+		workspace := strings.TrimSpace(bot.Workspace)
+		if workspace == "" {
+			continue
+		}
+		if err := migrateWorkspaceLocalState(workspace); err != nil {
+			return fmt.Errorf("迁移 bot %q 的 workspace 本地状态: %w", bot.ID, err)
+		}
+	}
 
 	// 从文件加载历史会话
 	for botID, store := range s.stores {

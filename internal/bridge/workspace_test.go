@@ -76,6 +76,67 @@ func TestEnsureWorkspaceDefaultToolsIncludesLarkCLIProfileGuidance(t *testing.T)
 	}
 }
 
+func TestEnsureWorkspaceMigratesLocalStateFiles(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspace, "cache"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(cache) error = %v", err)
+	}
+	for _, name := range []string{
+		"sessions.json",
+		"scheduled_tasks.json",
+		"token_usage.json",
+		"restart_ack.json",
+		"processed_messages.json",
+	} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(name), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "cache", "img.png"), []byte("image"), 0o600); err != nil {
+		t.Fatalf("WriteFile(cache/img.png) error = %v", err)
+	}
+
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+
+	for _, name := range workspaceLocalStateEntries {
+		if _, err := os.Stat(filepath.Join(workspace, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy %s err = %v, want removed", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(workspace, workspaceLocalDir, name)); err != nil {
+			t.Fatalf("local %s err = %v, want migrated", name, err)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(workspace, ".local", "cache", "img.png")); err != nil || string(data) != "image" {
+		t.Fatalf("ReadFile(.local/cache/img.png) = %q, %v; want image", data, err)
+	}
+}
+
+func TestMigrateWorkspaceLocalStateDoesNotOverwriteExistingLocalFile(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspace, ".local"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.local) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "sessions.json"), []byte("legacy"), 0o600); err != nil {
+		t.Fatalf("WriteFile(legacy sessions) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".local", "sessions.json"), []byte("local"), 0o600); err != nil {
+		t.Fatalf("WriteFile(local sessions) error = %v", err)
+	}
+
+	if err := migrateWorkspaceLocalState(workspace); err != nil {
+		t.Fatalf("migrateWorkspaceLocalState() error = %v", err)
+	}
+
+	if data, err := os.ReadFile(filepath.Join(workspace, ".local", "sessions.json")); err != nil || string(data) != "local" {
+		t.Fatalf("local sessions = %q, %v; want unchanged local", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(workspace, "sessions.json")); err != nil || string(data) != "legacy" {
+		t.Fatalf("legacy sessions = %q, %v; want retained legacy", data, err)
+	}
+}
+
 func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {

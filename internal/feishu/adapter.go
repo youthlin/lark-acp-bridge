@@ -103,7 +103,7 @@ type chatInfo struct {
 func NewAdapter(cfg config.BotConfig, handler Handler) *Adapter {
 	deduper := newMessageDeduper(defaultMessageDeduperTTL, defaultMessageDeduperMax)
 	if strings.TrimSpace(cfg.Workspace) != "" {
-		deduper.WithPath(filepath.Join(cfg.Workspace, "processed_messages.json"))
+		deduper.WithPath(filepath.Join(cfg.Workspace, ".local", "processed_messages.json"))
 	}
 	return &Adapter{
 		cfg:             cfg,

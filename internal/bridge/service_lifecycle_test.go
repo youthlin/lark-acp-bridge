@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -44,6 +45,94 @@ func TestRunRestartCommandRemovesAckOnFailure(t *testing.T) {
 
 	if _, err := os.Stat(restartAckPath(workspace)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("restart ack file err = %v, want removed after restart command failure", err)
+	}
+}
+
+func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:        "bot-a",
+			Workspace: workspace,
+		}},
+		AgentList: []config.NamedAgentConfig{{
+			Name: "traex",
+			AgentConfig: config.AgentConfig{
+				Command: "traex",
+			},
+		}},
+	}
+	session := Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		AgentName:    "traex",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+		ACPSessionID: "acp-legacy",
+	}
+	task := ScheduledTask{
+		ID:        "disabled",
+		BotID:     "bot-a",
+		Enabled:   false,
+		Spec:      "@every 1h",
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "run",
+	}
+	writeJSONFile(t, filepath.Join(workspace, "sessions.json"), sessionFile{
+		Version:  1,
+		Sessions: []Session{session},
+	})
+	writeJSONFile(t, filepath.Join(workspace, "scheduled_tasks.json"), scheduledTaskFile{
+		Version: 1,
+		Tasks:   []ScheduledTask{task},
+	})
+
+	svc := NewService(cfg, nil)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := svc.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	})
+
+	for _, name := range []string{"sessions.json", "scheduled_tasks.json"} {
+		if _, err := os.Stat(filepath.Join(workspace, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy %s err = %v, want removed", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(workspace, ".local", name)); err != nil {
+			t.Fatalf("local %s err = %v, want migrated", name, err)
+		}
+	}
+	store := svc.stores["bot-a"]
+	if store == nil {
+		t.Fatal("bot store is nil")
+	}
+	if got := store.Count(); got != 1 {
+		t.Fatalf("store count = %d, want loaded legacy session", got)
+	}
+	if got, ok := store.Get(session.Key); !ok || got.ACPSessionID != session.ACPSessionID {
+		t.Fatalf("loaded session = %+v, %v; want migrated session", got, ok)
+	}
+	scheduleStore := svc.scheduleStores["bot-a"]
+	if scheduleStore == nil {
+		t.Fatal("schedule store is nil")
+	}
+	if got, ok := scheduleStore.Get(task.ID); !ok || got.Prompt != task.Prompt {
+		t.Fatalf("loaded task = %+v, %v; want migrated task", got, ok)
+	}
+}
+
+func writeJSONFile(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent(%s) error = %v", path, err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 }
 

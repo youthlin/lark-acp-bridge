@@ -144,6 +144,20 @@ type fakeApplicationClient struct {
 	botOpenIDCalls       int
 }
 
+func TestNewAdapterStoresDeduperUnderWorkspaceLocal(t *testing.T) {
+	workspace := t.TempDir()
+
+	adapter := NewAdapter(config.BotConfig{Workspace: workspace}, nil)
+
+	if adapter.deduper == nil {
+		t.Fatal("deduper is nil")
+	}
+	want := filepath.Join(workspace, ".local", "processed_messages.json")
+	if adapter.deduper.path != want {
+		t.Fatalf("deduper path = %q, want %q", adapter.deduper.path, want)
+	}
+}
+
 func (f *fakeApplicationClient) GetApplication(ctx context.Context) (applicationOwnerCandidates, error) {
 	f.appCalls++
 	if f.appErr != nil {

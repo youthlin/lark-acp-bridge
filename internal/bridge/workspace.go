@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,15 @@ import (
 const workspaceBootstrapFile = "Bootstrap.md"
 const workspaceWikiPolicyMarker = "<!-- lark-acp-bridge:wiki-policy:v1 -->"
 const workspaceLocalDir = ".local"
+
+var workspaceLocalStateEntries = []string{
+	"sessions.json",
+	"scheduled_tasks.json",
+	"token_usage.json",
+	"restart_ack.json",
+	"processed_messages.json",
+	"cache",
+}
 
 func workspaceLocalPath(workspace string, elem ...string) string {
 	parts := append([]string{strings.TrimSpace(workspace), workspaceLocalDir}, elem...)
@@ -44,6 +54,9 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
 	}
 	if err := ensureWorkspaceRoot(path); err != nil {
+		return WorkspaceStatus{}, err
+	}
+	if err := migrateWorkspaceLocalState(path); err != nil {
 		return WorkspaceStatus{}, err
 	}
 	hadManagedFiles, err := workspaceHasManagedFiles(path)
@@ -102,6 +115,52 @@ func ensureWorkspaceRoot(path string) error {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("创建 bot workspace: %w", err)
 	}
+	return nil
+}
+
+func migrateWorkspaceLocalState(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("workspace 为空")
+	}
+	if err := ensureWorkspaceRoot(path); err != nil {
+		return err
+	}
+	for _, name := range workspaceLocalStateEntries {
+		if err := migrateWorkspaceLocalStateEntry(path, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateWorkspaceLocalStateEntry(workspace string, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	legacyPath := workspaceLegacyPath(workspace, name)
+	localPath := workspaceLocalPath(workspace, name)
+	info, err := os.Stat(legacyPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("检查 workspace 本地状态 %s: %w", name, err)
+	}
+	if _, err := os.Stat(localPath); err == nil {
+		slog.Warn("workspace 本地状态已存在于 .local，跳过旧路径迁移", "旧路径", legacyPath, "新路径", localPath)
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("检查 workspace .local 状态 %s: %w", name, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return fmt.Errorf("创建 workspace .local 目录: %w", err)
+	}
+	if err := os.Rename(legacyPath, localPath); err != nil {
+		return fmt.Errorf("迁移 workspace 本地状态 %s 到 .local: %w", name, err)
+	}
+	slog.Info("已迁移 workspace 本地状态到 .local", "旧路径", legacyPath, "新路径", localPath, "目录", info.IsDir())
 	return nil
 }
 
