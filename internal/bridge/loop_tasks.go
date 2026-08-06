@@ -119,12 +119,12 @@ func (s *Service) startLoop(ctx context.Context, msg feishu.Message, anchor loop
 	s.setTaskCancelHandler(session.Key, func(cancelCtx context.Context, reason string) {
 		s.updateLoopAnchor(cancelCtx, anchor, loopProgressFinished, 0, reason)
 	})
-	go func() {
+	s.goBackground("loop:"+string(session.Key.MainID), func() {
 		defer finish()
 		reason, err := s.runLoop(ctx, msg, anchor, session, agent, req, started)
 		s.markLoopFinished(session.Key, started, reason, err)
 		s.updateLoopFinished(ctx, msg, anchor, reason, err)
-	}()
+	})
 }
 
 func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAnchor, session Session, agent config.AgentConfig, req loopRequest, started time.Time) (string, error) {

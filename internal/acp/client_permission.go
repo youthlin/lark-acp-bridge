@@ -303,6 +303,19 @@ func (c *Client) rememberToolCallUpdate(sessionID string, raw json.RawMessage) {
 	c.toolCalls[sessionID][update.ToolCallID] = info
 }
 
+// clearSessionState 清理指定 session 在 client 内存中缓存的权限与 tool call 状态。
+// session/close 和 session/delete 成功后调用，避免长生命周期 client 累积已结束会话的数据。
+func (c *Client) clearSessionState(sessionID string) {
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
+		return
+	}
+	c.permissionMu.Lock()
+	delete(c.permissionScopes, id)
+	delete(c.toolCalls, id)
+	c.permissionMu.Unlock()
+}
+
 func (c *Client) currentPermissionGeneration(sessionID string) int64 {
 	c.permissionMu.RLock()
 	defer c.permissionMu.RUnlock()

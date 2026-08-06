@@ -461,23 +461,6 @@ func acpDiagnosticHiddenValueCount(fields []string, keyIndex int) int {
 	return 1
 }
 
-func runUserTask[T any](s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (T, error)) (T, error) {
-	ctx, finish, err := s.startTaskWithOptions(ctx, session, agent, taskKindUser, opts)
-	if err != nil {
-		var zero T
-		return zero, err
-	}
-	defer finish()
-	return run(ctx)
-}
-
-func runPromptTask(s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (acp.PromptResult, bool, error)) (promptTaskRunResult, error) {
-	return runUserTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptTaskRunResult, error) {
-		result, sentProgress, err := run(taskCtx)
-		return promptTaskRunResult{result: result, sentProgress: sentProgress}, err
-	})
-}
-
 func (s *Service) setTaskCancelHandler(key SessionKey, handler func(context.Context, string)) {
 	if handler == nil {
 		return

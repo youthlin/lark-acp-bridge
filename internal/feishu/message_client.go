@@ -7,10 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+// imageDownloadTimeout 是单张飞书图片下载的超时。
+const imageDownloadTimeout = 30 * time.Second
+
+// maxConcurrentImageDownloads 限制单条消息的图片并发下载数。
+const maxConcurrentImageDownloads = 4
 
 type larkMessageClient struct {
 	client *lark.Client
@@ -169,19 +177,33 @@ func hydrateMessageImages(ctx context.Context, client messageClient, messageID s
 	if client == nil || len(images) == 0 {
 		return images
 	}
-	hydrated := make([]MessageImage, 0, len(images))
-	for _, image := range images {
-		if strings.TrimSpace(image.ImageKey) != "" && strings.TrimSpace(image.LocalPath) == "" {
-			path, err := client.DownloadImage(ctx, messageID, image.ImageKey, workspace)
+	hydrated := make([]MessageImage, len(images))
+	copy(hydrated, images)
+
+	sem := make(chan struct{}, maxConcurrentImageDownloads)
+	var wg sync.WaitGroup
+	for i := range hydrated {
+		image := hydrated[i]
+		if strings.TrimSpace(image.ImageKey) == "" || strings.TrimSpace(image.LocalPath) != "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(index int, img MessageImage) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			dlCtx, cancel := context.WithTimeout(ctx, imageDownloadTimeout)
+			defer cancel()
+			path, err := client.DownloadImage(dlCtx, messageID, img.ImageKey, workspace)
 			if err != nil {
 				slog.WarnContext(ctx, "下载飞书图片失败", "错误", err)
-				slog.DebugContext(ctx, "下载飞书图片失败详情", "message_id", messageID, "image_key", image.ImageKey, "错误", err)
-			} else {
-				image.LocalPath = path
+				slog.DebugContext(ctx, "下载飞书图片失败详情", "message_id", messageID, "image_key", img.ImageKey, "错误", err)
+				return
 			}
-		}
-		hydrated = append(hydrated, image)
+			hydrated[index].LocalPath = path
+		}(i, image)
 	}
+	wg.Wait()
 	return hydrated
 }
 

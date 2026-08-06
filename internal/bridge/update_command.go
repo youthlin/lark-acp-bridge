@@ -67,7 +67,9 @@ func (s *Service) handleUpdateCommand(ctx context.Context, text string, msg feis
 	}
 
 	// 更新涉及网络下载，异步执行，避免阻塞飞书事件处理；通过中间消息回报结果。
-	go s.runUpdateCommand(context.WithoutCancel(ctx), msg, opts, *checkOnly, strings.TrimSpace(*target))
+	s.goBackground("update-command", func() {
+		s.runUpdateCommand(context.WithoutCancel(ctx), msg, opts, *checkOnly, strings.TrimSpace(*target))
+	})
 	return ""
 }
 

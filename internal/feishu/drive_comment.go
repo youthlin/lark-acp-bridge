@@ -127,7 +127,8 @@ func ParseDriveComment(event *larkdrive.P2NoticeCommentAddV1) (DriveComment, err
 	return comment.Normalized(), nil
 }
 
-func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2NoticeCommentAddV1) error {
+func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2NoticeCommentAddV1) (err error) {
+	defer recoverEventHandler(ctx, "drive_comment", &err)
 	var body []byte
 	if event != nil && event.EventReq != nil {
 		body = event.Body

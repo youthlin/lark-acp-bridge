@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRunMode(t *testing.T) {
@@ -75,5 +76,42 @@ func TestReadRunningPIDRemovesStaleKernelPID(t *testing.T) {
 	}
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Fatalf("stale pid file should be removed, stat err = %v", err)
+	}
+}
+
+func TestWaitForDeadlineReturnsTrueWhenCondImmediatelyTrue(t *testing.T) {
+	got := waitForDeadline(time.Now().Add(time.Second), 10*time.Millisecond, func() bool { return true })
+	if !got {
+		t.Fatal("waitForDeadline = false, want true")
+	}
+}
+
+func TestWaitForDeadlineReturnsTrueWhenCondBecomesTrue(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		close(done)
+	}()
+	got := waitForDeadline(time.Now().Add(time.Second), 10*time.Millisecond, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	if !got {
+		t.Fatal("waitForDeadline = false, want true after cond flips")
+	}
+}
+
+func TestWaitForDeadlineReturnsFalseOnTimeout(t *testing.T) {
+	start := time.Now()
+	got := waitForDeadline(start.Add(40*time.Millisecond), 10*time.Millisecond, func() bool { return false })
+	if got {
+		t.Fatal("waitForDeadline = true, want false on timeout")
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("waitForDeadline returned too early: %s", elapsed)
 	}
 }

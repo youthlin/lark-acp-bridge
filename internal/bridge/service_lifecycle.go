@@ -91,6 +91,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	slog.Info("关闭 ACP 桥接服务")
 	s.stopScheduledTasks()
 	s.cancelAllSessionWork(ctx)
+	waitCtx, cancel := context.WithTimeout(ctx, shutdownBackgroundWait)
+	s.waitBackgroundShutdown(waitCtx)
+	cancel()
 	for _, adapter := range s.feishu {
 		if err := adapter.Shutdown(ctx); err != nil {
 			return err
@@ -106,13 +109,13 @@ func (s *Service) consumeRestartAckAsync(ctx context.Context, adapter restartAck
 	if strings.TrimSpace(bot.Workspace) == "" {
 		return
 	}
-	go func() {
+	s.goBackground("restart-ack", func() {
 		ackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := consumeRestartAck(ackCtx, bot.Workspace, adapter, bot.ID); err != nil {
 			slog.WarnContext(ctx, "消费重启确认消息失败", "bot", displayBotID(bot.ID), "错误", err)
 		}
-	}()
+	})
 }
 
 func (s *Service) runRestartCommand(ctx context.Context, workspace string) {

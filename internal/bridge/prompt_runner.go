@@ -249,12 +249,18 @@ func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message,
 	autoMsg.Text = promptText
 	autoMsg.Mentions = nil
 	autoMsg.ForceReplyInThread = true
-	go func() {
+	sessionKey := session.Key
+	s.goBackground("pending-at-auto", func() {
 		reply, err := s.promptSession(context.WithoutCancel(ctx), autoMsg, session, agent, promptText, promptText, promptSessionOptions{
 			SkipPostPromptWork:     true,
 			SkipPendingAtAutoDrain: true,
 		})
 		if err != nil {
+			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
+			if errors.Is(err, errSessionTaskBusy) {
+				s.restorePendingAtAutoMessages(sessionKey, pending)
+				return
+			}
 			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
 			return
 		}
@@ -266,7 +272,7 @@ func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message,
 		} else if !ok {
 			slog.WarnContext(context.WithoutCancel(ctx), "缺少待处理群聊 auto 回复发送器")
 		}
-	}()
+	})
 }
 
 func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) (Session, error) {

@@ -23,6 +23,27 @@ const (
 	daemonEnvToken = "LARK_ACP_BRIDGE_DAEMON=1"
 )
 
+// waitForDeadline 在超时前以 interval 为间隔反复调用 cond，直到 cond 返回 true。
+// 用于 start/stop 这类一次性 CLI 命令等待后台进程就绪/退出。
+// 运行中的 daemon 服务本身不使用轮询。
+func waitForDeadline(deadline time.Time, interval time.Duration, cond func() bool) bool {
+	if cond() {
+		return true
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if cond() {
+				return true
+			}
+			if !time.Now().Before(deadline) {
+				return false
+			}
+		}
+	}
+}
 func runMode(args []string) string {
 	if len(args) == 0 {
 		return modeRestart
@@ -96,12 +117,13 @@ func startDaemon(configPath string) error {
 	_ = cmd.Process.Release()
 
 	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if pid, running, err := readRunningPID(pidFile); err == nil && running {
-			fmt.Printf("后台启动成功, pidfile: %s(%d), log: %s\n", pidFile, pid, logFile)
-			return nil
-		}
-		time.Sleep(250 * time.Millisecond)
+	if waitForDeadline(deadline, 250*time.Millisecond, func() bool {
+		_, running, err := readRunningPID(pidFile)
+		return err == nil && running
+	}) {
+		pid, _, _ := readRunningPID(pidFile)
+		fmt.Printf("后台启动成功, pidfile: %s(%d), log: %s\n", pidFile, pid, logFile)
+		return nil
 	}
 	return fmt.Errorf("子进程未在预期时间内写入 pid 文件, 请查看日志: %s", logFile)
 }
@@ -124,13 +146,12 @@ func stopDaemon(configPath string) error {
 		return fmt.Errorf("停止进程 %d: %w", pid, err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if !processExists(pid) {
-			_ = os.Remove(pidFile)
-			fmt.Printf("服务已停止, pid=%d\n", pid)
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
+	if waitForDeadline(deadline, 200*time.Millisecond, func() bool {
+		return !processExists(pid)
+	}) {
+		_ = os.Remove(pidFile)
+		fmt.Printf("服务已停止, pid=%d\n", pid)
+		return nil
 	}
 	return fmt.Errorf("已发送停止信号, 但进程仍未退出, pid=%d", pid)
 }

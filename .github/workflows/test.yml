@@ -11,7 +11,24 @@ permissions:
   contents: read
 
 jobs:
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.10"
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
   test:
+    name: go test (race)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,4 +41,11 @@ jobs:
           cache: true
 
       - name: Test
-        run: go test ./...
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: warn

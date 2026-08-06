@@ -3,12 +3,17 @@ package feishu
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
+
+// larkHTTPTimeout 是飞书开放平台 HTTP 请求的整体超时，
+// 避免出站调用在网络抖动时长时间阻塞消息处理。
+const larkHTTPTimeout = 30 * time.Second
 
 // Start 启动Bot监听
 func (a *Adapter) Start(ctx context.Context) error {
@@ -23,7 +28,10 @@ func (a *Adapter) Start(ctx context.Context) error {
 		}
 	}
 
-	clientOptions := []lark.ClientOptionFunc{lark.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-sdk"))}
+	clientOptions := []lark.ClientOptionFunc{
+		lark.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-sdk")),
+		lark.WithReqTimeout(larkHTTPTimeout),
+	}
 	a.client = lark.NewClient(a.cfg.AppID, appSecret, clientOptions...)
 	if a.reaction == nil {
 		a.reaction = larkReactionClient{client: a.client}

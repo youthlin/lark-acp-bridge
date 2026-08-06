@@ -21,7 +21,6 @@ type Client struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	workspace string
-	cwd       string
 
 	nextID atomic.Int64
 

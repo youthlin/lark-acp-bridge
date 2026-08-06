@@ -81,7 +81,7 @@ func (s *Service) drainPromptQueueAsync(ctx context.Context, key SessionKey) {
 	if !s.beginPromptQueueDrain(key) {
 		return
 	}
-	go s.drainPromptQueue(ctx, key)
+	s.goBackground("prompt-queue-drain", func() { s.drainPromptQueue(ctx, key) })
 }
 
 func (s *Service) beginPromptQueueDrain(key SessionKey) bool {
@@ -178,7 +178,7 @@ func (s *Service) finishPromptQueueDrain(ctx context.Context, key SessionKey) {
 	}
 	s.taskMu.Unlock()
 	if restart {
-		go s.drainPromptQueue(context.WithoutCancel(ctx), key)
+		s.goBackground("prompt-queue-drain", func() { s.drainPromptQueue(context.WithoutCancel(ctx), key) })
 	}
 }
 

@@ -1505,10 +1505,8 @@ func TestClientCancelSessionRequiresInitialize(t *testing.T) {
 }
 
 func TestClientRejectsUndeclaredClientCapabilityRequests(t *testing.T) {
-	client, server := newPipeClient(t, t.TempDir())
+	_, server := newPipeClient(t, t.TempDir())
 	defer server.close()
-	client.cwd = t.TempDir()
-	_ = client
 
 	for _, tc := range []struct {
 		method string

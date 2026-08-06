@@ -182,7 +182,8 @@ func (a *Adapter) updatePermissionCard(ctx context.Context, cardID string, data 
 	})
 }
 
-func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+func (a *Adapter) handleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (resp *callback.CardActionTriggerResponse, err error) {
+	defer recoverCardEventHandler(ctx, "card_action", &resp, &err)
 	if event == nil || event.Event == nil || event.Event.Action == nil {
 		return permissionCardToast("error", "无效的卡片操作"), nil
 	}

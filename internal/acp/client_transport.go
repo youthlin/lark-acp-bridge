@@ -32,6 +32,14 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	afterWrite func(),
 	cancelWait time.Duration,
 ) (json.RawMessage, error) {
+	// 仅当调用方未设置 deadline 时套用方法级默认超时，避免握手/会话操作永久挂起。
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		if timeout := defaultRPCTimeout(method); timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
 	id := c.nextID.Add(1)
 	req, err := NewRequest(id, method, params)
 	if err != nil {
@@ -98,6 +106,11 @@ func (c *Client) write(msg Message) error {
 }
 
 func (c *Client) readLoop(stdout io.Reader) {
+	defer withRecover(context.Background(), "readLoop", func(err error) {
+		c.failPending(err)
+		_ = c.Close()
+	})
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -123,7 +136,12 @@ func (c *Client) readLoop(stdout io.Reader) {
 
 func (c *Client) handleMessage(msg Message) {
 	if msg.ID != nil && msg.Method != "" {
-		go c.handleAgentRequest(msg)
+		go func() {
+			defer withRecover(context.Background(), "agent_request:"+msg.Method, func(err error) {
+				c.replyResult(msg, nil, err)
+			})
+			c.handleAgentRequest(msg)
+		}()
 		return
 	}
 	if msg.ID != nil {

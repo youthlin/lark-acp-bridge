@@ -28,6 +28,7 @@ type Service struct {
 	serviceTasks
 	serviceScheduleRuns
 	serviceACPUpdates
+	backgroundWg backgroundGoroutines
 }
 
 type serviceStores struct {

@@ -457,11 +457,11 @@ func (s *Service) startImmediateScheduleRun(ctx context.Context, task ScheduledT
 	runKey := scheduledTaskRunKey(task, runID)
 	s.markScheduleRunPending(task, runID, runKey, triggeredAt)
 	runCtx := context.WithoutCancel(ctx)
-	go func() {
+	s.goBackground("schedule-once:"+task.ID, func() {
 		if _, err := s.runScheduledTaskOnce(runCtx, task, runID, triggeredAt, workspace, nil); err != nil {
 			slog.ErrorContext(runCtx, "立即执行定时任务失败", "task_id", task.ID, "run_id", runID, "错误", err)
 		}
-	}()
+	})
 	return runID
 }
 

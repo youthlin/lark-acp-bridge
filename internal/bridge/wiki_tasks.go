@@ -283,10 +283,10 @@ func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
 		finish()
 		return "启动 wiki lint 失败：发送开始通知失败：" + sendErr.Error()
 	} else if ok {
-		go s.runWikiLintTask(replyCtx, taskCtx, finish, msg, session, agent)
+		s.goBackground("wiki-lint", func() { s.runWikiLintTask(replyCtx, taskCtx, finish, msg, session, agent) })
 		return ""
 	}
-	go s.runWikiLintTask(context.WithoutCancel(ctx), taskCtx, finish, msg, session, agent)
+	s.goBackground("wiki-lint", func() { s.runWikiLintTask(context.WithoutCancel(ctx), taskCtx, finish, msg, session, agent) })
 	return ack
 }
 
@@ -636,7 +636,7 @@ func (s *Service) runPendingWikiAsync(pending pendingWikiRun) {
 	if strings.TrimSpace(pending.session.ACPSessionID) == "" {
 		return
 	}
-	go s.runPendingWikiWithRuntimeKey(pending)
+	s.goBackground("pending-wiki", func() { s.runPendingWikiWithRuntimeKey(pending) })
 }
 
 func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {

@@ -16,7 +16,8 @@ import (
 const maxIncomingMessageAge = 10 * time.Minute
 
 // handleMessage 处理Bot消息
-func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) (err error) {
+	defer recoverEventHandler(ctx, "message", &err)
 	var body []byte
 	if event != nil && event.EventReq != nil {
 		body = event.Body
@@ -151,8 +152,8 @@ func replyToMessageID(msg Message) string {
 	}
 	return ""
 }
-
-func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
+func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) (err error) {
+	defer recoverEventHandler(ctx, "reaction_created", &err)
 	var body []byte
 	if event != nil && event.EventReq != nil {
 		body = event.Body
@@ -161,7 +162,8 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 	return nil
 }
 
-func (a *Adapter) handleReactionDeleted(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
+func (a *Adapter) handleReactionDeleted(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) (err error) {
+	defer recoverEventHandler(ctx, "reaction_deleted", &err)
 	var body []byte
 	if event != nil && event.EventReq != nil {
 		body = event.Body

@@ -81,6 +81,70 @@ type runtimeManager struct {
 	subscriptions map[SessionKey]map[int64]acp.UpdateHandler
 	nextSubID     int64
 	transitions   [64]sync.Mutex
+
+	// buildMu guards building；building 中每个 key 最多有一个 goroutine 在创建 client，
+	// 其余同 key 的调用方在同一把 key 锁上等待并复用结果。
+	// 这样 acp.Start/Initialize/Resume（可能耗时数十秒）无需持有 transition 锁，
+	// 避免哈希碰撞的无关 session 被连带阻塞。
+	buildMu  sync.Mutex
+	building map[runtimeKey]*clientBuild
+}
+
+// clientBuild 协调同一 runtimeKey 上并发的 client 创建。
+type clientBuild struct {
+	mu     sync.Mutex
+	done   chan struct{}
+	client *acp.Client
+	info   acp.SessionInfo
+	err    error
+}
+
+func newClientBuild() *clientBuild {
+	return &clientBuild{done: make(chan struct{})}
+}
+
+// beginClientBuild 返回非 nil 的 build 表示当前 goroutine 负责创建 client；
+// 返回 nil build 表示已有同 key 创建在进行，调用方应调用 waitClientBuild 等待结果。
+func (r *runtimeManager) beginClientBuild(key runtimeKey) *clientBuild {
+	r.buildMu.Lock()
+	defer r.buildMu.Unlock()
+	if r.building == nil {
+		r.building = make(map[runtimeKey]*clientBuild)
+	}
+	if b, ok := r.building[key]; ok {
+		return b
+	}
+	b := newClientBuild()
+	r.building[key] = b
+	return b
+}
+
+func (r *runtimeManager) finishClientBuild(key runtimeKey, b *clientBuild) {
+	r.buildMu.Lock()
+	delete(r.building, key)
+	r.buildMu.Unlock()
+	b.mu.Lock()
+	close(b.done)
+	b.mu.Unlock()
+}
+
+func (b *clientBuild) setResult(client *acp.Client, info acp.SessionInfo, err error) {
+	b.mu.Lock()
+	b.client = client
+	b.info = info
+	b.err = err
+	b.mu.Unlock()
+}
+
+func (b *clientBuild) wait(ctx context.Context) (*acp.Client, acp.SessionInfo, error) {
+	select {
+	case <-b.done:
+	case <-ctx.Done():
+		return nil, acp.SessionInfo{}, ctx.Err()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.client, b.info, b.err
 }
 
 type runtimeClientSlot struct {
@@ -497,50 +561,96 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	if session.ACPSessionID == "" {
 		return nil, fmt.Errorf("当前会话还没有 ACP session，请先发送 /new")
 	}
-	lock := r.transitionLock(key)
-	lock.Lock()
-	r.mu.Lock()
-	slot := r.slots[key]
-	client := slot.client
-	activeSessionID := slot.sessionID
-	r.mu.Unlock()
-	if client != nil && activeSessionID == session.ACPSessionID {
-		lock.Unlock()
+
+	// 快速路径：已有匹配的 client，直接返回（短暂持锁）。
+	if client, ok := r.cachedClientForSession(key, session.ACPSessionID); ok {
 		return client, nil
 	}
-	if activeSessionID != "" && activeSessionID != session.ACPSessionID {
-		lock.Unlock()
-		return nil, fmt.Errorf("%w: runtime session %s 与当前映射 %s 不一致", errACPSessionUnavailable, activeSessionID, session.ACPSessionID)
+
+	// 同 key 上若已有创建在进行，等待其结果；Start/Initialize/Resume 在锁外执行，
+	// 不会长时间占用 transition 锁。
+	build := r.beginClientBuild(key)
+	leader := build != nil && build.client == nil
+	if !leader {
+		client, info, err := build.wait(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// 复用 leader 结果前，确认它确实对应当前 session。
+		if client != nil {
+			if _, ok := r.cachedClientForSession(key, session.ACPSessionID); ok {
+				return client, nil
+			}
+		}
+		_ = info
+		return nil, fmt.Errorf("%w: ACP runtime 正在重建", errACPSessionUnavailable)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
-	defer cancel()
-	client, err := acp.Start(ctx, agent, session.Workspace)
+	// leader：在锁外启动并握手 client。
+	client, info, err := r.startAndResumeClient(ctx, session, agent)
+	build.setResult(client, info, err)
+
 	if err != nil {
-		lock.Unlock()
+		r.finishClientBuild(key, build)
+		if client != nil {
+			_ = client.Close()
+		}
 		return nil, err
 	}
-	if err := client.Initialize(ctx); err != nil {
+
+	// 短暂持 transition 锁做最终交换，避免与并发 close/swap 竞争。
+	lock := r.transitionLock(key)
+	lock.Lock()
+	// 交换前再确认一次：可能有更新的 client 已被插入（例如被 close 后重建）。
+	if existing, ok := r.cachedClientForSession(key, session.ACPSessionID); ok {
 		lock.Unlock()
+		r.finishClientBuild(key, build)
 		_ = client.Close()
-		return nil, fmt.Errorf("initialize: %w", err)
-	}
-	sessionInfo, err := client.ResumeSession(ctx, session.ACPSessionID, session.Cwd)
-	if err != nil {
-		if loadInfo, loadErr := client.LoadSession(ctx, session.ACPSessionID, session.Cwd); loadErr != nil {
-			lock.Unlock()
-			_ = client.Close()
-			return nil, fmt.Errorf("%w: session/resume: %v; session/load fallback: %v", errACPSessionUnavailable, err, loadErr)
-		} else {
-			sessionInfo = loadInfo
-		}
+		return existing, nil
 	}
 	old := r.swapClient(key, client, session.ACPSessionID)
 	r.attachClientSubscriptions(key, client)
 	lock.Unlock()
+	r.finishClientBuild(key, build)
+
 	_ = old.closeReplacedBy(r, client)
-	r.dispatchSessionInfo(session.Key, session.ACPSessionID, sessionInfo)
+	r.dispatchSessionInfo(session.Key, session.ACPSessionID, info)
 	return client, nil
+}
+
+// cachedClientForSession 在短临界区内返回当前缓存且 sessionID 匹配的 client。
+func (r *runtimeManager) cachedClientForSession(key runtimeKey, sessionID string) (*acp.Client, bool) {
+	r.mu.Lock()
+	slot := r.slots[key]
+	r.mu.Unlock()
+	if slot.client != nil && slot.sessionID == sessionID {
+		return slot.client, true
+	}
+	return nil, false
+}
+
+// startAndResumeClient 在不持有 transition 锁的情况下启动 ACP 子进程、initialize 并 resume/load。
+func (r *runtimeManager) startAndResumeClient(ctx context.Context, session Session, agent config.AgentConfig) (*acp.Client, acp.SessionInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
+	defer cancel()
+	client, err := acp.Start(ctx, agent, session.Workspace)
+	if err != nil {
+		return nil, acp.SessionInfo{}, err
+	}
+	if err := client.Initialize(ctx); err != nil {
+		_ = client.Close()
+		return nil, acp.SessionInfo{}, fmt.Errorf("initialize: %w", err)
+	}
+	sessionInfo, err := client.ResumeSession(ctx, session.ACPSessionID, session.Cwd)
+	if err != nil {
+		loadInfo, loadErr := client.LoadSession(ctx, session.ACPSessionID, session.Cwd)
+		if loadErr != nil {
+			_ = client.Close()
+			return nil, acp.SessionInfo{}, fmt.Errorf("%w: session/resume: %v; session/load fallback: %v", errACPSessionUnavailable, err, loadErr)
+		}
+		return client, loadInfo, nil
+	}
+	return client, sessionInfo, nil
 }
 
 func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) runtimeClientSlot {
@@ -551,7 +661,6 @@ func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionI
 	r.slots[key] = runtimeClientSlot{client: client, sessionID: sessionID}
 	return old
 }
-
 func (r *runtimeManager) detachClient(key runtimeKey) runtimeClientSlot {
 	key = normalizeRuntimeKey(key)
 	r.mu.Lock()

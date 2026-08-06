@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -60,7 +61,13 @@ func (s *SessionStore) Load() error {
 	}
 	var file sessionFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return fmt.Errorf("解析会话映射文件: %w", err)
+		// 会话映射文件损坏：备份原文件后以空库启动，避免单个坏文件导致整个服务无法启动。
+		// 下次写入会重新生成正常的 sessions.json。
+		s.resetLocked()
+		if backupErr := s.backupCorruptFileLocked(data, err); backupErr != nil {
+			slog.Warn("备份损坏的会话映射文件失败", "路径", s.path, "错误", backupErr)
+		}
+		return nil
 	}
 	s.sessions = make(map[SessionKey]Session, len(file.Sessions))
 	s.chats = make(map[ChatKey]ChatConfig, len(file.Chats))
@@ -100,6 +107,32 @@ func (s *SessionStore) Load() error {
 		}
 	}
 	s.trimHistoryLocked()
+	return nil
+}
+
+// resetLocked 把内存状态置空，调用方必须持有 s.mu。
+func (s *SessionStore) resetLocked() {
+	s.sessions = make(map[SessionKey]Session)
+	s.chats = make(map[ChatKey]ChatConfig)
+	s.messages = make(map[messageBindingKey]MessageSessionBinding)
+	s.history = nil
+}
+
+// backupCorruptFileLocked 把损坏的持久化文件重命名为带时间戳的 .corrupt-* 副本，
+// 以便保留现场供排查，同时让后续写入能重新创建正常文件。调用方必须持有 s.mu。
+func (s *SessionStore) backupCorruptFileLocked(data []byte, cause error) error {
+	if strings.TrimSpace(s.path) == "" {
+		return nil
+	}
+	backupPath := fmt.Sprintf("%s.corrupt-%s", s.path, time.Now().Format("20060102T150405.000000000"))
+	if err := os.WriteFile(backupPath, data, 0o600); err != nil {
+		return fmt.Errorf("写入损坏文件备份: %w", err)
+	}
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("移除损坏的原文件: %w", err)
+	}
+	slog.Warn("会话映射文件已损坏，已备份并以空库启动",
+		"路径", s.path, "备份", backupPath, "错误", cause)
 	return nil
 }
 

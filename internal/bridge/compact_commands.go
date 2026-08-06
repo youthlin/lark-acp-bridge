@@ -292,7 +292,7 @@ func (s *Service) maybeRunAutoCompact(ctx context.Context, msg feishu.Message, s
 	if !changed {
 		return
 	}
-	go s.runAutoCompact(context.WithoutCancel(ctx), msg, session, agent)
+	s.goBackground("auto-compact", func() { s.runAutoCompact(context.WithoutCancel(ctx), msg, session, agent) })
 }
 
 func sessionSupportsCompact(session Session) bool {

@@ -17,7 +17,6 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	c.cwd = cleanCwd
 	result, err := c.call(ctx, "session/new", c.lifecycleParams("", cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
@@ -49,7 +48,6 @@ func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) (Sessio
 	if !supportsLoad {
 		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 loadSession capability")
 	}
-	c.cwd = cleanCwd
 	result, err := c.call(ctx, "session/load", c.lifecycleParams(sessionID, cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
@@ -74,7 +72,6 @@ func (c *Client) ResumeSession(ctx context.Context, sessionID, cwd string) (Sess
 	if !supportsResume {
 		return SessionInfo{}, fmt.Errorf("ACP agent 未声明 sessionCapabilities.resume")
 	}
-	c.cwd = cleanCwd
 	result, err := c.call(ctx, "session/resume", c.lifecycleParams(sessionID, cleanCwd))
 	if err != nil {
 		return SessionInfo{}, err
@@ -118,7 +115,11 @@ func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
 	_, err := c.call(ctx, "session/close", map[string]any{
 		"sessionId": sessionID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	c.clearSessionState(sessionID)
+	return nil
 }
 
 func (c *Client) SupportsDeleteSession() bool {
@@ -140,7 +141,11 @@ func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
 	_, err := c.call(ctx, "session/delete", map[string]any{
 		"sessionId": sessionID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	c.clearSessionState(sessionID)
+	return nil
 }
 
 func (c *Client) SupportsListSessions() bool {

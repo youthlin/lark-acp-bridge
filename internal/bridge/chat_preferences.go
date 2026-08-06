@@ -389,6 +389,23 @@ func (s *Service) takePendingAtAutoMessages(key SessionKey) []pendingAtMessage {
 	return pending
 }
 
+// restorePendingAtAutoMessages 把此前 take 走但未能处理的待处理消息放回队首，
+// 避免后台 at-auto prompt 因 session 忙碌等原因启动失败时丢消息。
+func (s *Service) restorePendingAtAutoMessages(key SessionKey, messages []pendingAtMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	existing := s.pendingAtAuto[key]
+	combined := append(append([]pendingAtMessage(nil), messages...), existing...)
+	if len(combined) > maxPendingAtAuto {
+		combined = append([]pendingAtMessage(nil), combined[len(combined)-maxPendingAtAuto:]...)
+	}
+	s.pendingAtAuto[key] = combined
+}
+
 func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
 	history := formatPendingAtMessageBlock(pendingAtAutoHeader, messages)
 	if history == "" {

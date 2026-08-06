@@ -328,7 +328,7 @@ func (s *Service) startScheduledTask(ctx context.Context, task ScheduledTask, wo
 	if existing != nil && existing.cancel != nil {
 		existing.cancel()
 	}
-	go s.runScheduledTaskJob(jobCtx, job)
+	s.goBackground("scheduled-task:"+task.ID, func() { s.runScheduledTaskJob(jobCtx, job) })
 	return nil
 }
 
@@ -387,11 +387,11 @@ func (s *Service) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJob
 			s.completeOnceScheduledTask(ctx, job.task)
 			return
 		}
-		go func() {
+		s.goBackground("scheduled-run:"+job.task.ID+"/"+runID, func() {
 			defer job.removeActiveRun(runID)
 			defer cancel()
 			s.executeScheduledTaskRun(runCtx, job, runID, triggeredAt)
-		}()
+		})
 	}
 }
 
