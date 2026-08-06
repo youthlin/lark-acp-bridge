@@ -20,6 +20,7 @@ const (
 	streamCardUsageDetailID    = "md_usage_detail"
 	streamCardStatusElementID  = "md_status"
 	streamCardTextElementID    = "md_stream"
+	streamCardSourceElementID  = "md_source"
 	streamCardFooterElementID  = "md_footer"
 )
 
@@ -50,6 +51,10 @@ func newStreamCardJSONFromState(text, process, status, usage string, includeProc
 
 func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool, meta StreamCardMeta) string {
 	elements := outboundBlocksStreamCardElements(blocks)
+	meta = normalizeStreamCardMeta(meta)
+	if meta.SourceURL != "" {
+		elements = append([]any{streamCardSourceLink(meta.SourceURL)}, elements...)
+	}
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanelWithContent(process))
 	}
@@ -62,7 +67,6 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 		}
 		elements = append(elements, streamCardStatusMarkdown(status))
 	}
-	meta = normalizeStreamCardMeta(meta)
 	if meta.Footer != "" {
 		elements = append(elements, streamCardFooter(meta.Footer))
 	}
@@ -142,6 +146,16 @@ func streamCardStatusMarkdown(status string) cardJSON {
 	}
 }
 
+func streamCardSourceLink(url string) cardJSON {
+	return cardJSON{
+		"tag":              "markdown",
+		"content":          "📄 [查看原文](" + url + ")",
+		"element_id":       streamCardSourceElementID,
+		"text_size":        "notation",
+		"vertical_spacing": "4px",
+	}
+}
+
 func streamCardFooter(content string) cardJSON {
 	return cardJSON{
 		"tag":              "markdown",
@@ -176,6 +190,7 @@ func streamCardUsagePanel(content string) cardJSON {
 func normalizeStreamCardMeta(meta StreamCardMeta) StreamCardMeta {
 	meta.Title = strings.TrimSpace(meta.Title)
 	meta.Subtitle = strings.TrimSpace(meta.Subtitle)
+	meta.SourceURL = strings.TrimSpace(meta.SourceURL)
 	meta.Footer = strings.TrimSpace(meta.Footer)
 	return meta
 }

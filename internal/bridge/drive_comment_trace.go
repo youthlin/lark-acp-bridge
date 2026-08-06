@@ -12,6 +12,7 @@ const (
 	driveCommentStreamCardRunning   = "云文档评论处理中"
 	driveCommentStreamCardCompleted = "云文档评论处理完成"
 	driveCommentStreamCardResult    = "云文档评论处理结果"
+	driveCommentStreamCardFooter    = "本卡片展示实时执行过程，最终结果将回复原评论；直接回复本消息仅在群内继续对话，不会写回评论。"
 )
 
 type driveCommentTraceSink struct {
@@ -62,7 +63,7 @@ func (s *driveCommentTraceSink) OnComplete(ctx context.Context, result TriggerRe
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
 		stream.updatePromptResult(result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)
-		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(result, driveCommentStreamCardCompleted))
+		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(driveCommentStreamCardCompleted))
 		stream.closeWithContext(finalCtx)
 	}
 	return nil
@@ -81,7 +82,7 @@ func (s *driveCommentTraceSink) OnError(ctx context.Context, result TriggerResul
 		}
 		stream.updateProcessMessageWithContext(finalCtx, text)
 		stream.failPromptStatusWithContext(finalCtx)
-		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(result, driveCommentStreamCardResult))
+		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(driveCommentStreamCardResult))
 		stream.closeWithContext(finalCtx)
 	}
 	return nil
@@ -94,12 +95,13 @@ func (s *driveCommentTraceSink) ensureStream(ctx context.Context, result Trigger
 	if s.starter == nil || strings.TrimSpace(s.message.ChatID) == "" {
 		return nil
 	}
-	ctx = feishu.WithStreamCardMeta(ctx, s.streamCardMeta(result))
+	ctx = feishu.WithStreamCardMeta(ctx, s.streamCardMeta())
 	session := result.Session
 	if strings.TrimSpace(session.Cwd) == "" {
 		session.Cwd = s.cwd
 	}
-	stream := newPromptCardStream(ctx, s.message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
+	message := s.traceMessage(result.Session.Key)
+	stream := newPromptCardStream(ctx, message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
 		return nil
@@ -110,19 +112,29 @@ func (s *driveCommentTraceSink) ensureStream(ctx context.Context, result Trigger
 	return stream
 }
 
-func (s *driveCommentTraceSink) streamCardMeta(result TriggerResult) feishu.StreamCardMeta {
-	return s.streamCardMetaWithTitle(result, driveCommentStreamCardRunning)
+func (s *driveCommentTraceSink) traceMessage(sessionKey SessionKey) feishu.Message {
+	message := s.message
+	if s.store == nil {
+		return message
+	}
+	binding, ok := s.store.FirstMessageForSession(message.BotID, message.ChatID, sessionKey)
+	if !ok {
+		return message
+	}
+	message.MessageID = binding.MessageID
+	message.ForceReplyInThread = true
+	return message
 }
 
-func (s *driveCommentTraceSink) streamCardMetaWithTitle(result TriggerResult, title string) feishu.StreamCardMeta {
-	subtitle := driveCommentTraceSubtitle(s.comment)
-	if subtitle == "" {
-		subtitle = strings.TrimSpace(result.Request.Metadata["comment_id"])
-	}
+func (s *driveCommentTraceSink) streamCardMeta() feishu.StreamCardMeta {
+	return s.streamCardMetaWithTitle(driveCommentStreamCardRunning)
+}
+
+func (s *driveCommentTraceSink) streamCardMetaWithTitle(title string) feishu.StreamCardMeta {
 	return feishu.StreamCardMeta{
-		Title:    title,
-		Subtitle: subtitle,
-		Footer:   "本消息的回复链将在本次执行会话中处理；最终回复仍写回云文档评论。",
+		Title:     title,
+		SourceURL: strings.TrimSpace(s.comment.DocumentURL),
+		Footer:    driveCommentStreamCardFooter,
 	}
 }
 
@@ -142,16 +154,4 @@ func (s *driveCommentTraceSink) bindStreamMessage(ctx context.Context, result Tr
 	}); err != nil {
 		slog.WarnContext(ctx, "保存云文档评论处理过程消息会话绑定失败", "message_id", sent.MessageID, "session", result.Session.ACPSessionID, "错误", err)
 	}
-}
-
-func driveCommentTraceSubtitle(comment feishu.DriveComment) string {
-	comment = comment.Normalized()
-	parts := make([]string, 0, 3)
-	if comment.FileType != "" || comment.FileToken != "" {
-		parts = append(parts, strings.TrimSpace(comment.FileType)+":"+strings.TrimSpace(comment.FileToken))
-	}
-	if strings.TrimSpace(comment.CommentID) != "" {
-		parts = append(parts, "#"+strings.TrimSpace(comment.CommentID))
-	}
-	return strings.Join(parts, "")
 }

@@ -106,18 +106,29 @@ func TestNewStreamCardJSONCanOmitStatusBar(t *testing.T) {
 func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
 	var card any
 	data := newStreamCardJSONFromState("", "", streamCardInitialStatus, "", true, true, false, true, StreamCardMeta{
-		Title:    "定时任务执行结果",
-		Subtitle: "task-id: daily",
-		Footer:   "本消息的回复链将在本次执行会话中处理。",
+		Title:     "定时任务执行结果",
+		Subtitle:  "task-id: daily",
+		SourceURL: "https://feishu.cn/docx/doc-token",
+		Footer:    "本消息的回复链将在本次执行会话中处理。",
 	})
 	if err := json.Unmarshal([]byte(data), &card); err != nil {
 		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"定时任务执行结果", "task-id: daily", "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
+	for _, want := range []string{"定时任务执行结果", "task-id: daily", "📄 [查看原文](https://feishu.cn/docx/doc-token)", streamCardSourceElementID, "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
 		if !jsonContainsValue(card, want) {
 			t.Fatalf("stream card meta JSON does not contain %q: %#v", want, card)
 		}
+	}
+	body, _ := card.(map[string]any)["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	if len(elements) < 2 {
+		t.Fatalf("stream card elements = %#v, want source link before stream text", elements)
+	}
+	source, _ := elements[0].(map[string]any)
+	stream, _ := elements[1].(map[string]any)
+	if source["element_id"] != streamCardSourceElementID || stream["element_id"] != streamCardTextElementID {
+		t.Fatalf("stream card elements = %#v, want source link before stream text", elements)
 	}
 }
 
@@ -441,9 +452,10 @@ func TestSDKStreamCardFullCardJSONUsesUpdatedMeta(t *testing.T) {
 	card := &sdkStreamCard{
 		text: "最终回复",
 		meta: StreamCardMeta{
-			Title:    "定时任务已完成",
-			Subtitle: "task-id: daily",
-			Footer:   "本消息的回复链将在本次执行会话中处理。",
+			Title:     "定时任务已完成",
+			Subtitle:  "task-id: daily",
+			SourceURL: "https://feishu.cn/docx/doc-token",
+			Footer:    "本消息的回复链将在本次执行会话中处理。",
 		},
 	}
 	var payload any
@@ -451,7 +463,7 @@ func TestSDKStreamCardFullCardJSONUsesUpdatedMeta(t *testing.T) {
 		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"定时任务已完成", "task-id: daily", "本消息的回复链将在本次执行会话中处理。"} {
+	for _, want := range []string{"定时任务已完成", "task-id: daily", "📄 [查看原文](https://feishu.cn/docx/doc-token)", "本消息的回复链将在本次执行会话中处理。"} {
 		if !jsonContainsValue(payload, want) {
 			t.Fatalf("full card snapshot does not contain updated meta %q: %#v", want, payload)
 		}

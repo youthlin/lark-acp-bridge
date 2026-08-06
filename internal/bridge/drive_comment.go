@@ -127,15 +127,17 @@ func (s *Service) driveCommentTraceSink(comment feishu.DriveComment, cwd string)
 	if !ok || !bot.DriveComment.TraceEnabled || strings.TrimSpace(bot.DriveComment.TraceChatID) == "" {
 		return nil
 	}
+	message := feishu.Message{
+		BotID:     comment.BotID,
+		ChatID:    strings.TrimSpace(bot.DriveComment.TraceChatID),
+		Workspace: strings.TrimSpace(comment.Workspace),
+	}
+	store := s.storeForBotID(comment.BotID)
 	return &driveCommentTraceSink{
-		message: feishu.Message{
-			BotID:     comment.BotID,
-			ChatID:    strings.TrimSpace(bot.DriveComment.TraceChatID),
-			Workspace: strings.TrimSpace(comment.Workspace),
-		},
+		message: message,
 		cwd:     cwd,
 		comment: comment.Normalized(),
-		store:   s.storeForBotID(comment.BotID),
+		store:   store,
 		starter: s.scheduleStreamStarter(comment.BotID),
 	}
 }

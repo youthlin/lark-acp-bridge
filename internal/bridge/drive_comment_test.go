@@ -300,11 +300,13 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	svc.setRuntime(rt)
 	replies := &driveCommentReplyRecorder{}
 	var streamTargets []feishu.Message
+	var streamMetas []feishu.StreamCardMeta
 	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
 	outbound := &fakeSentMessageClient{}
 	outbound.driveCommentReplySender = replies.ReplyDriveComment
 	outbound.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
+		streamMetas = append(streamMetas, feishu.StreamCardMetaFromContext(ctx))
 		return streamCard, nil
 	}
 	svc.setOutbound("bot-a", outbound)
@@ -317,12 +319,20 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 		CommentID:   "comment-1",
 		IsMentioned: true,
 		CommentText: "please handle",
+		DocumentURL: "https://feishu.cn/docx/doc-token",
 	}
 	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
 		t.Fatalf("HandleDriveComment() error = %v", err)
 	}
 	if len(streamTargets) != 1 || streamTargets[0].ChatID != "oc_trace" || streamTargets[0].MessageID != "" {
 		t.Fatalf("stream targets = %+v, want new card in trace chat", streamTargets)
+	}
+	if len(streamMetas) != 1 || streamMetas[0].Subtitle != "" || streamMetas[0].SourceURL != comment.DocumentURL || streamMetas[0].Footer != driveCommentStreamCardFooter {
+		t.Fatalf("stream metas = %+v, want no subtitle, document source URL %q and expected footer", streamMetas, comment.DocumentURL)
+	}
+	metaUpdates := streamCard.metaUpdatesSnapshot()
+	if len(metaUpdates) != 1 || metaUpdates[0].Subtitle != "" || metaUpdates[0].SourceURL != comment.DocumentURL || metaUpdates[0].Footer != driveCommentStreamCardFooter {
+		t.Fatalf("stream meta updates = %+v, want no subtitle, document source URL %q and expected footer", metaUpdates, comment.DocumentURL)
 	}
 	if len(replies.texts) != 1 || replies.texts[0] != "agent reply" {
 		t.Fatalf("drive comment replies = %+v, want final reply still written to document comment", replies.texts)
@@ -337,6 +347,96 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	wantKey := driveCommentSessionKey(comment)
 	if !ok || binding.SessionKey != wantKey || session.Key != wantKey {
 		t.Fatalf("message binding ok=%v binding=%+v session=%+v, want trace message bound to drive comment session", ok, binding, session)
+	}
+}
+
+func TestDriveCommentTraceReusesFirstCardTopicForSameComment(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	storePath := filepath.Join(workspace, "sessions.json")
+	bots := driveCommentEnabledBotConfig(workspace)
+	bots[0].DriveComment.TraceEnabled = true
+	bots[0].DriveComment.TraceChatID = "oc_trace"
+	cfg := config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      bots,
+	}
+	comment := feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "first comment",
+	}
+	replies := &driveCommentReplyRecorder{}
+	var streamTargets []feishu.Message
+	var streamCards []*fakeStreamCard
+	newOutbound := func() *fakeSentMessageClient {
+		outbound := &fakeSentMessageClient{}
+		outbound.driveCommentReplySender = replies.ReplyDriveComment
+		outbound.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+			streamTargets = append(streamTargets, msg)
+			messageID := "om_trace_root"
+			threadID := ""
+			rootID := messageID
+			if len(streamTargets) > 1 {
+				messageID = "om_trace_child"
+				threadID = "omt_trace"
+				rootID = "om_trace_root"
+			}
+			card := &fakeStreamCard{message: feishu.SentMessage{
+				MessageID: messageID,
+				ChatID:    msg.ChatID,
+				ThreadID:  threadID,
+				RootID:    rootID,
+			}}
+			streamCards = append(streamCards, card)
+			return card, nil
+		}
+		return outbound
+	}
+
+	store := NewSessionStore(storePath)
+	svc := NewService(cfg, store)
+	svc.setRuntime(&fakeRuntime{promptResults: []acp.PromptResult{{Text: "first reply", StopReason: "end_turn"}}})
+	svc.setOutbound("bot-a", newOutbound())
+	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
+		t.Fatalf("HandleDriveComment(first) error = %v", err)
+	}
+
+	reloaded := NewSessionStore(storePath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	svc = NewService(cfg, reloaded)
+	svc.setRuntime(&fakeRuntime{promptResults: []acp.PromptResult{{Text: "second reply", StopReason: "end_turn"}}})
+	svc.setOutbound("bot-a", newOutbound())
+	comment.ReplyID = "reply-2"
+	comment.ReplyText = "second comment"
+	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
+		t.Fatalf("HandleDriveComment(second) error = %v", err)
+	}
+
+	if len(streamTargets) != 2 {
+		t.Fatalf("stream targets = %+v, want two cards", streamTargets)
+	}
+	if got := streamTargets[0]; got.ChatID != "oc_trace" || got.MessageID != "" || got.ForceReplyInThread {
+		t.Fatalf("first stream target = %+v, want new root card", got)
+	}
+	if got := streamTargets[1]; got.ChatID != "oc_trace" || got.MessageID != "om_trace_root" || !got.ForceReplyInThread {
+		t.Fatalf("second stream target = %+v, want reply to first card in its topic", got)
+	}
+	if len(streamCards) != 2 || !streamCards[0].isClosed() || !streamCards[1].isClosed() {
+		t.Fatalf("stream cards = %+v, want both closed", streamCards)
+	}
+	if len(replies.texts) != 2 || replies.texts[0] != "first reply" || replies.texts[1] != "second reply" {
+		t.Fatalf("drive comment replies = %+v, want both final replies", replies.texts)
+	}
+	first, ok := reloaded.FirstMessageForSession("bot-a", "oc_trace", driveCommentSessionKey(comment))
+	if !ok || first.MessageID != "om_trace_root" {
+		t.Fatalf("first trace binding = %+v, %v, want om_trace_root", first, ok)
 	}
 }
 

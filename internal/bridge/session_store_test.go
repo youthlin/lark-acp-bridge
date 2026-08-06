@@ -375,6 +375,54 @@ func TestSessionStoreBindMessageToSessionPersistsAndTracksLogicalSession(t *test
 	}
 }
 
+func TestSessionStoreFirstMessageForSessionReturnsEarliestMatchingBinding(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	store := NewSessionStore(storePath)
+	key := SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"}
+	createdAt := time.Now().Add(-time.Minute)
+	for _, binding := range []MessageSessionBinding{
+		{
+			BotID:      "bot-a",
+			ChatID:     "oc_trace",
+			MessageID:  "om_child",
+			SessionKey: key,
+			CreatedAt:  createdAt.Add(time.Second),
+		},
+		{
+			BotID:      "bot-a",
+			ChatID:     "oc_trace",
+			MessageID:  "om_root",
+			SessionKey: key,
+			CreatedAt:  createdAt,
+		},
+		{
+			BotID:      "bot-a",
+			ChatID:     "oc_other",
+			MessageID:  "om_other_chat",
+			SessionKey: key,
+			CreatedAt:  createdAt.Add(-time.Second),
+		},
+	} {
+		if _, err := store.BindMessageToSession(binding); err != nil {
+			t.Fatalf("BindMessageToSession(%+v) error = %v", binding, err)
+		}
+	}
+
+	got, ok := store.FirstMessageForSession("bot-a", "oc_trace", key)
+	if !ok || got.MessageID != "om_root" {
+		t.Fatalf("FirstMessageForSession() = %+v, %v, want om_root", got, ok)
+	}
+
+	reloaded := NewSessionStore(storePath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got, ok = reloaded.FirstMessageForSession("bot-a", "oc_trace", key)
+	if !ok || got.MessageID != "om_root" {
+		t.Fatalf("reloaded FirstMessageForSession() = %+v, %v, want om_root", got, ok)
+	}
+}
+
 func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}

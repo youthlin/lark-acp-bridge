@@ -21,9 +21,10 @@ type OutboundRenderContext struct {
 }
 
 type StreamCardMeta struct {
-	Title    string
-	Subtitle string
-	Footer   string
+	Title     string
+	Subtitle  string
+	SourceURL string
+	Footer    string
 }
 
 // LoopStatusCard 表示 /loop 启动后用于展示整体状态的卡片。

@@ -364,6 +364,28 @@ func (s *SessionStore) SessionForMessage(botID, chatID, messageID string) (Sessi
 	return cloneSession(session), binding, true
 }
 
+func (s *SessionStore) FirstMessageForSession(botID, chatID string, sessionKey SessionKey) (MessageSessionBinding, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	botID = strings.TrimSpace(botID)
+	chatID = strings.TrimSpace(chatID)
+	sessionKey = normalizeSessionKey(sessionKey)
+	var first MessageSessionBinding
+	found := false
+	for _, binding := range s.messages {
+		binding = normalizeMessageBinding(binding)
+		if binding.BotID != botID || binding.ChatID != chatID || binding.SessionKey != sessionKey {
+			continue
+		}
+		if !found || messageBindingCreatedBefore(binding, first) {
+			first = binding
+			found = true
+		}
+	}
+	return first, found
+}
+
 func (s *SessionStore) ResumeSession(key SessionKey, acpSessionID string) (Session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -751,6 +773,19 @@ func messageBindingLess(a, b MessageSessionBinding) bool {
 	}
 	if a.ChatID != b.ChatID {
 		return a.ChatID < b.ChatID
+	}
+	return a.MessageID < b.MessageID
+}
+
+func messageBindingCreatedBefore(a, b MessageSessionBinding) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		if a.CreatedAt.IsZero() {
+			return false
+		}
+		if b.CreatedAt.IsZero() {
+			return true
+		}
+		return a.CreatedAt.Before(b.CreatedAt)
 	}
 	return a.MessageID < b.MessageID
 }
