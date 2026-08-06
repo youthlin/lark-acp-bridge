@@ -3,7 +3,6 @@ package bridge
 import (
 	"context"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -121,17 +120,26 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		if store != nil {
 			s.stores[bot.ID] = store
 		} else if strings.TrimSpace(bot.Workspace) != "" {
-			s.stores[bot.ID] = NewSessionStore(filepath.Join(bot.Workspace, "sessions.json"))
+			s.stores[bot.ID] = NewSessionStoreWithFallback(
+				workspaceLocalPath(bot.Workspace, "sessions.json"),
+				workspaceLegacyPath(bot.Workspace, "sessions.json"),
+			)
 		}
 		if strings.TrimSpace(bot.Workspace) != "" {
-			s.scheduleStores[bot.ID] = NewScheduledTaskStore(filepath.Join(bot.Workspace, "scheduled_tasks.json"))
-			s.usageStores[bot.ID] = NewTokenUsageStore(filepath.Join(bot.Workspace, "token_usage.json"))
+			s.scheduleStores[bot.ID] = NewScheduledTaskStoreWithFallback(
+				workspaceLocalPath(bot.Workspace, "scheduled_tasks.json"),
+				workspaceLegacyPath(bot.Workspace, "scheduled_tasks.json"),
+			)
+			s.usageStores[bot.ID] = NewTokenUsageStoreWithFallback(
+				workspaceLocalPath(bot.Workspace, "token_usage.json"),
+				workspaceLegacyPath(bot.Workspace, "token_usage.json"),
+			)
 		}
 	}
 	if store != nil {
 		s.stores[""] = store
 		if strings.TrimSpace(store.path) != "" {
-			s.usageStores[""] = NewTokenUsageStore(filepath.Join(filepath.Dir(store.path), "token_usage.json"))
+			s.usageStores[""] = NewTokenUsageStore(sessionStoreSiblingPath(store.path, "token_usage.json"))
 		}
 	}
 	return s

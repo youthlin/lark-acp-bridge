@@ -104,6 +104,46 @@ func TestScheduledTaskStoreUpsertPersistsAndLoadsTasks(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
+	workspace := t.TempDir()
+	legacyPath := filepath.Join(workspace, "scheduled_tasks.json")
+	localPath := filepath.Join(workspace, ".local", "scheduled_tasks.json")
+	legacy := NewScheduledTaskStore(legacyPath)
+	if _, err := legacy.Upsert(ScheduledTask{
+		ID:        "task-a",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "@every 1h",
+		AgentName: "traex",
+		Cwd:       "/repo",
+		Prompt:    "run task",
+	}); err != nil {
+		t.Fatalf("Upsert(legacy) error = %v", err)
+	}
+
+	store := NewScheduledTaskStoreWithFallback(localPath, legacyPath)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if task, ok := store.Get("task-a"); !ok || task.Prompt != "run task" {
+		t.Fatalf("legacy task = %+v ok=%v, want loaded", task, ok)
+	}
+	if _, err := store.Upsert(ScheduledTask{
+		ID:        "task-b",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "@every 2h",
+		AgentName: "traex",
+		Cwd:       "/repo",
+		Prompt:    "run second task",
+	}); err != nil {
+		t.Fatalf("Upsert(local) error = %v", err)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("local scheduled tasks file err = %v, want created", err)
+	}
+}
+
 func TestScheduledTaskStoreRejectsIncompleteTask(t *testing.T) {
 	store := NewScheduledTaskStore(filepath.Join(t.TempDir(), "scheduled_tasks.json"))
 	_, err := store.Upsert(ScheduledTask{
@@ -282,12 +322,12 @@ func TestNewServiceCreatesScheduledTaskStoresForBotWorkspaces(t *testing.T) {
 	if storeA == nil {
 		t.Fatal("schedule store for bot-a = nil, want workspace store")
 	}
-	if storeA.path != filepath.Join(workspaceA, "scheduled_tasks.json") {
-		t.Fatalf("bot-a schedule store path = %q, want workspace scheduled_tasks.json", storeA.path)
+	if storeA.path != filepath.Join(workspaceA, ".local", "scheduled_tasks.json") {
+		t.Fatalf("bot-a schedule store path = %q, want workspace .local scheduled_tasks.json", storeA.path)
 	}
 	storeB := svc.scheduledTaskStoreForBotID("bot-b")
-	if storeB == nil || storeB.path != filepath.Join(workspaceB, "scheduled_tasks.json") {
-		t.Fatalf("bot-b schedule store = %+v, want workspace scheduled_tasks.json", storeB)
+	if storeB == nil || storeB.path != filepath.Join(workspaceB, ".local", "scheduled_tasks.json") {
+		t.Fatalf("bot-b schedule store = %+v, want workspace .local scheduled_tasks.json", storeB)
 	}
 	if got := svc.scheduledTaskStoreForBotID("bot-c"); got != nil {
 		t.Fatalf("schedule store for bot-c = %+v, want nil without workspace", got)

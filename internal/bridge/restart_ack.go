@@ -41,7 +41,11 @@ type restartAckSender interface {
 }
 
 func restartAckPath(workspace string) string {
-	return filepath.Join(workspace, restartAckFileName)
+	return workspaceLocalPath(workspace, restartAckFileName)
+}
+
+func legacyRestartAckPath(workspace string) string {
+	return workspaceLegacyPath(workspace, restartAckFileName)
 }
 
 func newRestartAck(msg feishu.Message) restartAck {
@@ -99,7 +103,7 @@ func removeRestartAck(workspace string) {
 }
 
 func consumeRestartAck(ctx context.Context, workspace string, sender restartAckSender, botID string) error {
-	path := restartAckPath(workspace)
+	path := restartAckReadPath(workspace)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -145,6 +149,18 @@ func consumeRestartAck(ctx context.Context, workspace string, sender restartAckS
 		return fmt.Errorf("删除重启确认记录: %w", err)
 	}
 	return nil
+}
+
+func restartAckReadPath(workspace string) string {
+	path := restartAckPath(workspace)
+	if _, err := os.Stat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	legacyPath := legacyRestartAckPath(workspace)
+	if _, err := os.Stat(legacyPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return legacyPath
+	}
+	return path
 }
 
 func removeRestartAckFile(path string) error {

@@ -115,9 +115,10 @@ type scheduledTaskIMSink struct {
 }
 
 type ScheduledTaskStore struct {
-	path  string
-	mu    sync.Mutex
-	tasks map[string]ScheduledTask
+	path         string
+	fallbackPath string
+	mu           sync.Mutex
+	tasks        map[string]ScheduledTask
 }
 
 type scheduledTaskStoreSnapshot struct {
@@ -131,11 +132,19 @@ func NewScheduledTaskStore(path string) *ScheduledTaskStore {
 	}
 }
 
+func NewScheduledTaskStoreWithFallback(path string, fallbackPath string) *ScheduledTaskStore {
+	store := NewScheduledTaskStore(path)
+	if strings.TrimSpace(fallbackPath) != strings.TrimSpace(path) {
+		store.fallbackPath = fallbackPath
+	}
+	return store
+}
+
 func (s *ScheduledTaskStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.path)
+	data, err := os.ReadFile(s.readPathLocked())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.tasks = make(map[string]ScheduledTask)
@@ -157,6 +166,24 @@ func (s *ScheduledTaskStore) Load() error {
 	}
 	s.tasks = tasks
 	return nil
+}
+
+func (s *ScheduledTaskStore) readPathLocked() string {
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return s.path
+	}
+	if _, err := os.Stat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	fallbackPath := strings.TrimSpace(s.fallbackPath)
+	if fallbackPath == "" || fallbackPath == path {
+		return path
+	}
+	if _, err := os.Stat(fallbackPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return fallbackPath
+	}
+	return path
 }
 
 func (s *ScheduledTaskStore) Upsert(task ScheduledTask) (ScheduledTask, error) {

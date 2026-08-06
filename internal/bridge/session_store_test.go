@@ -15,6 +15,42 @@ func ptrTime(t time.Time) *time.Time {
 	return &t
 }
 
+func TestSessionStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
+	workspace := t.TempDir()
+	legacyPath := filepath.Join(workspace, "sessions.json")
+	localPath := filepath.Join(workspace, ".local", "sessions.json")
+	legacy := NewSessionStore(legacyPath)
+	if err := legacy.Upsert(Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Title:        "legacy",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          "/repo",
+	}); err != nil {
+		t.Fatalf("Upsert(legacy) error = %v", err)
+	}
+
+	store := NewSessionStoreWithFallback(localPath, legacyPath)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok || session.ACPSessionID != "acp-session-1" {
+		t.Fatalf("legacy session = %+v ok=%v, want loaded", session, ok)
+	}
+	if err := store.Upsert(Session{
+		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Title:        "local",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-2",
+		Cwd:          "/repo",
+	}); err != nil {
+		t.Fatalf("Upsert(local) error = %v", err)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("local sessions file err = %v, want created", err)
+	}
+}
+
 func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)

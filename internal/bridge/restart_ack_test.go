@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -38,6 +39,36 @@ func TestConsumeRestartAckSendsConfirmationAndRemovesFile(t *testing.T) {
 	}
 }
 
+func TestConsumeRestartAckLoadsLegacyPath(t *testing.T) {
+	workspace := t.TempDir()
+	ack := newRestartAck(feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_restart",
+		ChatID:    "oc_chat",
+		ChatType:  "group",
+		SenderID:  "ou_owner",
+	})
+	data, err := json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	legacyPath := legacyRestartAckPath(workspace)
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(legacy restart ack) error = %v", err)
+	}
+	sender := &fakeRestartAckSender{}
+
+	if err := consumeRestartAck(context.Background(), workspace, sender, "bot-a"); err != nil {
+		t.Fatalf("consumeRestartAck() error = %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy restart ack err = %v, want removed", err)
+	}
+	if got := sender.messages; len(got) != 1 || got[0].MessageID != "om_restart" {
+		t.Fatalf("sent messages = %+v, want legacy restart confirmation", got)
+	}
+}
+
 func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
 	workspace := t.TempDir()
 	if err := writeRestartAck(workspace, newRestartAck(feishu.Message{
@@ -61,6 +92,9 @@ func TestConsumeRestartAckKeepsFileWhenSendFails(t *testing.T) {
 
 func TestConsumeRestartAckRemovesInvalidJSONFile(t *testing.T) {
 	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(restartAckPath(workspace)), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	if err := os.WriteFile(restartAckPath(workspace), []byte("{invalid json"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -87,6 +121,9 @@ func TestConsumeRestartAckRemovesMissingTargetFile(t *testing.T) {
 	data, err := json.Marshal(ack)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(restartAckPath(workspace)), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
 	}
 	if err := os.WriteFile(restartAckPath(workspace), data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)

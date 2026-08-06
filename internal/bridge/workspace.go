@@ -13,6 +13,21 @@ import (
 
 const workspaceBootstrapFile = "Bootstrap.md"
 const workspaceWikiPolicyMarker = "<!-- lark-acp-bridge:wiki-policy:v1 -->"
+const workspaceLocalDir = ".local"
+
+func workspaceLocalPath(workspace string, elem ...string) string {
+	parts := append([]string{strings.TrimSpace(workspace), workspaceLocalDir}, elem...)
+	return filepath.Join(parts...)
+}
+
+func workspaceLegacyPath(workspace string, elem ...string) string {
+	parts := append([]string{strings.TrimSpace(workspace)}, elem...)
+	return filepath.Join(parts...)
+}
+
+func sessionStoreSiblingPath(path string, name string) string {
+	return filepath.Join(filepath.Dir(path), name)
+}
 
 type WorkspaceStatus struct {
 	Path         string
@@ -52,6 +67,13 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 			return WorkspaceStatus{}, fmt.Errorf("创建 workspace 文件 %s: %w", file.name, err)
 		}
 		status.CreatedFiles = append(status.CreatedFiles, file.name)
+	}
+	gitignoreUpdated, err := ensureWorkspaceLocalGitignore(path)
+	if err != nil {
+		return WorkspaceStatus{}, err
+	}
+	if gitignoreUpdated {
+		status.CreatedFiles = append(status.CreatedFiles, ".gitignore")
 	}
 	bootstrapExists, err := workspaceBootstrapExists(path)
 	if err != nil {
@@ -94,6 +116,28 @@ func workspaceHasManagedFiles(path string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func ensureWorkspaceLocalGitignore(path string) (bool, error) {
+	gitignorePath := filepath.Join(path, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("读取 workspace .gitignore: %w", err)
+	}
+	text := string(data)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == ".local/" {
+			return false, nil
+		}
+	}
+	if strings.TrimSpace(text) != "" {
+		text = strings.TrimRight(text, " \t\r\n") + "\n"
+	}
+	text += ".local/\n"
+	if err := os.WriteFile(gitignorePath, []byte(text), 0o644); err != nil {
+		return false, fmt.Errorf("写入 workspace .gitignore: %w", err)
+	}
+	return true, nil
 }
 
 func upgradeWorkspaceWikiPolicy(path string) (WorkspaceUpgradeStatus, error) {

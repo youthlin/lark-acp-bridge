@@ -9,6 +9,7 @@ processed_messages.json
 scheduled_tasks.json
 restart_ack.json
 token_usage.json
+cache/
 /dist/
 /tmp/
 /bin/

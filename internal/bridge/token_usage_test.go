@@ -85,6 +85,49 @@ func TestTokenUsageStoreAppendPersistsAndReportsByAgentAndModel(t *testing.T) {
 	}
 }
 
+func TestTokenUsageStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
+	workspace := t.TempDir()
+	legacyPath := filepath.Join(workspace, "token_usage.json")
+	localPath := filepath.Join(workspace, ".local", "token_usage.json")
+	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)
+	legacy := NewTokenUsageStore(legacyPath)
+	if _, err := legacy.Append(TokenUsageRecord{
+		Timestamp: now,
+		BotID:     "bot-a",
+		AgentName: "traex",
+		Model:     "gpt-5.5",
+		Usage: acp.TokenUsage{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}); err != nil {
+		t.Fatalf("Append(legacy) error = %v", err)
+	}
+
+	store := NewTokenUsageStoreWithFallback(localPath, legacyPath)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if report := store.Report(tokenUsagePeriodDay, now); report.Total.Calls != 1 {
+		t.Fatalf("report total = %+v, want one legacy record", report.Total)
+	}
+	if _, err := store.Append(TokenUsageRecord{
+		Timestamp: now.Add(time.Minute),
+		BotID:     "bot-a",
+		AgentName: "traex",
+		Model:     "gpt-5.5",
+		Usage: acp.TokenUsage{
+			InputTokens:  20,
+			OutputTokens: 10,
+		},
+	}); err != nil {
+		t.Fatalf("Append(local) error = %v", err)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("local token usage file err = %v, want created", err)
+	}
+}
+
 func TestTokenUsageStoreAppendLoadsExistingFileBeforeWriting(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "token_usage.json")
 	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)

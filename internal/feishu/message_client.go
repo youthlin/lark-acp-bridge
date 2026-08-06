@@ -216,7 +216,7 @@ func setMessagePrimaryImage(msg *Message) {
 }
 
 func messageImageCachePath(workspace string, imageKey string) string {
-	return filepath.Join(workspace, "cache", safeImageCacheName(imageKey)+".png")
+	return filepath.Join(workspace, ".local", "cache", safeImageCacheName(imageKey)+".png")
 }
 
 func safeImageCacheName(imageKey string) string {

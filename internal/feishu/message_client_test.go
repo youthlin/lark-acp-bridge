@@ -43,7 +43,7 @@ func (c *concurrentMessageClient) DownloadImage(_ context.Context, _ string, ima
 	c.mu.Lock()
 	c.downloaded = append(c.downloaded, imageKey)
 	c.mu.Unlock()
-	return filepath.Join(workspace, "cache", imageKey+".png"), nil
+	return filepath.Join(workspace, ".local", "cache", imageKey+".png"), nil
 }
 
 func (c *concurrentMessageClient) UploadImage(context.Context, string) (string, error) {
@@ -63,7 +63,7 @@ func TestHydrateMessageImagesAssignsPathsInOrder(t *testing.T) {
 		t.Fatalf("hydrated len = %d, want %d", len(hydrated), len(images))
 	}
 	for i, img := range hydrated {
-		want := filepath.Join("/workspace", "cache", images[i].ImageKey+".png")
+		want := filepath.Join("/workspace", ".local", "cache", images[i].ImageKey+".png")
 		if img.LocalPath != want {
 			t.Fatalf("image[%d].LocalPath = %q, want %q", i, img.LocalPath, want)
 		}

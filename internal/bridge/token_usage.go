@@ -43,10 +43,11 @@ type TokenUsageRecord struct {
 }
 
 type TokenUsageStore struct {
-	path    string
-	mu      sync.Mutex
-	records []TokenUsageRecord
-	loaded  bool
+	path         string
+	fallbackPath string
+	mu           sync.Mutex
+	records      []TokenUsageRecord
+	loaded       bool
 }
 
 type tokenUsageStoreSnapshot struct {
@@ -75,6 +76,14 @@ type tokenUsageReport struct {
 
 func NewTokenUsageStore(path string) *TokenUsageStore {
 	return &TokenUsageStore{path: path}
+}
+
+func NewTokenUsageStoreWithFallback(path string, fallbackPath string) *TokenUsageStore {
+	store := NewTokenUsageStore(path)
+	if strings.TrimSpace(fallbackPath) != strings.TrimSpace(path) {
+		store.fallbackPath = fallbackPath
+	}
+	return store
 }
 
 func (s *TokenUsageStore) Load() error {
@@ -154,7 +163,7 @@ func (s *TokenUsageStore) Report(period tokenUsagePeriod, now time.Time) tokenUs
 }
 
 func (s *TokenUsageStore) loadLocked() error {
-	data, err := os.ReadFile(s.path)
+	data, err := os.ReadFile(s.readPathLocked())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.records = nil
@@ -178,6 +187,24 @@ func (s *TokenUsageStore) loadLocked() error {
 	s.records = records
 	s.loaded = true
 	return nil
+}
+
+func (s *TokenUsageStore) readPathLocked() string {
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return s.path
+	}
+	if _, err := os.Stat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	fallbackPath := strings.TrimSpace(s.fallbackPath)
+	if fallbackPath == "" || fallbackPath == path {
+		return path
+	}
+	if _, err := os.Stat(fallbackPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return fallbackPath
+	}
+	return path
 }
 
 func (s *TokenUsageStore) snapshotLocked() tokenUsageStoreSnapshot {

@@ -36,7 +36,7 @@
 - 普通群和私聊：整个 chat（`chat_id`，`sub_id` 为空）复用同一个 ACP session，只有显式发送 `/new` 才重开。
 - 普通文本在当前会话没有 ACP session 时自动创建；`/new [cwd] [title]` 仅作为手动重开或指定 cwd/标题的入口。
 - 自动创建会话时用首条消息截断生成标题；`/new` 未指定标题时使用 `session#N`。`/session title <title>` 修改当前标题，`/session list` 列出当前聊天历史 session，`/session resume <index>` 恢复历史项。
-- 多个 agent 通过配置里的有序 `agent_list` 声明，通过 chat 维度的 `/agent <name>` 切换；选择持久化在 bot workspace 的 `sessions.json`，后续 `/new` 和自动创建使用当前聊天默认 agent。若当前会话 agent 与聊天默认 agent 不一致，普通文本会基于当前 cwd 自动创建新 agent 的 session。
+- 多个 agent 通过配置里的有序 `agent_list` 声明，通过 chat 维度的 `/agent <name>` 切换；选择持久化在 bot workspace 的 `.local/sessions.json`，后续 `/new` 和自动创建使用当前聊天默认 agent。若当前会话 agent 与聊天默认 agent 不一致，普通文本会基于当前 cwd 自动创建新 agent 的 session。
 - 同一会话中新普通消息优先级最高：新消息会取消上一轮正在执行的 prompt 或当前会话 wiki 反思，再处理新消息。
 - 群聊默认需要 at 当前 bot 才响应；`/at off`、`/at off auto`、`/at off auto-reaction` 可改为免 at，`/at on` 恢复。私聊始终响应，不支持 `/at`。
 
@@ -44,7 +44,7 @@
 
 ## Workspace 与知识沉淀
 
-- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等 L0/L1/L2 内容，以及 `sessions.json`、`restart_ack.json`、`token_usage.json`、定时任务等 bot 相关数据。
+- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json` 和图片 `cache/`。
 - 首次对话且 workspace 未 ready 时，bridge 创建基础模板文件和 `Bootstrap.md`；第一条 `session/prompt` 把 ready workspace 内容注入给 ACP agent，由 agent 完成一次性初始化询问并写入文件后删除 `Bootstrap.md`。bridge 不实现多轮 onboarding 状态机，也不做旧文件名迁移。
 - bridge 只负责创建模板、注入 workspace 内容和提供受限 workspace 文件读写能力；长期记忆、知识和技能文件由 ACP agent 用自身本地工具维护。新增/删除/重命名知识或技能文件需同步 `knowledge/index.md` 并追加 `knowledge/log.md`。
 - 自动知识沉淀（wiki）默认开启，普通消息完整回复后启动分钟级定时器（默认 5 分钟），向同一 ACP session 发送 internal/silent 反思 prompt，不创建飞书卡片、不转发输出。
@@ -103,4 +103,4 @@ go run ./cmd/lark-acp-bridge update
 - 日志使用 `log/slog`，通过 `internal/logging` 的 context handler 输出结构化 JSON；需要上下文时用 `slog.*Context`。
 - 错误信息面向用户/运维，保持中文、具体、可操作；不要打印 secret。
 - 改动保持小而聚焦，遵循既有包边界和命名；不要为了局部便利跨层耦合。
-- 优先补充或更新相邻的 `_test.go`；bug 修复尽量加回归测试。不要提交 `config.json`、`*.appsecret`、`*.key`、`sessions.json`、`token_usage.json` 等本地运行产物。
+- 优先补充或更新相邻的 `_test.go`；bug 修复尽量加回归测试。不要提交 `config.json`、`*.appsecret`、`*.key`、`.local/` 等本地运行产物。

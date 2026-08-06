@@ -6404,7 +6404,7 @@ func TestHandleFeishuMessageRecordsTokenUsageAndReports(t *testing.T) {
 		t.Fatalf("reply = %q, want 完成。", reply)
 	}
 
-	usagePath := filepath.Join(workspace, "token_usage.json")
+	usagePath := filepath.Join(workspace, ".local", "token_usage.json")
 	data, err := os.ReadFile(usagePath)
 	if err != nil {
 		t.Fatalf("ReadFile(token_usage.json) error = %v", err)
@@ -7928,7 +7928,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	storePath := filepath.Join(workspace, "sessions.json")
+	storePath := filepath.Join(workspace, ".local", "sessions.json")
 	reloaded := NewSessionStore(storePath)
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)

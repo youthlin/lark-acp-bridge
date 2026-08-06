@@ -18,12 +18,13 @@ import (
 const sessionSourceIM = "im"
 
 type SessionStore struct {
-	path     string
-	mu       sync.Mutex
-	sessions map[SessionKey]Session
-	history  []Session
-	chats    map[ChatKey]ChatConfig
-	messages map[messageBindingKey]MessageSessionBinding
+	path         string
+	fallbackPath string
+	mu           sync.Mutex
+	sessions     map[SessionKey]Session
+	history      []Session
+	chats        map[ChatKey]ChatConfig
+	messages     map[messageBindingKey]MessageSessionBinding
 }
 
 type sessionStoreSnapshot struct {
@@ -43,12 +44,23 @@ func NewSessionStore(path string) *SessionStore {
 	}
 }
 
+// NewSessionStoreWithFallback writes to path and reads fallbackPath only when path
+// does not exist. It keeps older workspace roots readable while moving state into .local.
+func NewSessionStoreWithFallback(path string, fallbackPath string) *SessionStore {
+	store := NewSessionStore(path)
+	if strings.TrimSpace(fallbackPath) != strings.TrimSpace(path) {
+		store.fallbackPath = fallbackPath
+	}
+	return store
+}
+
 // Load 从文件中加载历史会话
 func (s *SessionStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.path)
+	path := s.readPathLocked()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.sessions = make(map[SessionKey]Session)
@@ -64,8 +76,8 @@ func (s *SessionStore) Load() error {
 		// 会话映射文件损坏：备份原文件后以空库启动，避免单个坏文件导致整个服务无法启动。
 		// 下次写入会重新生成正常的 sessions.json。
 		s.resetLocked()
-		if backupErr := s.backupCorruptFileLocked(data, err); backupErr != nil {
-			slog.Warn("备份损坏的会话映射文件失败", "路径", s.path, "错误", backupErr)
+		if backupErr := s.backupCorruptFileLocked(path, data, err); backupErr != nil {
+			slog.Warn("备份损坏的会话映射文件失败", "路径", path, "错误", backupErr)
 		}
 		return nil
 	}
@@ -110,6 +122,24 @@ func (s *SessionStore) Load() error {
 	return nil
 }
 
+func (s *SessionStore) readPathLocked() string {
+	path := strings.TrimSpace(s.path)
+	if path == "" {
+		return s.path
+	}
+	if _, err := os.Stat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	fallbackPath := strings.TrimSpace(s.fallbackPath)
+	if fallbackPath == "" || fallbackPath == path {
+		return path
+	}
+	if _, err := os.Stat(fallbackPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return fallbackPath
+	}
+	return path
+}
+
 // resetLocked 把内存状态置空，调用方必须持有 s.mu。
 func (s *SessionStore) resetLocked() {
 	s.sessions = make(map[SessionKey]Session)
@@ -120,19 +150,20 @@ func (s *SessionStore) resetLocked() {
 
 // backupCorruptFileLocked 把损坏的持久化文件重命名为带时间戳的 .corrupt-* 副本，
 // 以便保留现场供排查，同时让后续写入能重新创建正常文件。调用方必须持有 s.mu。
-func (s *SessionStore) backupCorruptFileLocked(data []byte, cause error) error {
-	if strings.TrimSpace(s.path) == "" {
+func (s *SessionStore) backupCorruptFileLocked(path string, data []byte, cause error) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return nil
 	}
-	backupPath := fmt.Sprintf("%s.corrupt-%s", s.path, time.Now().Format("20060102T150405.000000000"))
+	backupPath := fmt.Sprintf("%s.corrupt-%s", path, time.Now().Format("20060102T150405.000000000"))
 	if err := os.WriteFile(backupPath, data, 0o600); err != nil {
 		return fmt.Errorf("写入损坏文件备份: %w", err)
 	}
-	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("移除损坏的原文件: %w", err)
 	}
 	slog.Warn("会话映射文件已损坏，已备份并以空库启动",
-		"路径", s.path, "备份", backupPath, "错误", cause)
+		"路径", path, "备份", backupPath, "错误", cause)
 	return nil
 }
 

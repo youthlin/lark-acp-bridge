@@ -104,7 +104,7 @@ func (f *fakeMessageClient) DownloadImage(ctx context.Context, messageID string,
 	if f.downloadErr != nil {
 		return "", f.downloadErr
 	}
-	return filepath.Join(workspace, "cache", imageKey+".png"), nil
+	return filepath.Join(workspace, ".local", "cache", imageKey+".png"), nil
 }
 
 func (f *fakeMessageClient) UploadImage(ctx context.Context, path string) (string, error) {
@@ -523,7 +523,7 @@ func TestAdapterHydratesCurrentImageMessage(t *testing.T) {
 	if handler.msg.MsgType != "image" || handler.msg.ImageKey != "img_test_reply_image" {
 		t.Fatalf("message = %+v, want image type and key", handler.msg)
 	}
-	wantPath := filepath.Join(workspace, "cache", "img_test_reply_image.png")
+	wantPath := filepath.Join(workspace, ".local", "cache", "img_test_reply_image.png")
 	if handler.msg.LocalPath != wantPath {
 		t.Fatalf("LocalPath = %q, want %q", handler.msg.LocalPath, wantPath)
 	}
@@ -805,7 +805,7 @@ func TestLarkMessageClientHydratesMessageImageLocalPath(t *testing.T) {
 	// is the shared helper used by the real lark client and event path.
 	got.Images = hydrateMessageImages(context.Background(), messages, got.MessageID, workspace, got.Images)
 	setMessagePrimaryImage(got)
-	wantPath := filepath.Join(workspace, "cache", "img_v3_reply.png")
+	wantPath := filepath.Join(workspace, ".local", "cache", "img_v3_reply.png")
 	if got.LocalPath != wantPath || !strings.Contains(got.PromptText(), "local_path: "+wantPath) {
 		t.Fatalf("message = %+v prompt=%q, want hydrated local path %q", got, got.PromptText(), wantPath)
 	}
