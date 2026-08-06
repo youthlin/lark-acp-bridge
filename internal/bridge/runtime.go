@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -693,7 +692,7 @@ func isBrokenACPClientPipeError(err error) bool {
 	return errors.Is(err, acp.ErrServerOutputClosed) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, os.ErrClosed) ||
-		errors.Is(err, syscall.EPIPE) ||
+		isPlatformBrokenPipeError(err) ||
 		strings.Contains(strings.ToLower(err.Error()), "broken pipe")
 }
 

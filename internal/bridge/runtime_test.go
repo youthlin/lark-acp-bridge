@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -102,7 +101,6 @@ func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T)
 func TestRuntimeTreatsBrokenPipeAsUnavailableSession(t *testing.T) {
 	for _, err := range []error{
 		fmt.Errorf("session/prompt: write |1: broken pipe"),
-		fmt.Errorf("session/prompt: %w", syscall.EPIPE),
 		fmt.Errorf("session/prompt: %w", io.ErrClosedPipe),
 		fmt.Errorf("session/prompt: %w: %w", acp.ErrServerOutputClosed, io.EOF),
 	} {

@@ -4,8 +4,11 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,12 +37,77 @@ func TestRunMode(t *testing.T) {
 
 func TestDaemonFilesUseConfigDirectory(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
 	if got, want := daemonPIDFile(configPath), filepath.Join(filepath.Dir(configPath), "lark-acp-bridge.pid"); got != want {
 		t.Fatalf("daemonPIDFile() = %q, want %q", got, want)
 	}
 	if got, want := daemonLogFile(configPath), filepath.Join(filepath.Dir(configPath), "lark-acp-bridge.log"); got != want {
 		t.Fatalf("daemonLogFile() = %q, want %q", got, want)
 	}
+}
+
+func TestDaemonFilesKeepLegacyNamesForNonDefaultConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", configPath, err)
+	}
+	if got, want := daemonPIDFile(configPath), filepath.Join(dir, "lark-acp-bridge.pid"); got != want {
+		t.Fatalf("daemonPIDFile() = %q, want %q", got, want)
+	}
+	if got, want := daemonLogFile(configPath), filepath.Join(dir, "lark-acp-bridge.log"); got != want {
+		t.Fatalf("daemonLogFile() = %q, want %q", got, want)
+	}
+}
+
+func TestStartDaemonDetectsLegacyNonDefaultConfigDaemon(t *testing.T) {
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skip("requires /proc")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", configPath, err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLegacyDaemonHelperProcess$", "--", "--daemon-child")
+	cmd.Env = append(os.Environ(), daemonEnvToken, "LARK_ACP_BRIDGE_LEGACY_DAEMON_TEST=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start legacy daemon helper error = %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	pidFile := filepath.Join(dir, "lark-acp-bridge.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", pidFile, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	if !waitForDeadline(deadline, 10*time.Millisecond, func() bool {
+		_, running, err := readRunningPID(pidFile)
+		return err == nil && running
+	}) {
+		t.Fatal("legacy daemon helper was not recognized as running")
+	}
+
+	err := startDaemon(configPath)
+	if err == nil {
+		t.Fatal("startDaemon() error = nil, want legacy daemon conflict")
+	}
+	if !strings.Contains(err.Error(), "服务已在后台运行") {
+		t.Fatalf("startDaemon() error = %v, want already running error", err)
+	}
+}
+
+func TestLegacyDaemonHelperProcess(t *testing.T) {
+	if os.Getenv("LARK_ACP_BRIDGE_LEGACY_DAEMON_TEST") != "1" {
+		return
+	}
+	time.Sleep(time.Minute)
 }
 
 func TestChildArgsDropsMode(t *testing.T) {

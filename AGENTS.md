@@ -12,7 +12,7 @@
 
 ## 包结构
 
-- `cmd/lark-acp-bridge`：CLI 入口、默认后台 daemon（unix）、`bots`/`service` 子命令、版本号、前台运行与 pid/log 管理。
+- `cmd/lark-acp-bridge`：CLI 入口、默认后台 daemon（unix）、`bots`/`service` 子命令、版本号、前台运行、实例锁与 pid/log 管理。
 - `internal/config`：配置加载、路径展开、bot/agent 校验、加密 file secret、`restart_command` 与默认配置创建。
 - `internal/feishu`：飞书长连接适配、事件解析与去重、消息/卡片渲染、权限/会话/模式/模型卡片、群聊信息缓存、云文档评论事件。
 - `internal/bridge`：核心桥接层，负责 session 映射与生命周期、ACP runtime、prompt 队列与流式更新、斜杠命令、定时/循环/wiki 任务、token 用量、workspace 模板与持久化。
@@ -52,12 +52,13 @@
 
 ## 配置
 
-- 默认配置文件：`~/.lark-acp-bridge/config.json`；后台 pid/log 放在其同级目录。
+- 默认配置文件：`~/.lark-acp-bridge/config.json`；后台 pid/log 和按配置区分的实例锁文件放在其同级目录。
 - `bots` 为数组，每个 bot 必须有唯一 `id`，展开后的 `workspace` 绝对路径也必须唯一。
 - `app_secret` 使用 file 引用，secret 文件必须是加密格式（`lark-acp-bridge-secret:v1:` 前缀）并配套 `.key`，两者权限 `600`；启动时只支持加密 file secret。优先用 `bots register` / `bots add` 维护，不要在配置或日志中出现明文 secret。
 - `agent_list[].command` 启动前必须校验可执行：普通命令走 `PATH`（`exec.LookPath`），含路径分隔符的命令检查文件存在且有执行权限；`default_cwd` 若配置必须是可访问目录。命令不存在的 agent 会被跳过并告警，全部不可用则启动失败。
 - 路径中的 `~` / `$HOME` 由配置加载层展开；示例配置不要写入个人机器真实绝对路径。
 - 可选 `restart_command` 覆盖 `/restart` 行为；前台/systemd 等受管模式必须配置，避免误拉后台实例。可选 `message_reaction` 控制是否提示 agent 可对消息添加 reaction。
+- Unix 和 Windows 上，所有真正运行 Bridge 的入口都必须在启动 `bridge.Service` 前获取按配置文件路径区分的进程级独占锁；同一配置只允许运行一个实例，不同配置可通过 `run` 或各自的进程管理器并行。Unix 使用 `flock`，锁文件保留且内容仅用于记录 PID，不能依赖文件是否存在判断运行状态，也不要在释放锁时删除文件。其他平台保持前台运行能力，不承诺跨进程单实例。内置 daemon 的 pid/log 继续使用配置目录下的旧版固定名称以兼容升级，不支持同目录多配置并行管理。
 
 ## 运行与构建
 

@@ -210,7 +210,12 @@ go run ./cmd/lark-acp-bridge
 ```text
 ~/.lark-acp-bridge/lark-acp-bridge.pid
 ~/.lark-acp-bridge/lark-acp-bridge.log
+~/.lark-acp-bridge/config.json.lock
 ```
+
+Unix 和 Windows 上，所有真正运行 Bridge 的入口都会按展开后的配置文件路径获取进程级独占锁，包括前台 `run`、内置后台 daemon、systemd 和 launchd。同一配置文件同一时间只能运行一个实例；重复启动会立即退出，并在错误中显示已有实例 PID。不同配置文件使用不同锁，可以通过 `run` 或各自的进程管理器分别运行。`.lock` 文件会保留在磁盘上，是否有实例运行以内核锁为准，不要根据文件是否存在判断服务状态。其他平台保持原有前台运行能力，但当前不提供跨进程单实例保证。
+
+内置 daemon 对同一目录下的配置共用上述 `lark-acp-bridge.pid/.log`，以兼容旧版本运行文件；需要在同一目录并行运行不同配置时，应使用 `run` 和独立的 systemd/launchd 服务，而不是内置 daemon。
 
 可用子命令：
 

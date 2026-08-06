@@ -498,6 +498,13 @@ func vcsVersion(settings []debug.BuildSetting) (string, bool) {
 }
 
 func runForeground(cfg config.Config, configPath string) error {
+	unlock, err := acquireInstanceLock(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "启动失败, err=%v\n", err)
+		return err
+	}
+	defer unlock()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

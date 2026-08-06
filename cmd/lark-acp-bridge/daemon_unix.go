@@ -81,6 +81,12 @@ func startDaemon(configPath string) error {
 	if err := ensureRuntimeDir(configPath); err != nil {
 		return err
 	}
+	unlock, err := acquireInstanceLock(configPath)
+	if err != nil {
+		return err
+	}
+	unlock()
+
 	pidFile := daemonPIDFile(configPath)
 	if pid, running, err := readRunningPID(pidFile); err != nil {
 		return err
