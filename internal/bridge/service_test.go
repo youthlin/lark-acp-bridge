@@ -98,6 +98,8 @@ type fakeSentMessageClient struct {
 	overviewSender          func(context.Context, feishu.Message, feishu.OverviewCard) error
 	configDetailSender      func(context.Context, feishu.Message, feishu.ConfigDetailCard) error
 	driveCommentReplySender func(context.Context, feishu.DriveComment, string) error
+	traceChatCreator        func(context.Context, feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error)
+	traceBotNameProvider    func(context.Context) (string, error)
 	sent                    []string
 	msgs                    []feishu.Message
 	updates                 []string
@@ -223,6 +225,20 @@ func (f *fakeSentMessageClient) ReplyDriveComment(ctx context.Context, comment f
 		return nil
 	}
 	return f.driveCommentReplySender(ctx, comment, text)
+}
+
+func (f *fakeSentMessageClient) CreateDriveCommentTraceChat(ctx context.Context, req feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error) {
+	if f == nil || f.traceChatCreator == nil {
+		return feishu.CreatedChat{}, nil
+	}
+	return f.traceChatCreator(ctx, req)
+}
+
+func (f *fakeSentMessageClient) DriveCommentTraceBotName(ctx context.Context) (string, error) {
+	if f == nil || f.traceBotNameProvider == nil {
+		return "", nil
+	}
+	return f.traceBotNameProvider(ctx)
 }
 
 type fakeLoopStatusCard struct {
@@ -8294,6 +8310,72 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	}
 	if rt.promptCalls[0].Session.ACPSessionID != "acp-session-1" {
 		t.Fatalf("prompt session = %+v, want persisted acp session id", rt.promptCalls[0].Session)
+	}
+}
+
+func TestHandleFeishuMessageReplyToDriveCommentTraceCardUsesBoundSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "trace 群回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	workDir := t.TempDir()
+	commentKey := SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"}
+	if err := store.Upsert(Session{
+		Key:          commentKey,
+		AgentName:    "traex",
+		ACPSessionID: "acp-comment",
+		Cwd:          workDir,
+		Workspace:    workDir,
+	}); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	if _, err := store.BindMessageToSession(MessageSessionBinding{
+		BotID:      "bot-a",
+		ChatID:     "oc_trace",
+		MessageID:  "om_trace_card",
+		SessionKey: commentKey,
+	}); err != nil {
+		t.Fatalf("BindMessageToSession() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_followup_card")
+	var driveCommentReplies []string
+	client.driveCommentReplySender = func(ctx context.Context, comment feishu.DriveComment, text string) error {
+		driveCommentReplies = append(driveCommentReplies, text)
+		return nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:      "bot-a",
+		MessageID:  "om_followup",
+		ChatID:     "oc_trace",
+		ChatType:   "group",
+		RootID:     "om_trace_card",
+		ParentID:   "om_trace_card",
+		SenderID:   "ou_sender",
+		SenderType: "user",
+		MsgType:    "text",
+		Text:       "@智能助手 继续处理",
+		Mentions:   testBotMentions(),
+		Reply:      &feishu.ReplyContext{MessageID: "om_trace_card"},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(trace follow-up) error = %v", err)
+	}
+	if reply != "trace 群回复" {
+		t.Fatalf("reply = %q, want IM follow-up reply", reply)
+	}
+	if len(driveCommentReplies) != 0 {
+		t.Fatalf("drive comment replies = %+v, want none for trace chat follow-up", driveCommentReplies)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
+	}
+	if rt.promptCalls[0].Session.Key != commentKey || rt.promptCalls[0].Session.ACPSessionID != "acp-comment" {
+		t.Fatalf("prompt session = %+v, want bound drive comment session", rt.promptCalls[0].Session)
+	}
+	if strings.Contains(rt.promptCalls[0].Text, "@智能助手") || !strings.Contains(rt.promptCalls[0].Text, "继续处理") {
+		t.Fatalf("prompt text = %q, want stripped follow-up text", rt.promptCalls[0].Text)
 	}
 }
 

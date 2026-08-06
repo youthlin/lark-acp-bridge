@@ -19,7 +19,7 @@ func (s *Service) Start(ctx context.Context) error {
 	if len(s.registry.Names()) == 0 {
 		return fmt.Errorf("未配置 ACP agent")
 	}
-	for _, bot := range s.cfg.Bots {
+	for _, bot := range s.configBots() {
 		workspace := strings.TrimSpace(bot.Workspace)
 		if workspace == "" {
 			continue
@@ -46,11 +46,11 @@ func (s *Service) Start(ctx context.Context) error {
 		if err := adapter.Start(ctx); err != nil {
 			return err
 		}
-		if i < len(s.cfg.Bots) {
-			if s.syncResolvedBotConfig(i, adapter) {
-				configChanged = true
-			}
-			s.consumeRestartAckAsync(ctx, adapter, s.cfg.Bots[i])
+		if s.syncResolvedBotConfig(i, adapter) {
+			configChanged = true
+		}
+		if bot, ok := s.botConfigAt(i); ok {
+			s.consumeRestartAckAsync(ctx, adapter, bot)
 		}
 	}
 	if configChanged {
@@ -63,6 +63,8 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) syncResolvedBotConfig(i int, adapter *feishu.Adapter) bool {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if adapter == nil || i < 0 || i >= len(s.cfg.Bots) {
 		return false
 	}
@@ -86,6 +88,8 @@ func (s *Service) persistResolvedConfig(ctx context.Context) {
 	if strings.TrimSpace(s.configPath) == "" {
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	wrote, err := config.WriteResolvedBotFields(s.configPath, s.cfg.Bots)
 	if err != nil {
 		slog.WarnContext(ctx, "写回自动解析的飞书配置失败", "错误", err)
@@ -138,7 +142,7 @@ func (s *Service) executeRestartCommand(ctx context.Context) error {
 	if s.restartCommand != nil {
 		return s.restartCommand(ctx)
 	}
-	command := s.cfg.RestartCommand
+	command := s.configRestartCommand()
 	if len(command) == 0 {
 		if !s.builtinRestart {
 			return errBuiltinRestartUnavailable

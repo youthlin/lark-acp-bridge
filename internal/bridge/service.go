@@ -13,6 +13,7 @@ import (
 
 // Service 本项目核心服务
 type Service struct {
+	configMu       sync.RWMutex
 	cfg            config.Config     // 配置文件
 	configPath     string            // 配置文件路径，用于内置后台重启
 	version        string            // bridge 自身版本，用于 /update
@@ -172,11 +173,34 @@ func (s *Service) setRestartCommand(command func(context.Context) error) {
 	s.restartCommand = command
 }
 
+func (s *Service) configBots() []config.BotConfig {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	bots := make([]config.BotConfig, len(s.cfg.Bots))
+	for i, bot := range s.cfg.Bots {
+		bots[i] = cloneBotConfig(bot)
+	}
+	return bots
+}
+
+func (s *Service) configRestartCommand() []string {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return append([]string(nil), s.cfg.RestartCommand...)
+}
+
+func (s *Service) messageReactionEnabled() bool {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.cfg.MessageReaction
+}
+
 var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
 var _ feishu.ModeSelectionHandler = (*Service)(nil)
 var _ feishu.SessionSelectionHandler = (*Service)(nil)
 var _ feishu.OverviewActionHandler = (*Service)(nil)
+var _ feishu.DriveCommentCapabilityHandler = (*Service)(nil)
 
 const maxSessionHistoryPerChat = 10
 

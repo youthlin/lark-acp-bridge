@@ -9,7 +9,12 @@
       },
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
       "bot_open_id": "",
-      "owner_open_ids": []
+      "owner_open_ids": [],
+      "drive_comment": {
+        "enabled": false,
+        "trace_enabled": false,
+        "trace_chat_id": ""
+      }
     }
   ],
   "message_reaction": false,

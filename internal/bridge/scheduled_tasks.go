@@ -553,13 +553,11 @@ func (job *scheduledTaskJob) cancelActiveRuns(ctx context.Context, s *Service) {
 }
 
 func (s *Service) botWorkspace(botID string) string {
-	botID = strings.TrimSpace(botID)
-	for _, bot := range s.cfg.Bots {
-		if strings.TrimSpace(bot.ID) == botID {
-			return strings.TrimSpace(bot.Workspace)
-		}
+	bot, ok := s.botConfig(botID)
+	if !ok {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(bot.Workspace)
 }
 
 func (s *Service) scheduledTaskSink(task ScheduledTask) TriggerSink {

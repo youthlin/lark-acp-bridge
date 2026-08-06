@@ -55,6 +55,16 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name: "/drive_comment",
+		helpLines: []string{
+			"/drive_comment on|off|status - 管理当前 bot 的云文档评论监听处理（owner only）",
+			"/drive_comment trace on|off|new - 设置评论处理过程卡片目的地，trace new 会新建话题群",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleDriveCommentCommand(ctx, text, msg)
+		},
+	},
+	{
 		name: "/cmds",
 		helpLines: []string{
 			"/cmds - 查看 ACP server 支持的 slash commands",
@@ -265,6 +275,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/show"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/at"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/debug"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/drive_comment"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/update"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/status"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/restart"),
@@ -334,7 +345,7 @@ func (s *Service) handleRestartCommand(ctx context.Context, msg feishu.Message) 
 }
 
 func (s *Service) validateRestartCommand() error {
-	if s.restartCommand != nil || len(s.cfg.RestartCommand) > 0 || s.builtinRestart {
+	if s.restartCommand != nil || len(s.configRestartCommand()) > 0 || s.builtinRestart {
 		return nil
 	}
 	return errBuiltinRestartUnavailable
@@ -358,16 +369,11 @@ func (s *Service) slashCommandAllowed(msg feishu.Message) bool {
 }
 
 func (s *Service) ownerOpenIDs(botID string) []string {
-	botID = strings.TrimSpace(botID)
-	for _, bot := range s.cfg.Bots {
-		if strings.TrimSpace(bot.ID) == botID {
-			return bot.OwnerOpenIDs
-		}
+	bot, ok := s.botConfig(botID)
+	if !ok {
+		return nil
 	}
-	if len(s.cfg.Bots) == 1 {
-		return s.cfg.Bots[0].OwnerOpenIDs
-	}
-	return nil
+	return bot.OwnerOpenIDs
 }
 
 func commandRemainder(text string, skipFields int) string {

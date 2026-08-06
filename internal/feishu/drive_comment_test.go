@@ -51,6 +51,7 @@ type driveCommentRecordingHandler struct {
 	reply    string
 	errReply string
 	err      error
+	enabled  *bool
 }
 
 func (h *driveCommentRecordingHandler) HandleFeishuMessage(context.Context, Message) (string, error) {
@@ -84,6 +85,10 @@ func (h *driveCommentRecordingHandler) HandleDriveCommentWithOutbound(ctx contex
 		}
 	}
 	return h.err
+}
+
+func (h *driveCommentRecordingHandler) DriveCommentEnabled(string) bool {
+	return h.enabled == nil || *h.enabled
 }
 
 func TestParseDriveCommentExtractsNoticeFields(t *testing.T) {
@@ -178,6 +183,31 @@ func TestHandleDriveCommentAddContinuesWithoutRetryWhenDetailFails(t *testing.T)
 	}
 	if handler.count != 1 || handler.comment.ReplyText != "" {
 		t.Fatalf("handled comment = %+v count = %d, want unhydrated comment after detail failure", handler.comment, handler.count)
+	}
+}
+
+func TestHandleDriveCommentAddSkipsBeforeDetailAndDedupeWhenDisabled(t *testing.T) {
+	enabled := false
+	client := &fakeDriveCommentClient{}
+	handler := &driveCommentRecordingHandler{enabled: &enabled}
+	adapter := NewAdapter(config.BotConfig{ID: "bot-a", BotOpenID: "ou_bot"}, handler)
+	adapter.driveComments = client
+	adapter.deduper = newMessageDeduper(driveCommentDeduperTTL, driveCommentDeduperMax)
+	event := driveCommentEvent(true, "ou_user", "ou_bot", "reply-1")
+
+	if err := adapter.handleDriveCommentAdd(context.Background(), event); err != nil {
+		t.Fatalf("handleDriveCommentAdd(disabled) error = %v", err)
+	}
+	if handler.count != 0 || len(client.getCalls) != 0 {
+		t.Fatalf("disabled handler/get calls = %d/%d, want both zero", handler.count, len(client.getCalls))
+	}
+
+	enabled = true
+	if err := adapter.handleDriveCommentAdd(context.Background(), event); err != nil {
+		t.Fatalf("handleDriveCommentAdd(enabled) error = %v", err)
+	}
+	if handler.count != 1 || len(client.getCalls) != 1 {
+		t.Fatalf("enabled handler/get calls = %d/%d, want one each; disabled event must not consume dedupe state", handler.count, len(client.getCalls))
 	}
 }
 

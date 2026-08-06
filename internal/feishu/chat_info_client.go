@@ -42,3 +42,65 @@ func (c larkChatInfoClient) GetChatInfo(ctx context.Context, chatID string) (cha
 		GroupMessageType: value(resp.Data.GroupMessageType),
 	}, nil
 }
+
+func (a *Adapter) CreateDriveCommentTraceChat(ctx context.Context, request CreateDriveCommentTraceChatRequest) (CreatedChat, error) {
+	if a.client == nil {
+		return CreatedChat{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		return CreatedChat{}, fmt.Errorf("飞书群名称为空")
+	}
+	ownerID := strings.TrimSpace(request.OwnerOpenID)
+	if ownerID == "" {
+		return CreatedChat{}, fmt.Errorf("飞书群主 open_id 为空")
+	}
+	userIDs := normalizeOpenIDList(request.UserOpenIDs)
+	if len(userIDs) == 0 {
+		userIDs = []string{ownerID}
+	}
+	body := larkim.NewCreateChatReqBodyBuilder().
+		Name(name).
+		OwnerId(ownerID).
+		UserIdList(userIDs).
+		GroupMessageType(larkim.CreateChatGroupMessageTypeThread).
+		ChatMode("group").
+		ChatType("private").
+		Build()
+	resp, err := a.client.Im.V1.Chat.Create(ctx, larkim.NewCreateChatReqBuilder().
+		UserIdType(larkim.CreateChatUserIDTypeOpenId).
+		SetBotManager(true).
+		Body(body).
+		Build())
+	if err != nil {
+		return CreatedChat{}, fmt.Errorf("调用飞书创建话题群接口: %w", err)
+	}
+	if !resp.Success() {
+		return CreatedChat{}, fmt.Errorf("飞书创建话题群接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil {
+		return CreatedChat{}, fmt.Errorf("飞书创建话题群接口未返回数据")
+	}
+	return CreatedChat{
+		ChatID:           value(resp.Data.ChatId),
+		ChatType:         value(resp.Data.ChatType),
+		GroupMessageType: value(resp.Data.GroupMessageType),
+	}, nil
+}
+
+func normalizeOpenIDList(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}

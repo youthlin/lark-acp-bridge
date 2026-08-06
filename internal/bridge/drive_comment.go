@@ -20,6 +20,10 @@ func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveCo
 	if comment.BotID == "" {
 		return fmt.Errorf("云文档评论 bot_id 不能为空")
 	}
+	if !s.DriveCommentEnabled(comment.BotID) {
+		slog.InfoContext(ctx, "云文档评论处理未开启，忽略新评论", "bot", comment.BotID, "file_token", comment.FileToken, "comment_id", comment.CommentID)
+		return nil
+	}
 	if comment.FileToken == "" || comment.FileType == "" || comment.CommentID == "" {
 		return fmt.Errorf("云文档评论字段不完整")
 	}
@@ -96,7 +100,7 @@ func (s *Service) driveCommentTriggerRequest(comment feishu.DriveComment) (Trigg
 	if workspace == "" {
 		workspace = s.botWorkspace(comment.BotID)
 	}
-	return TriggerRequest{
+	req := TriggerRequest{
 		BotID:     comment.BotID,
 		Key:       driveCommentSessionKey(comment),
 		Workspace: workspace,
@@ -106,7 +110,34 @@ func (s *Service) driveCommentTriggerRequest(comment feishu.DriveComment) (Trigg
 		Prompt:    driveCommentPrompt(comment),
 		Metadata:  driveCommentMetadata(comment),
 		Sink:      noopTriggerSink{},
-	}, nil
+	}
+	if sink := s.driveCommentTraceSink(comment, cwd); sink != nil {
+		req.Sink = sink
+	}
+	return req, nil
+}
+
+func (s *Service) DriveCommentEnabled(botID string) bool {
+	bot, ok := s.botConfig(botID)
+	return ok && bot.DriveComment.Enabled
+}
+
+func (s *Service) driveCommentTraceSink(comment feishu.DriveComment, cwd string) TriggerSink {
+	bot, ok := s.botConfig(comment.BotID)
+	if !ok || !bot.DriveComment.TraceEnabled || strings.TrimSpace(bot.DriveComment.TraceChatID) == "" {
+		return nil
+	}
+	return &driveCommentTraceSink{
+		message: feishu.Message{
+			BotID:     comment.BotID,
+			ChatID:    strings.TrimSpace(bot.DriveComment.TraceChatID),
+			Workspace: strings.TrimSpace(comment.Workspace),
+		},
+		cwd:     cwd,
+		comment: comment.Normalized(),
+		store:   s.storeForBotID(comment.BotID),
+		starter: s.scheduleStreamStarter(comment.BotID),
+	}
 }
 
 func driveCommentSessionKey(comment feishu.DriveComment) SessionKey {

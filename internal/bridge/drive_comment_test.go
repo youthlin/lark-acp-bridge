@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -25,13 +26,55 @@ func (r *driveCommentReplyRecorder) ReplyDriveComment(ctx context.Context, comme
 	return nil
 }
 
-func TestDriveCommentSessionKeyAndPromptMetadata(t *testing.T) {
+func driveCommentEnabledBotConfig(workspace string) []config.BotConfig {
+	return []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		DriveComment: config.DriveCommentConfig{
+			Enabled: true,
+		},
+	}}
+}
+
+func TestDriveCommentDisabledByDefaultSkipsNewComment(t *testing.T) {
 	workspace := t.TempDir()
 	cwd := t.TempDir()
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
 		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+	}, store)
+	rt := &fakeRuntime{promptReply: "agent reply"}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	svc.setOutbound("bot-a", replies)
+
+	if err := svc.HandleDriveComment(context.Background(), feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "please handle",
+	}); err != nil {
+		t.Fatalf("HandleDriveComment() error = %v", err)
+	}
+	if len(rt.newCalls) != 0 || len(rt.promptCalls) != 0 {
+		t.Fatalf("runtime calls = %d/%d, want none when drive_comment disabled", len(rt.newCalls), len(rt.promptCalls))
+	}
+	if len(replies.texts) != 0 {
+		t.Fatalf("replies = %+v, want none when drive_comment disabled", replies.texts)
+	}
+}
+
+func TestDriveCommentSessionKeyAndPromptMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, store)
 	rt := &fakeRuntime{promptReply: "agent reply"}
 	svc.setRuntime(rt)
@@ -146,7 +189,7 @@ func TestDriveCommentReusesSameCommentSessionAndIsolatesDifferentComments(t *tes
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
-		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, store)
 	rt := &fakeRuntime{
 		newSessionIDs: []string{"acp-comment-1", "acp-comment-2"},
@@ -203,7 +246,7 @@ func TestDriveCommentMissingBodyRepliesWithoutTriggerPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
-		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, store)
 	rt := &fakeRuntime{promptReply: "agent reply"}
 	svc.setRuntime(rt)
@@ -234,13 +277,76 @@ func TestDriveCommentMissingBodyRepliesWithoutTriggerPrompt(t *testing.T) {
 	}
 }
 
+func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	bots := driveCommentEnabledBotConfig(workspace)
+	bots[0].DriveComment.TraceEnabled = true
+	bots[0].DriveComment.TraceChatID = "oc_trace"
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      bots,
+	}, store)
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{{Text: "agent reply", StopReason: "end_turn"}},
+		promptUpdates: []acp.PromptUpdate{{
+			Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Raw:           json.RawMessage(`{"content":"agent reply"}`),
+			},
+		}},
+	}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	var streamTargets []feishu.Message
+	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
+	outbound := &fakeSentMessageClient{}
+	outbound.driveCommentReplySender = replies.ReplyDriveComment
+	outbound.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		streamTargets = append(streamTargets, msg)
+		return streamCard, nil
+	}
+	svc.setOutbound("bot-a", outbound)
+
+	comment := feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "please handle",
+	}
+	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
+		t.Fatalf("HandleDriveComment() error = %v", err)
+	}
+	if len(streamTargets) != 1 || streamTargets[0].ChatID != "oc_trace" || streamTargets[0].MessageID != "" {
+		t.Fatalf("stream targets = %+v, want new card in trace chat", streamTargets)
+	}
+	if len(replies.texts) != 1 || replies.texts[0] != "agent reply" {
+		t.Fatalf("drive comment replies = %+v, want final reply still written to document comment", replies.texts)
+	}
+	if !streamCard.isClosed() {
+		t.Fatal("trace stream card was not closed")
+	}
+	if got := streamCard.finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "agent reply" {
+		t.Fatalf("final text updates = %+v, want agent reply", got)
+	}
+	session, binding, ok := store.SessionForMessage("bot-a", "oc_trace", "om_trace")
+	wantKey := driveCommentSessionKey(comment)
+	if !ok || binding.SessionKey != wantKey || session.Key != wantKey {
+		t.Fatalf("message binding ok=%v binding=%+v session=%+v, want trace message bound to drive comment session", ok, binding, session)
+	}
+}
+
 func TestDriveCommentUnmentionedUsesSilentAutoJudgement(t *testing.T) {
 	workspace := t.TempDir()
 	cwd := t.TempDir()
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
-		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, store)
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{
 		{Text: "Context compacted Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.SILENT"},
@@ -302,7 +408,7 @@ func TestDriveCommentRequiresDefaultCwd(t *testing.T) {
 	workspace := t.TempDir()
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
-		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, NewSessionStore(filepath.Join(workspace, "sessions.json")))
 	rt := &fakeRuntime{promptReply: "ok"}
 	svc.setRuntime(rt)
@@ -327,7 +433,7 @@ func TestDriveCommentRepliesErrorWhenTriggerFails(t *testing.T) {
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	svc := NewService(config.Config{
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
-		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
 	}, store)
 	rt := &fakeRuntime{
 		newSessionInfo: acp.SessionInfo{SessionID: "acp-comment-1"},

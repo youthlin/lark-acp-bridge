@@ -12,18 +12,40 @@ func (a *Adapter) resolveBotOpenID(ctx context.Context) {
 		a.cfg.BotOpenID = strings.TrimSpace(a.cfg.BotOpenID)
 		return
 	}
-	openID, err := a.applications.GetBotOpenID(ctx)
+	info, err := a.applications.GetBotInfo(ctx)
 	if err != nil {
 		slog.Warn("获取飞书机器人 open_id 失败，群聊 at 过滤需要手动配置 bot_open_id", "bot", a.cfg.ID, "err", err)
 		return
 	}
-	openID = strings.TrimSpace(openID)
+	openID := strings.TrimSpace(info.OpenID)
 	if openID == "" {
 		slog.Warn("飞书机器人 open_id 为空，群聊 at 过滤需要手动配置 bot_open_id", "bot", a.cfg.ID)
 		return
 	}
 	a.cfg.BotOpenID = openID
 	slog.Info("已解析飞书机器人 open_id", "bot", a.cfg.ID)
+}
+
+func (a *Adapter) DriveCommentTraceBotName(ctx context.Context) (string, error) {
+	if a == nil || a.applications == nil {
+		return "", nil
+	}
+	info, botErr := a.applications.GetBotInfo(ctx)
+	if botErr == nil {
+		if name := strings.TrimSpace(info.Name); name != "" {
+			return name, nil
+		}
+	} else {
+		slog.WarnContext(ctx, "获取飞书机器人名称失败，将继续尝试应用名称", "bot", a.cfg.ID, "err", botErr)
+	}
+	app, appErr := a.applications.GetApplication(ctx)
+	if appErr == nil {
+		return strings.TrimSpace(app.AppName), nil
+	}
+	if botErr != nil {
+		return "", fmt.Errorf("获取机器人信息: %w; 获取应用信息: %w", botErr, appErr)
+	}
+	return "", fmt.Errorf("获取应用信息: %w", appErr)
 }
 
 func (a *Adapter) resolveOwnerOpenIDs(ctx context.Context) {

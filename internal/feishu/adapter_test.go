@@ -138,6 +138,7 @@ type fakeApplicationClient struct {
 	collaborators        []applicationCollaborator
 	collaboratorsErr     error
 	botOpenID            string
+	botName              string
 	botOpenIDErr         error
 	appCalls             int
 	collaboratorGetCalls int
@@ -174,12 +175,52 @@ func (f *fakeApplicationClient) GetCollaborators(ctx context.Context) ([]applica
 	return f.collaborators, nil
 }
 
-func (f *fakeApplicationClient) GetBotOpenID(ctx context.Context) (string, error) {
+func (f *fakeApplicationClient) GetBotInfo(ctx context.Context) (BotInfo, error) {
 	f.botOpenIDCalls++
 	if f.botOpenIDErr != nil {
-		return "", f.botOpenIDErr
+		return BotInfo{}, f.botOpenIDErr
 	}
-	return f.botOpenID, nil
+	return BotInfo{OpenID: f.botOpenID, Name: f.botName}, nil
+}
+
+func TestParseBotInfoResponseUsesDisplayNameFallbacks(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want BotInfo
+	}{
+		{
+			name: "name",
+			raw:  `{"code":0,"bot":{"open_id":" ou_bot ","name":" 智能助手 "}}`,
+			want: BotInfo{OpenID: "ou_bot", Name: "智能助手"},
+		},
+		{
+			name: "display name",
+			raw:  `{"code":0,"bot":{"open_id":"ou_bot","display_name":"展示名","bot_name":"机器人名","app_name":"应用名"}}`,
+			want: BotInfo{OpenID: "ou_bot", Name: "展示名"},
+		},
+		{
+			name: "bot name",
+			raw:  `{"code":0,"bot":{"open_id":"ou_bot","bot_name":"机器人名","app_name":"应用名"}}`,
+			want: BotInfo{OpenID: "ou_bot", Name: "机器人名"},
+		},
+		{
+			name: "app name",
+			raw:  `{"code":0,"bot":{"open_id":"ou_bot","app_name":"应用名"}}`,
+			want: BotInfo{OpenID: "ou_bot", Name: "应用名"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBotInfoResponse([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("parseBotInfoResponse() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseBotInfoResponse() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestResolveBotOpenIDSkipsConfiguredValue(t *testing.T) {

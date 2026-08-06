@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -239,6 +240,121 @@ func TestResolveSecretsRejectsMissingFileSecret(t *testing.T) {
 	err := cfg.ResolveSecrets()
 	if err == nil || !strings.Contains(err.Error(), "读取 bot \"bot-a\" app_secret file secret") {
 		t.Fatalf("ResolveSecrets() error = %v, want missing file error", err)
+	}
+}
+
+func TestUpdateBotDriveCommentUpdatesOnlyDriveCommentField(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	raw := `{
+  "bots": [
+    {
+      "id": "bot-a",
+      "app_id": "cli_a",
+      "app_secret": {
+        "source": "file",
+        "path": "$HOME/.lark-acp-bridge/secrets/bot-a.appsecret"
+      },
+      "workspace": "$HOME/.lark-acp-bridge/bots/bot-a",
+      "owner_open_ids": ["ou_owner"]
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "args": ["acp", "serve"],
+      "default_cwd": "$HOME"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	updated, err := UpdateBotDriveComment(configPath, "bot-a", func(cfg *DriveCommentConfig) {
+		cfg.Enabled = true
+		cfg.TraceEnabled = true
+		cfg.TraceChatID = " oc_trace "
+	})
+	if err != nil {
+		t.Fatalf("UpdateBotDriveComment() error = %v", err)
+	}
+	if !updated.Enabled || !updated.TraceEnabled || updated.TraceChatID != "oc_trace" {
+		t.Fatalf("updated drive_comment = %+v, want normalized enabled trace", updated)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"path": "$HOME/.lark-acp-bridge/secrets/bot-a.appsecret"`,
+		`"workspace": "$HOME/.lark-acp-bridge/bots/bot-a"`,
+		`"trace_chat_id": "oc_trace"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config = %s, want preserved/updated field %s", text, want)
+		}
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Bots[0].DriveComment.Enabled || !cfg.Bots[0].DriveComment.TraceEnabled || cfg.Bots[0].DriveComment.TraceChatID != "oc_trace" {
+		t.Fatalf("loaded drive_comment = %+v, want updated config", cfg.Bots[0].DriveComment)
+	}
+}
+
+func TestUpdateBotDriveCommentSerializesConcurrentReadModifyWrite(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := Write(configPath, Config{Bots: []BotConfig{{
+		ID:        "bot-a",
+		AppID:     "cli_a",
+		AppSecret: FileSecret("secret.appsecret"),
+		Workspace: t.TempDir(),
+	}}}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		if _, err := UpdateBotDriveComment(configPath, "bot-a", func(cfg *DriveCommentConfig) {
+			cfg.Enabled = true
+		}); err != nil {
+			t.Errorf("UpdateBotDriveComment(enabled) error = %v", err)
+		}
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		if _, err := UpdateBotDriveComment(configPath, "bot-a", func(cfg *DriveCommentConfig) {
+			cfg.TraceEnabled = true
+			cfg.TraceChatID = "oc_trace"
+		}); err != nil {
+			t.Errorf("UpdateBotDriveComment(trace) error = %v", err)
+		}
+	}()
+	close(start)
+	wait.Wait()
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got := loaded.Bots[0].DriveComment
+	if !got.Enabled || !got.TraceEnabled || got.TraceChatID != "oc_trace" {
+		t.Fatalf("drive_comment = %+v, want both concurrent updates preserved", got)
 	}
 }
 
@@ -1105,8 +1221,12 @@ func TestWriteCleansTemporaryFileWhenAtomicReplaceFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Write() error = nil, want replace failure")
 	}
-	if _, statErr := os.Stat(path + ".tmp"); !os.IsNotExist(statErr) {
-		t.Fatalf("temporary config file still exists or stat failed: %v", statErr)
+	matches, globErr := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*"))
+	if globErr != nil {
+		t.Fatalf("Glob() error = %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary config files still exist: %v", matches)
 	}
 }
 

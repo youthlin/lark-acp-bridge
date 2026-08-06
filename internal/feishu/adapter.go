@@ -39,6 +39,10 @@ type DriveCommentHandler interface {
 	HandleDriveComment(context.Context, DriveComment) error
 }
 
+type DriveCommentCapabilityHandler interface {
+	DriveCommentEnabled(botID string) bool
+}
+
 type Adapter struct {
 	cfg             config.BotConfig        // Bot配置
 	handler         Handler                 // 消息处理
@@ -74,7 +78,7 @@ type chatInfoClient interface {
 type applicationClient interface {
 	GetApplication(ctx context.Context) (applicationOwnerCandidates, error)
 	GetCollaborators(ctx context.Context) ([]applicationCollaborator, error)
-	GetBotOpenID(ctx context.Context) (string, error)
+	GetBotInfo(ctx context.Context) (BotInfo, error)
 }
 
 type driveCommentClient interface {
@@ -82,9 +86,15 @@ type driveCommentClient interface {
 	ReplyComment(ctx context.Context, comment DriveComment, text string) error
 }
 
+type BotInfo struct {
+	OpenID string
+	Name   string
+}
+
 type applicationOwnerCandidates struct {
 	CreatorID string
 	OwnerID   string
+	AppName   string
 }
 
 type applicationCollaborator struct {
@@ -95,6 +105,18 @@ type applicationCollaborator struct {
 type chatInfo struct {
 	Name             string
 	ChatMode         string
+	ChatType         string
+	GroupMessageType string
+}
+
+type CreateDriveCommentTraceChatRequest struct {
+	Name        string
+	OwnerOpenID string
+	UserOpenIDs []string
+}
+
+type CreatedChat struct {
+	ChatID           string
 	ChatType         string
 	GroupMessageType string
 }

@@ -162,6 +162,10 @@ func (a *Adapter) handleDriveCommentAdd(ctx context.Context, event *larkdrive.P2
 		slog.InfoContext(ctx, "跳过 bot 自己触发的云文档评论事件")
 		return nil
 	}
+	if capability, ok := a.handler.(DriveCommentCapabilityHandler); ok && !capability.DriveCommentEnabled(comment.BotID) {
+		slog.InfoContext(ctx, "云文档评论处理未开启，跳过详情读取和去重")
+		return nil
+	}
 	if a.deduper != nil {
 		allowed, err := a.deduper.Allow(comment.BotID, driveCommentDedupeID(comment))
 		if err != nil {

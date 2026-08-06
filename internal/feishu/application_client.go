@@ -31,7 +31,10 @@ func (c larkApplicationClient) GetApplication(ctx context.Context) (applicationO
 		return applicationOwnerCandidates{}, nil
 	}
 	app := resp.Data.App
-	out := applicationOwnerCandidates{CreatorID: value(app.CreatorId)}
+	out := applicationOwnerCandidates{
+		CreatorID: value(app.CreatorId),
+		AppName:   value(app.AppName),
+	}
 	if app.Owner != nil {
 		out.OwnerID = value(app.Owner.OwnerId)
 	}
@@ -65,29 +68,44 @@ func (c larkApplicationClient) GetCollaborators(ctx context.Context) ([]applicat
 	return out, nil
 }
 
-func (c larkApplicationClient) GetBotOpenID(ctx context.Context) (string, error) {
+func (c larkApplicationClient) GetBotInfo(ctx context.Context) (BotInfo, error) {
 	resp, err := c.client.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
-		return "", fmt.Errorf("调用飞书获取机器人信息接口: %w", err)
+		return BotInfo{}, fmt.Errorf("调用飞书获取机器人信息接口: %w", err)
 	}
 	if resp == nil {
-		return "", fmt.Errorf("飞书获取机器人信息接口返回为空")
+		return BotInfo{}, fmt.Errorf("飞书获取机器人信息接口返回为空")
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("飞书获取机器人信息接口 HTTP 状态异常: %d", resp.StatusCode)
+		return BotInfo{}, fmt.Errorf("飞书获取机器人信息接口 HTTP 状态异常: %d", resp.StatusCode)
 	}
+	info, err := parseBotInfoResponse(resp.RawBody)
+	if err != nil {
+		return BotInfo{}, fmt.Errorf("解析飞书机器人信息接口响应: %w", err)
+	}
+	return info, nil
+}
+
+func parseBotInfoResponse(raw []byte) (BotInfo, error) {
 	var result struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Bot  struct {
-			OpenID string `json:"open_id"`
+			OpenID      string `json:"open_id"`
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			BotName     string `json:"bot_name"`
+			AppName     string `json:"app_name"`
 		} `json:"bot"`
 	}
-	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
-		return "", fmt.Errorf("解析飞书机器人信息接口响应: %w", err)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return BotInfo{}, err
 	}
 	if result.Code != 0 {
-		return "", fmt.Errorf("飞书获取机器人信息接口返回错误: code=%d msg=%s", result.Code, result.Msg)
+		return BotInfo{}, fmt.Errorf("飞书获取机器人信息接口返回错误: code=%d msg=%s", result.Code, result.Msg)
 	}
-	return strings.TrimSpace(result.Bot.OpenID), nil
+	return BotInfo{
+		OpenID: strings.TrimSpace(result.Bot.OpenID),
+		Name:   strings.TrimSpace(firstNonEmpty(result.Bot.Name, result.Bot.DisplayName, result.Bot.BotName, result.Bot.AppName)),
+	}, nil
 }

@@ -524,13 +524,11 @@ func stripCurrentBotMentionNames(text string, msg feishu.Message) string {
 }
 
 func (s *Service) botOpenID(botID string) string {
-	botID = strings.TrimSpace(botID)
-	for _, bot := range s.cfg.Bots {
-		if strings.TrimSpace(bot.ID) == botID {
-			return strings.TrimSpace(bot.BotOpenID)
-		}
+	bot, ok := s.botConfig(botID)
+	if !ok {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(bot.BotOpenID)
 }
 
 func messageIsGroupChat(msg feishu.Message) bool {

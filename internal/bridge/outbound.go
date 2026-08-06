@@ -70,6 +70,14 @@ type driveCommentReplier interface {
 	ReplyDriveComment(context.Context, feishu.DriveComment, string) error
 }
 
+type driveCommentTraceChatCreator interface {
+	CreateDriveCommentTraceChat(context.Context, feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error)
+}
+
+type driveCommentTraceBotNameProvider interface {
+	DriveCommentTraceBotName(context.Context) (string, error)
+}
+
 func (s *Service) HandleFeishuMessageWithOutbound(ctx context.Context, msg feishu.Message, outbound feishu.Outbound) (string, error) {
 	s.setOutbound(msg.BotID, outbound)
 	return s.HandleFeishuMessage(ctx, msg)
@@ -195,6 +203,24 @@ func (s *Service) replyDriveCommentWithOutbound(ctx context.Context, comment fei
 		return false, nil
 	}
 	return true, replier.ReplyDriveComment(ctx, comment, text)
+}
+
+func (s *Service) createDriveCommentTraceChat(ctx context.Context, msg feishu.Message, req feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, bool, error) {
+	creator, ok := s.outboundForBot(msg.BotID).(driveCommentTraceChatCreator)
+	if !ok || creator == nil {
+		return feishu.CreatedChat{}, false, nil
+	}
+	chat, err := creator.CreateDriveCommentTraceChat(ctx, req)
+	return chat, true, err
+}
+
+func (s *Service) driveCommentTraceBotName(ctx context.Context, botID string) (string, bool, error) {
+	provider, ok := s.outboundForBot(botID).(driveCommentTraceBotNameProvider)
+	if !ok || provider == nil {
+		return "", false, nil
+	}
+	name, err := provider.DriveCommentTraceBotName(ctx)
+	return strings.TrimSpace(name), true, err
 }
 
 func (s *Service) mustSendIntermediateReply(ctx context.Context, msg feishu.Message, text string, missingLog string) error {
