@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
+	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
 func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
@@ -95,6 +98,157 @@ func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T)
 	r.mu.Unlock()
 	if markerExists {
 		t.Fatal("CloseSession() left runtime session marker")
+	}
+}
+
+func TestRuntimeCloseIdleRuntimeSlotsClosesInactiveClient(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.idleTimeout = 30 * time.Minute
+	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	r.slots[key] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "session-1",
+		lastUsed:  base.Add(-31 * time.Minute),
+	}
+
+	if err := r.closeIdleRuntimeSlots(nil); err != nil {
+		t.Fatalf("closeIdleRuntimeSlots() error = %v", err)
+	}
+	if _, ok := r.slots[key]; ok {
+		t.Fatal("closeIdleRuntimeSlots() left inactive idle runtime slot")
+	}
+}
+
+func TestRuntimeCloseIdleRuntimeSlotsKeepsActiveClient(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.idleTimeout = 30 * time.Minute
+	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	client := &acp.Client{}
+	r.slots[key] = runtimeClientSlot{
+		client:    client,
+		sessionID: "session-1",
+		lastUsed:  base.Add(-31 * time.Minute),
+	}
+
+	acquired, release, ok := r.acquireCachedClientForSession(key, "session-1")
+	if !ok || acquired != client {
+		t.Fatalf("acquireCachedClientForSession() = %v, %v; want active client", acquired, ok)
+	}
+	if err := r.closeIdleRuntimeSlots(nil); err != nil {
+		t.Fatalf("closeIdleRuntimeSlots(active) error = %v", err)
+	}
+	if _, ok := r.slots[key]; !ok {
+		t.Fatal("closeIdleRuntimeSlots() closed active runtime slot")
+	}
+
+	release()
+	r.now = func() time.Time { return base.Add(32 * time.Minute) }
+	if err := r.closeIdleRuntimeSlots(nil); err != nil {
+		t.Fatalf("closeIdleRuntimeSlots(released) error = %v", err)
+	}
+	if _, ok := r.slots[key]; ok {
+		t.Fatal("closeIdleRuntimeSlots() kept released idle runtime slot")
+	}
+}
+
+func TestRuntimeCloseIdleRuntimeSlotsKeepsBusyClient(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.idleTimeout = 30 * time.Minute
+	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	r.slots[key] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "session-1",
+		lastUsed:  base.Add(-31 * time.Minute),
+	}
+
+	if err := r.closeIdleRuntimeSlots(func(runtime runtimeKey) bool {
+		return runtime == key
+	}); err != nil {
+		t.Fatalf("closeIdleRuntimeSlots(busy) error = %v", err)
+	}
+	if _, ok := r.slots[key]; !ok {
+		t.Fatal("closeIdleRuntimeSlots() closed busy runtime slot")
+	}
+}
+
+func TestRuntimeClientForRuntimeSessionSingleflightsConcurrentBuilds(t *testing.T) {
+	r := newRuntimeManager()
+	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	session := Session{Key: key.SessionKey, ACPSessionID: "session-1", Cwd: "/repo"}
+	var starts atomic.Int32
+	var startedOnce sync.Once
+	started := make(chan struct{})
+	releaseStart := make(chan struct{})
+	r.startAndResumeClientFunc = func(ctx context.Context, got Session, agent config.AgentConfig) (*acp.Client, acp.SessionInfo, error) {
+		starts.Add(1)
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-releaseStart:
+		case <-ctx.Done():
+			return nil, acp.SessionInfo{}, ctx.Err()
+		}
+		if got.ACPSessionID != session.ACPSessionID {
+			t.Errorf("startAndResumeClientFunc session = %+v, want %s", got, session.ACPSessionID)
+		}
+		return &acp.Client{}, acp.SessionInfo{SessionID: got.ACPSessionID}, nil
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client, release, err := r.clientForRuntimeSession(context.Background(), key, session, config.AgentConfig{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if client == nil {
+				errs <- errors.New("clientForRuntimeSession returned nil client")
+				return
+			}
+			release()
+		}()
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("client build did not start")
+	}
+	deadline := time.After(100 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			close(releaseStart)
+			wg.Wait()
+			close(errs)
+			if starts.Load() != 1 {
+				t.Fatalf("startAndResumeClientFunc called %d times, want 1", starts.Load())
+			}
+			for err := range errs {
+				if err != nil {
+					t.Fatalf("clientForRuntimeSession() error = %v", err)
+				}
+			}
+			return
+		case <-ticker.C:
+			if starts.Load() > 1 {
+				close(releaseStart)
+				wg.Wait()
+				t.Fatalf("startAndResumeClientFunc called %d times while first build was still running, want 1", starts.Load())
+			}
+		}
 	}
 }
 

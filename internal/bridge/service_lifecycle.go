@@ -59,6 +59,9 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.loadAndStartScheduledTasks(ctx); err != nil {
 		return err
 	}
+	if runtime, ok := s.runtime.(*runtimeManager); ok {
+		runtime.startIdleCleaner(ctx, s.runtimeKeyBusy)
+	}
 	return nil
 }
 
@@ -102,6 +105,9 @@ func (s *Service) persistResolvedConfig(ctx context.Context) {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	slog.Info("关闭 ACP 桥接服务")
+	if runtime, ok := s.runtime.(*runtimeManager); ok {
+		runtime.stopIdleCleaner()
+	}
 	s.stopScheduledTasks()
 	s.cancelAllSessionWork(ctx)
 	waitCtx, cancel := context.WithTimeout(ctx, shutdownBackgroundWait)

@@ -286,6 +286,19 @@ func (s *Service) hasWorkspaceTaskLocked(key SessionKey, workspace string) bool 
 	return s.workspaceLocks.busy(key, workspace, s.tasks, s.wikiTasks)
 }
 
+func (s *Service) runtimeKeyBusy(key runtimeKey) bool {
+	key = normalizeRuntimeKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if _, ok := s.wikiTasks[key]; ok {
+		return true
+	}
+	if key.Scope == runtimeScopeWiki {
+		return false
+	}
+	return s.tasks[normalizeSessionKey(key.SessionKey)] != nil
+}
+
 func (s *Service) workspaceForSessionTask(session Session) string {
 	if workspace := strings.TrimSpace(session.Workspace); workspace != "" {
 		return workspace

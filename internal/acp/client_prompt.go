@@ -88,6 +88,9 @@ func (c *Client) SubscribeUpdates(handler UpdateHandler) func() {
 	}
 	id := c.nextHandlerID.Add(1)
 	c.updateMu.Lock()
+	if c.updateHandlers == nil {
+		c.updateHandlers = make(map[int64]UpdateHandler)
+	}
 	c.updateHandlers[id] = handler
 	c.updateMu.Unlock()
 	return func() {
