@@ -14,14 +14,15 @@ import (
 )
 
 const (
-	streamCardProcessPanelID   = "panel_process"
-	streamCardProcessElementID = "md_process"
-	streamCardUsagePanelID     = "panel_usage_detail"
-	streamCardUsageDetailID    = "md_usage_detail"
-	streamCardStatusElementID  = "md_status"
-	streamCardTextElementID    = "md_stream"
-	streamCardSourceElementID  = "md_source"
-	streamCardFooterElementID  = "md_footer"
+	streamCardProcessPanelID    = "panel_process"
+	streamCardProcessElementID  = "md_process"
+	streamCardUsagePanelID      = "panel_usage_detail"
+	streamCardUsageDetailID     = "md_usage_detail"
+	streamCardStatusElementID   = "md_status"
+	streamCardTextElementID     = "md_stream"
+	streamCardMetadataElementID = "md_metadata"
+	streamCardSourceElementID   = "md_source"
+	streamCardFooterElementID   = "md_footer"
 )
 
 const (
@@ -54,6 +55,9 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 	meta = normalizeStreamCardMeta(meta)
 	if meta.SourceURL != "" {
 		elements = append([]any{streamCardSourceLink(meta.SourceURL)}, elements...)
+	}
+	if meta.Metadata != "" {
+		elements = append([]any{streamCardMetadata(meta.Metadata)}, elements...)
 	}
 	if includeProcessPanel {
 		elements = append(elements, streamCardProcessPanelWithContent(process))
@@ -156,6 +160,16 @@ func streamCardSourceLink(url string) cardJSON {
 	}
 }
 
+func streamCardMetadata(content string) cardJSON {
+	return cardJSON{
+		"tag":              "markdown",
+		"content":          content,
+		"element_id":       streamCardMetadataElementID,
+		"text_size":        "notation",
+		"vertical_spacing": "4px",
+	}
+}
+
 func streamCardFooter(content string) cardJSON {
 	return cardJSON{
 		"tag":              "markdown",
@@ -190,6 +204,7 @@ func streamCardUsagePanel(content string) cardJSON {
 func normalizeStreamCardMeta(meta StreamCardMeta) StreamCardMeta {
 	meta.Title = strings.TrimSpace(meta.Title)
 	meta.Subtitle = strings.TrimSpace(meta.Subtitle)
+	meta.Metadata = strings.TrimSpace(meta.Metadata)
 	meta.SourceURL = strings.TrimSpace(meta.SourceURL)
 	meta.Footer = strings.TrimSpace(meta.Footer)
 	return meta
@@ -202,7 +217,9 @@ func streamCardHeader(meta StreamCardMeta) cardJSON {
 	}
 	header := cardJSON{
 		"template": "blue",
-		"icon":     cardJSON{"tag": "standard_icon", "token": "time_colorful"},
+	}
+	if !meta.HideHeaderIcon {
+		header["icon"] = cardJSON{"tag": "standard_icon", "token": "time_colorful"}
 	}
 	if meta.Title != "" {
 		header["title"] = cardJSON{"tag": "plain_text", "content": meta.Title}

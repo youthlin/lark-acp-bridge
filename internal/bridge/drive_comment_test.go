@@ -319,6 +319,7 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 		CommentID:   "comment-1",
 		IsMentioned: true,
 		CommentText: "please handle",
+		Quote:       "quoted document text",
 		DocumentURL: "https://feishu.cn/docx/doc-token",
 	}
 	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
@@ -327,12 +328,13 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	if len(streamTargets) != 1 || streamTargets[0].ChatID != "oc_trace" || streamTargets[0].MessageID != "" {
 		t.Fatalf("stream targets = %+v, want new card in trace chat", streamTargets)
 	}
-	if len(streamMetas) != 1 || streamMetas[0].Subtitle != "" || streamMetas[0].SourceURL != comment.DocumentURL || streamMetas[0].Footer != driveCommentStreamCardFooter {
-		t.Fatalf("stream metas = %+v, want no subtitle, document source URL %q and expected footer", streamMetas, comment.DocumentURL)
+	wantMetadata := "**引用文本：**quoted document text\n**评论内容：**please handle\n**文档链接：**https://feishu.cn/docx/doc-token"
+	if len(streamMetas) != 1 || streamMetas[0].Subtitle != "" || streamMetas[0].Metadata != wantMetadata || streamMetas[0].SourceURL != "" || streamMetas[0].Footer != driveCommentStreamCardFooter || !streamMetas[0].HideHeaderIcon {
+		t.Fatalf("stream metas = %+v, want comment metadata %q and expected footer", streamMetas, wantMetadata)
 	}
 	metaUpdates := streamCard.metaUpdatesSnapshot()
-	if len(metaUpdates) != 1 || metaUpdates[0].Subtitle != "" || metaUpdates[0].SourceURL != comment.DocumentURL || metaUpdates[0].Footer != driveCommentStreamCardFooter {
-		t.Fatalf("stream meta updates = %+v, want no subtitle, document source URL %q and expected footer", metaUpdates, comment.DocumentURL)
+	if len(metaUpdates) != 1 || metaUpdates[0].Subtitle != "" || metaUpdates[0].Metadata != wantMetadata || metaUpdates[0].SourceURL != "" || metaUpdates[0].Footer != driveCommentStreamCardFooter || !metaUpdates[0].HideHeaderIcon {
+		t.Fatalf("stream meta updates = %+v, want comment metadata %q and expected footer", metaUpdates, wantMetadata)
 	}
 	if len(replies.texts) != 1 || replies.texts[0] != "agent reply" {
 		t.Fatalf("drive comment replies = %+v, want final reply still written to document comment", replies.texts)
@@ -347,6 +349,39 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	wantKey := driveCommentSessionKey(comment)
 	if !ok || binding.SessionKey != wantKey || session.Key != wantKey {
 		t.Fatalf("message binding ok=%v binding=%+v session=%+v, want trace message bound to drive comment session", ok, binding, session)
+	}
+}
+
+func TestDriveCommentStreamCardMetadataUsesCurrentReplyAndOmitsUnavailableFields(t *testing.T) {
+	comment := feishu.DriveComment{
+		CommentText: "root comment",
+		ReplyText:   "current reply",
+		DocumentURL: "https://feishu.cn/docx/doc-token",
+	}
+
+	got := driveCommentStreamCardMetadata(comment)
+	want := "**评论内容：**current reply\n**文档链接：**https://feishu.cn/docx/doc-token"
+	if got != want {
+		t.Fatalf("driveCommentStreamCardMetadata() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "引用文本：") || strings.Contains(got, "评论者：") || strings.Contains(got, "[查看原文]") {
+		t.Fatalf("driveCommentStreamCardMetadata() = %q, want unavailable fields and markdown source link omitted", got)
+	}
+}
+
+func TestDriveCommentStreamCardMetadataTruncatesQuoteAndCommentByRunes(t *testing.T) {
+	comment := feishu.DriveComment{
+		Quote:       strings.Repeat("引", driveCommentQuoteMaxRunes+1),
+		CommentText: strings.Repeat("评", driveCommentTextMaxRunes+1),
+		DocumentURL: "https://feishu.cn/docx/doc-token",
+	}
+
+	got := driveCommentStreamCardMetadata(comment)
+	want := "**引用文本：**" + strings.Repeat("引", driveCommentQuoteMaxRunes) + "...\n" +
+		"**评论内容：**" + strings.Repeat("评", driveCommentTextMaxRunes) + "...\n" +
+		"**文档链接：**https://feishu.cn/docx/doc-token"
+	if got != want {
+		t.Fatalf("driveCommentStreamCardMetadata() = %q, want %q", got, want)
 	}
 }
 

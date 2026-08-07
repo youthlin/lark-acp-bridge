@@ -13,6 +13,8 @@ const (
 	driveCommentStreamCardCompleted = "云文档评论处理完成"
 	driveCommentStreamCardResult    = "云文档评论处理结果"
 	driveCommentStreamCardFooter    = "本卡片展示实时执行过程，最终结果将回复原评论；直接回复本消息仅在群内继续对话，不会写回评论。"
+	driveCommentQuoteMaxRunes       = 30
+	driveCommentTextMaxRunes        = 100
 )
 
 type driveCommentTraceSink struct {
@@ -132,10 +134,26 @@ func (s *driveCommentTraceSink) streamCardMeta() feishu.StreamCardMeta {
 
 func (s *driveCommentTraceSink) streamCardMetaWithTitle(title string) feishu.StreamCardMeta {
 	return feishu.StreamCardMeta{
-		Title:     title,
-		SourceURL: strings.TrimSpace(s.comment.DocumentURL),
-		Footer:    driveCommentStreamCardFooter,
+		Title:          title,
+		Metadata:       driveCommentStreamCardMetadata(s.comment),
+		Footer:         driveCommentStreamCardFooter,
+		HideHeaderIcon: true,
 	}
+}
+
+func driveCommentStreamCardMetadata(comment feishu.DriveComment) string {
+	comment = comment.Normalized()
+	lines := make([]string, 0, 3)
+	if comment.Quote != "" {
+		lines = append(lines, "**引用文本：**"+truncateRunes(comment.Quote, driveCommentQuoteMaxRunes))
+	}
+	if text := driveCommentUserText(comment); text != "" {
+		lines = append(lines, "**评论内容：**"+truncateRunes(text, driveCommentTextMaxRunes))
+	}
+	if comment.DocumentURL != "" {
+		lines = append(lines, "**文档链接：**"+comment.DocumentURL)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *driveCommentTraceSink) bindStreamMessage(ctx context.Context, result TriggerResult, sent feishu.SentMessage) {

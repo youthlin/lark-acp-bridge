@@ -108,6 +108,7 @@ func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
 	data := newStreamCardJSONFromState("", "", streamCardInitialStatus, "", true, true, false, true, StreamCardMeta{
 		Title:     "定时任务执行结果",
 		Subtitle:  "task-id: daily",
+		Metadata:  "**引用文本：**原文\n**评论内容：**请处理\n**文档链接：**https://feishu.cn/docx/doc-token",
 		SourceURL: "https://feishu.cn/docx/doc-token",
 		Footer:    "本消息的回复链将在本次执行会话中处理。",
 	})
@@ -115,20 +116,40 @@ func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
 		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"定时任务执行结果", "task-id: daily", "📄 [查看原文](https://feishu.cn/docx/doc-token)", streamCardSourceElementID, "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
+	for _, want := range []string{"定时任务执行结果", "task-id: daily", "**引用文本：**原文\n**评论内容：**请处理\n**文档链接：**https://feishu.cn/docx/doc-token", streamCardMetadataElementID, "📄 [查看原文](https://feishu.cn/docx/doc-token)", streamCardSourceElementID, "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
 		if !jsonContainsValue(card, want) {
 			t.Fatalf("stream card meta JSON does not contain %q: %#v", want, card)
 		}
 	}
 	body, _ := card.(map[string]any)["body"].(map[string]any)
 	elements, _ := body["elements"].([]any)
-	if len(elements) < 2 {
-		t.Fatalf("stream card elements = %#v, want source link before stream text", elements)
+	if len(elements) < 3 {
+		t.Fatalf("stream card elements = %#v, want metadata and source link before stream text", elements)
 	}
-	source, _ := elements[0].(map[string]any)
-	stream, _ := elements[1].(map[string]any)
-	if source["element_id"] != streamCardSourceElementID || stream["element_id"] != streamCardTextElementID {
-		t.Fatalf("stream card elements = %#v, want source link before stream text", elements)
+	metadata, _ := elements[0].(map[string]any)
+	source, _ := elements[1].(map[string]any)
+	stream, _ := elements[2].(map[string]any)
+	if metadata["element_id"] != streamCardMetadataElementID || source["element_id"] != streamCardSourceElementID || stream["element_id"] != streamCardTextElementID {
+		t.Fatalf("stream card elements = %#v, want metadata and source link before stream text", elements)
+	}
+}
+
+func TestNewStreamCardJSONCanHideHeaderIcon(t *testing.T) {
+	var card map[string]any
+	data := newStreamCardJSONFromState("", "", streamCardInitialStatus, "", true, true, false, true, StreamCardMeta{
+		Title:          "云文档评论处理中",
+		HideHeaderIcon: true,
+	})
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
+	}
+
+	header, _ := card["header"].(map[string]any)
+	if header["template"] != "blue" {
+		t.Fatalf("stream card header = %#v, want blue template", header)
+	}
+	if _, ok := header["icon"]; ok {
+		t.Fatalf("stream card header = %#v, want icon omitted", header)
 	}
 }
 
