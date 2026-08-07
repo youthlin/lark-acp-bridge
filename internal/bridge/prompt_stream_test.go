@@ -348,6 +348,22 @@ func TestToolProgressWithoutIdFallsBackToTitle(t *testing.T) {
 	}
 }
 
+func TestToolProgressEscapesMarkdownInTitle(t *testing.T) {
+	s := &promptCardStream{showTools: true}
+	s.applyToolProgressLineLocked(toolProgressRunning, "call-search", "Search *.go")
+	s.applyToolProgressLineLocked(toolProgressCompleted, "call-search", "")
+
+	if len(s.process) != 1 {
+		t.Fatalf("process lines = %d, want 1: %v", len(s.process), s.process)
+	}
+	if got, want := s.process[0], `✅ Search \*.go`; got != want {
+		t.Fatalf("process line = %q, want escaped markdown title %q", got, want)
+	}
+	if len(s.tools) != 1 || s.tools[0].title != "Search *.go" || s.tools[0].active {
+		t.Fatalf("tool rows = %+v, want raw title retained for matching and row completed", s.tools)
+	}
+}
+
 func TestToolProgressWithoutTitleUsesPlaceholderOnce(t *testing.T) {
 	s := &promptCardStream{showTools: true}
 	s.applyToolProgressLineLocked(toolProgressRunning, "call-x", "")

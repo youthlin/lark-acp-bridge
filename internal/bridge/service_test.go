@@ -6072,7 +6072,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 2 ||
 		got[0] != "💬 收到。现在开始。" ||
-		got[1] != "💬 收到。现在开始。\n⏳ exec_command" {
+		got[1] != "💬 收到。现在开始。\n⏳ exec\\_command" {
 		t.Fatalf("processUpdates = %+v, want immediate tool update without default thought display", got)
 	}
 	if !card.isClosed() {

@@ -411,7 +411,7 @@ func (s *promptCardStream) updateToolProcess(update acp.PromptUpdate) bool {
 
 func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus, id, rawTitle string) string {
 	title := s.resolveToolTitleLocked(id, rawTitle)
-	line := normalizeStreamMarkdown(toolStatusIcon(status) + " " + title)
+	line := normalizeStreamMarkdown(toolStatusIcon(status) + " " + escapeInlineMarkdown(title))
 	if status == toolProgressRunning {
 		// 仅当带 toolCallId 且命中同一调用的已有行时才复用(更新 in_progress 进度);
 		// 没有 id 时无法判定是否同一次调用,按原逻辑新增一行,避免覆盖上一个仍在运行的工具。
@@ -455,6 +455,19 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 	}
 	s.process = append(s.process, line)
 	return processPanelText(s.process)
+}
+
+func escapeInlineMarkdown(text string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		"`", "\\`",
+		"*", `\*`,
+		"_", `\_`,
+		"~", `\~`,
+		"[", `\[`,
+		"]", `\]`,
+	)
+	return replacer.Replace(text)
 }
 
 // resolveToolTitleLocked 确定一次工具更新展示的标题:
