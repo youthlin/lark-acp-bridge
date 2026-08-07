@@ -53,6 +53,12 @@ func (c *concurrentMessageClient) UploadImage(context.Context, string) (string, 
 	return "", nil
 }
 
+func (c *concurrentMessageClient) maxConcurrentDownloads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxActive
+}
+
 func TestHydrateMessageImagesAssignsPathsInOrder(t *testing.T) {
 	client := &concurrentMessageClient{}
 	images := []MessageImage{
@@ -89,11 +95,11 @@ func TestHydrateMessageImagesRespectsConcurrencyLimit(t *testing.T) {
 	}()
 
 	deadline := time.After(time.Second)
-	for client.maxActive < maxConcurrentImageDownloads {
+	for client.maxConcurrentDownloads() < maxConcurrentImageDownloads {
 		select {
 		case <-deadline:
 			close(client.release)
-			t.Fatalf("active downloads never reached %d, got %d", maxConcurrentImageDownloads, client.maxActive)
+			t.Fatalf("active downloads never reached %d, got %d", maxConcurrentImageDownloads, client.maxConcurrentDownloads())
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -103,8 +109,8 @@ func TestHydrateMessageImagesRespectsConcurrencyLimit(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("hydrate did not finish after releasing downloads")
 	}
-	if client.maxActive > maxConcurrentImageDownloads {
-		t.Fatalf("max concurrent downloads = %d, want <= %d", client.maxActive, maxConcurrentImageDownloads)
+	if got := client.maxConcurrentDownloads(); got > maxConcurrentImageDownloads {
+		t.Fatalf("max concurrent downloads = %d, want <= %d", got, maxConcurrentImageDownloads)
 	}
 }
 
