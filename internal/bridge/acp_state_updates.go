@@ -79,6 +79,9 @@ func applyACPStateUpdate(session *Session, update acp.SessionUpdate) bool {
 			session.ContextWindow.Used != usage.Used ||
 			session.ContextWindow.Size != usage.Size ||
 			session.ContextWindow.AutoCompactTokenLimit != usage.AutoCompactTokenLimit) {
+			if contextWindowUsageDropped(session.ContextWindow, usage) {
+				session.WorkspacePrompted = false
+			}
 			session.ContextWindow = &usage
 			changed = true
 		}

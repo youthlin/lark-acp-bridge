@@ -117,6 +117,7 @@ type Session struct {
 	ACPMeta           map[string]any            `json:"acp_meta,omitempty"`
 	Cwd               string                    `json:"cwd"`
 	Workspace         string                    `json:"workspace,omitempty"`
+	WorkspacePrompted bool                      `json:"workspace_prompted,omitempty"`
 	WikiDisabled      bool                      `json:"wiki_disabled,omitempty"`
 	WikiIntervalSec   int                       `json:"wiki_interval_sec,omitempty"`
 	HideStepMessages  bool                      `json:"hide_step_messages,omitempty"`

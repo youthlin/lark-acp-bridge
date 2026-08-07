@@ -92,6 +92,70 @@ func (s *Service) executePromptWithRecovery(ctx context.Context, session Session
 	return out
 }
 
+func (s *Service) runUserPromptWithWorkspaceContext(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRunOutcome {
+	promptText := s.promptTextWithWorkspaceContextForSession(session, msg, text)
+	includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
+	result, sentProgress, err := s.runUserPromptWithOptions(ctx, msg, session, agent, promptText, opts)
+	if includedWorkspaceContext && (err == nil || sentProgress) {
+		session = s.markWorkspacePrompted(ctx, msg, session)
+	}
+	return promptRunOutcome{session: session, result: result, sentProgress: sentProgress, err: err}
+}
+
+func (s *Service) markWorkspacePrompted(ctx context.Context, msg feishu.Message, session Session) Session {
+	if session.WorkspacePrompted || strings.TrimSpace(session.ACPSessionID) == "" || strings.TrimSpace(sessionWorkspace(session, msg)) == "" {
+		return session
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		session.WorkspacePrompted = true
+		return session
+	}
+	err := store.UpdateCurrentSession(session.Key, session.ACPSessionID, func(current *Session) bool {
+		if current.WorkspacePrompted {
+			return false
+		}
+		current.WorkspacePrompted = true
+		return true
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "保存 workspace prompt 状态失败", "session", session.ACPSessionID, "错误", err)
+		return session
+	}
+	if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
+		return latest
+	}
+	session.WorkspacePrompted = true
+	return session
+}
+
+func (s *Service) resetWorkspacePrompted(ctx context.Context, msg feishu.Message, session Session) Session {
+	if !session.WorkspacePrompted || strings.TrimSpace(session.ACPSessionID) == "" || strings.TrimSpace(sessionWorkspace(session, msg)) == "" {
+		return session
+	}
+	store := s.storeForMessage(msg)
+	if store == nil {
+		session.WorkspacePrompted = false
+		return session
+	}
+	err := store.UpdateCurrentSession(session.Key, session.ACPSessionID, func(current *Session) bool {
+		if !current.WorkspacePrompted {
+			return false
+		}
+		current.WorkspacePrompted = false
+		return true
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "重置 workspace prompt 状态失败", "session", session.ACPSessionID, "错误", err)
+		return session
+	}
+	if latest, ok := store.Get(session.Key); ok && latest.ACPSessionID == session.ACPSessionID {
+		return latest
+	}
+	session.WorkspacePrompted = false
+	return session
+}
+
 func (s *Service) finishPromptPostWork(ctx context.Context, out promptRunOutcome, opts promptPostWorkOptions) promptPostWorkResult {
 	reply := out.replyText()
 	session := out.session
@@ -151,7 +215,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := s.promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		text := promptTextWithReplyContext(msg, userText)
 		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
 	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
@@ -159,7 +223,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := s.promptTextWithWorkspaceContext(sessionWorkspace(created, msg), msg, promptTextWithReplyContext(msg, userText))
+		text := promptTextWithReplyContext(msg, userText)
 		return preparedPrompt{session: created, agent: agent, text: text}, nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
@@ -174,15 +238,17 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		}
 		session = created
 	}
-	text = s.promptTextWithWorkspaceContext(sessionWorkspace(session, msg), msg, text)
 	return preparedPrompt{session: session, agent: agent, text: text}, nil
 }
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string, opts promptSessionOptions) (string, error) {
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	out := s.executePromptWithRecovery(ctx, session, func(runCtx context.Context, runSession Session) promptRunOutcome {
-		result, sentProgress, err := s.runUserPrompt(runCtx, msg, runSession, agent, text)
-		return promptRunOutcome{session: runSession, result: result, sentProgress: sentProgress, err: err}
+		runOpts := userPromptTaskOptions()
+		if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
+			runOpts = atAutoUserPromptTaskOptions()
+		}
+		return s.runUserPromptWithWorkspaceContext(runCtx, msg, runSession, agent, text, runOpts)
 	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
 		return s.refreshACPSession(refreshCtx, msg, refreshSession, agent)
 	})
@@ -407,6 +473,11 @@ func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, s
 func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStream, chunks *promptChunkAccumulator) acp.PromptOptions {
 	return acp.PromptOptions{
 		OnUpdate: func(update acp.PromptUpdate) {
+			sessionID := strings.TrimSpace(update.SessionID)
+			if sessionID == "" {
+				sessionID = stream.session.ACPSessionID
+			}
+			s.handleACPStateUpdate(stream.ctx, msg, stream.session.Key, sessionID, update.Update)
 			stream.updatePromptStatusFromUpdate(update)
 			if chunk, ok := promptUpdateChunk(update); ok {
 				if chunk.ToolBoundary {

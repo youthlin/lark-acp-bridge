@@ -148,6 +148,100 @@ func TestHandleQueueCommandQueuesWithoutCancelingRunningTaskAndDrainsFIFO(t *tes
 	}
 }
 
+func TestHandleQueueCommandRefreshesWorkspacePromptedBeforeDrain(t *testing.T) {
+	workspace := t.TempDir()
+	markWorkspaceBootstrapped(t, workspace)
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	session := testReadySession(t, store)
+	session.Workspace = workspace
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session workspace) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{
+			{Text: "running done"},
+			{Text: "queued done"},
+		},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = session.Cwd
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	var intermediate queueIntermediateReplies
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
+		intermediate.append(text)
+		return nil
+	}
+	svc.setOutbound("bot-a", client)
+	promptDone := make(chan string, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_running",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "首轮",
+			Workspace: workspace,
+		})
+		if err != nil {
+			promptDone <- "ERR:" + err.Error()
+			return
+		}
+		promptDone <- reply
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	firstCall := rt.promptCallsSnapshot()[0]
+	if !strings.Contains(firstCall.Text, "## Workspace Context") || !strings.Contains(firstCall.Text, "## Workspace Memory Policy") {
+		t.Fatalf("first prompt = %q, want workspace context and memory policy", firstCall.Text)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_queue",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "/queue 排队消息",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/queue) error = %v", err)
+	}
+	if !strings.Contains(reply, "第 1 条") {
+		t.Fatalf("queue reply = %q, want acknowledgement", reply)
+	}
+
+	close(rt.blockPrompt)
+	if reply := <-promptDone; reply != "running done" {
+		t.Fatalf("running prompt reply = %q, want running done", reply)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		return rt.promptCallCount() == 2 && intermediate.equal([]string{"queued done"})
+	})
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("prompt calls = %+v, want running plus queued prompt", calls)
+	}
+	if !strings.Contains(calls[1].Text, "排队消息") {
+		t.Fatalf("queued prompt = %q, want queued user text", calls[1].Text)
+	}
+	if strings.Contains(calls[1].Text, "## Workspace Context") || strings.Contains(calls[1].Text, "## Workspace Memory Policy") {
+		t.Fatalf("queued prompt = %q, should not repeat workspace prompt", calls[1].Text)
+	}
+}
+
 func TestHandleQueueCommandRunsImmediatelyWhenIdle(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))

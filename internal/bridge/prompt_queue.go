@@ -187,10 +187,23 @@ func (s *Service) canRestartPromptQueueDrainLocked(key SessionKey) bool {
 	return s.tasks[key] == nil
 }
 
+func (s *Service) refreshQueuedPromptSessionState(item queuedPrompt) queuedPrompt {
+	store := s.storeForMessage(item.msg)
+	if store == nil {
+		return item
+	}
+	current, ok := store.Get(item.session.Key)
+	if !ok || current.ACPSessionID != item.session.ACPSessionID {
+		return item
+	}
+	item.session.WorkspacePrompted = current.WorkspacePrompted
+	return item
+}
+
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {
+	item = s.refreshQueuedPromptSessionState(item)
 	out := s.executePromptWithRecovery(ctx, item.session, func(runCtx context.Context, runSession Session) promptRunOutcome {
-		result, sentProgress, err := s.runUserPromptWithOptions(runCtx, item.msg, runSession, item.agent, item.text, queuedPromptTaskOptions())
-		return promptRunOutcome{session: runSession, result: result, sentProgress: sentProgress, err: err}
+		return s.runUserPromptWithWorkspaceContext(runCtx, item.msg, runSession, item.agent, item.text, queuedPromptTaskOptions())
 	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
 		return s.refreshACPSession(refreshCtx, item.msg, refreshSession, item.agent)
 	})

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
@@ -234,5 +235,25 @@ func TestWorkspaceContextPromptTruncatesLargeFiles(t *testing.T) {
 	}
 	if strings.Contains(prompt, "TAIL_SHOULD_NOT_APPEAR") {
 		t.Fatalf("prompt contains truncated tail")
+	}
+}
+
+func TestWorkspacePromptForSessionInjectsWorkspaceContextAndMemoryPolicyTogether(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "MEMORY.md"), []byte("# MEMORY\n\n偏好：中文回复\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(MEMORY.md) error = %v", err)
+	}
+	svc := newTestService(config.Default(), nil)
+	session := Session{Workspace: workspace}
+
+	first := svc.promptTextWithWorkspaceContextForSession(session, feishu.Message{}, "你好")
+	if !strings.Contains(first, "Workspace Context") || !strings.Contains(first, "Workspace Memory Policy") {
+		t.Fatalf("first prompt = %q, want workspace context and memory policy", first)
+	}
+
+	session.WorkspacePrompted = true
+	normal := svc.promptTextWithWorkspaceContextForSession(session, feishu.Message{}, "继续")
+	if strings.Contains(normal, "Workspace Context") || strings.Contains(normal, "Workspace Memory Policy") {
+		t.Fatalf("normal prompt = %q, want no repeated workspace context or memory policy", normal)
 	}
 }

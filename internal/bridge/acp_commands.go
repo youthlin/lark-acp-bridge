@@ -71,6 +71,9 @@ func (s *Service) forwardACPCommand(ctx context.Context, command string, msg fei
 		}
 		return "执行 ACP command 失败：" + err.Error()
 	}
+	if name == "compact" {
+		s.resetWorkspacePrompted(ctx, msg, session)
+	}
 	if strings.TrimSpace(reply) == "" {
 		return "ACP command 已执行完成。"
 	}

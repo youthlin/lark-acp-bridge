@@ -200,6 +200,21 @@ func contextUsagePercent(usage acp.ContextWindowUsage) float64 {
 	return float64(usage.Used) * 100 / float64(usage.Size)
 }
 
+func contextWindowUsageDropped(previous *acp.ContextWindowUsage, next acp.ContextWindowUsage) bool {
+	if previous == nil {
+		return false
+	}
+	prev := normalizeContextWindowUsage(*previous)
+	next = normalizeContextWindowUsage(next)
+	if prev.Used <= 0 || next.Used <= 0 {
+		return false
+	}
+	if prev.Size > 0 && next.Size > 0 && prev.Size != next.Size {
+		return false
+	}
+	return next.Used < prev.Used
+}
+
 func (s *Service) recordSessionContextWindow(ctx context.Context, msg feishu.Message, session Session, usage acp.ContextWindowUsage) Session {
 	usage = normalizeContextWindowUsage(usage)
 	if usage.Used <= 0 && usage.Size <= 0 {
@@ -215,6 +230,9 @@ func (s *Service) recordSessionContextWindow(ctx context.Context, msg feishu.Mes
 			current.ContextWindow.Size == usage.Size &&
 			current.ContextWindow.AutoCompactTokenLimit == usage.AutoCompactTokenLimit {
 			return false
+		}
+		if contextWindowUsageDropped(current.ContextWindow, usage) {
+			current.WorkspacePrompted = false
 		}
 		current.ContextWindow = &usage
 		return true
@@ -263,6 +281,7 @@ func (s *Service) finishAutoCompact(ctx context.Context, msg feishu.Message, ses
 		current.AutoCompacting = false
 		if success {
 			current.LastAutoCompactAt = &now
+			current.WorkspacePrompted = false
 			changed = true
 		}
 		return changed

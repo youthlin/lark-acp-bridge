@@ -125,21 +125,49 @@ func sessionWorkspace(session Session, msg feishu.Message) string {
 	return msg.Workspace
 }
 
-func (s *Service) promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
-	return promptTextWithWorkspaceContextOptions(workspace, msg, text, s.messageReactionEnabled())
-}
-
 func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text string) string {
-	return promptTextWithWorkspaceContextOptions(workspace, msg, text, false)
+	return promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
+		IncludeWorkspaceContext: true,
+		IncludeMemoryPolicy:     true,
+	})
 }
 
-func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message, text string, reactionPromptEnabled bool) string {
+type workspacePromptOptions struct {
+	IncludeWorkspaceContext bool
+	IncludeMemoryPolicy     bool
+	IncludeReactionPrompt   bool
+}
+
+func (s *Service) promptTextWithWorkspaceContextForSession(session Session, msg feishu.Message, text string) string {
+	workspace := sessionWorkspace(session, msg)
+	includeWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, workspace)
+	return promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
+		IncludeWorkspaceContext: includeWorkspaceContext,
+		IncludeMemoryPolicy:     includeWorkspaceContext,
+		IncludeReactionPrompt:   s.messageReactionEnabled(),
+	})
+}
+
+func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message, text string, opts workspacePromptOptions) string {
+	workspace = strings.TrimSpace(workspace)
+	var workspaceContext string
+	if opts.IncludeWorkspaceContext {
+		workspaceContext = workspaceContextPrompt(workspace)
+	}
+	var memoryPolicy string
+	if opts.IncludeMemoryPolicy {
+		memoryPolicy = workspaceMemoryPolicyPrompt(workspace)
+	}
 	return promptWithUserMessage([]string{
-		workspaceContextPrompt(workspace),
-		workspaceMemoryPolicyPrompt(workspace),
+		workspaceContext,
+		memoryPolicy,
 		messageMetadataPrompt(msg),
-		feishuMessageReactionPrompt(msg, reactionPromptEnabled),
+		feishuMessageReactionPrompt(msg, opts.IncludeReactionPrompt),
 	}, text)
+}
+
+func shouldIncludeWorkspaceContextPrompt(session Session, workspace string) bool {
+	return strings.TrimSpace(workspace) != "" && !session.WorkspacePrompted
 }
 
 var feishuMessageReactionEmojiTypes = []string{

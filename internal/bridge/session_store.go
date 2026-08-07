@@ -294,6 +294,7 @@ func (s *SessionStore) ReplaceCurrentACPSession(previousACPSessionID string, rep
 	current.ACPMeta = replacement.ACPMeta
 	current.Cwd = replacement.Cwd
 	current.Workspace = replacement.Workspace
+	current.WorkspacePrompted = false
 	current.AvailableCommands = replacement.AvailableCommands
 	current.ConfigOptions = replacement.ConfigOptions
 	current.Models = replacement.Models

@@ -1136,6 +1136,57 @@ func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageDoubleSlashCompactResetsWorkspacePrompted(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.WorkspacePrompted = true
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptResults: []acp.PromptResult{
+		{Text: "compacted"},
+		{Text: "next done"},
+	}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "//compact",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(//compact) error = %v", err)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.WorkspacePrompted {
+		t.Fatalf("updated session = %+v, %v; want workspace prompt reset after compact", updated, ok)
+	}
+
+	_, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(next prompt) error = %v", err)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("promptCalls = %+v, want compact and next prompt", calls)
+	}
+	if !strings.Contains(calls[1].Text, "## Workspace Context") || !strings.Contains(calls[1].Text, "## Workspace Memory Policy") {
+		t.Fatalf("next prompt = %q, want workspace context and memory policy after compact", calls[1].Text)
+	}
+}
+
 func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
@@ -1264,6 +1315,160 @@ func TestHandleFeishuMessageAutoCompactAfterPromptThreshold(t *testing.T) {
 	}
 	if updated.AutoCompacting || updated.LastAutoCompactAt == nil {
 		t.Fatalf("updated session = %+v, want compact finished timestamp", updated)
+	}
+}
+
+func TestHandleFeishuMessageAutoCompactResetsWorkspacePrompted(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.AvailableCommands = []acp.AvailableCommand{{Name: "compact"}}
+	session.AutoCompact = true
+	session.AutoCompactPct = 80
+	session.WorkspacePrompted = true
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{
+			{
+				Text: "done",
+				Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+					ContextWindow: acp.ContextWindowUsage{Used: 160000, Size: 200000},
+				}},
+			},
+			{Text: "compacted"},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "普通消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		updated, ok := store.Get(session.Key)
+		return rt.promptCallCount() == 2 && ok && !updated.AutoCompacting && updated.LastAutoCompactAt != nil
+	})
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.WorkspacePrompted {
+		t.Fatalf("updated session = %+v, %v; want workspace prompt reset after auto compact", updated, ok)
+	}
+}
+
+func TestHandleFeishuMessageContextUsageDropResetsWorkspacePrompted(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.WorkspacePrompted = true
+	session.ContextWindow = &acp.ContextWindowUsage{Used: 160000, Size: 200000}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{
+			{Text: "after compact"},
+			{Text: "next done"},
+		},
+		promptUpdatesByCall: [][]acp.PromptUpdate{
+			{
+				{
+					SessionID: session.ACPSessionID,
+					Update: acp.SessionUpdate{
+						SessionUpdate: "usage_update",
+						Used:          10000,
+						Size:          200000,
+					},
+				},
+			},
+			nil,
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "压缩后继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt after usage drop) error = %v", err)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || updated.WorkspacePrompted || updated.ContextWindow == nil || updated.ContextWindow.Used != 10000 {
+		t.Fatalf("updated session = %+v, %v; want usage drop reset workspace prompt", updated, ok)
+	}
+
+	_, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "下一条",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(next prompt) error = %v", err)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("promptCalls = %+v, want two prompts", calls)
+	}
+	if !strings.Contains(calls[1].Text, "## Workspace Context") || !strings.Contains(calls[1].Text, "## Workspace Memory Policy") {
+		t.Fatalf("next prompt = %q, want workspace context and memory policy after usage drop", calls[1].Text)
+	}
+}
+
+func TestHandleFeishuMessageContextUsageDifferentSizeDoesNotResetWorkspacePrompted(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	session.WorkspacePrompted = true
+	session.ContextWindow = &acp.ContextWindowUsage{Used: 160000, Size: 200000}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{Text: "model changed"},
+		promptUpdatesByCall: [][]acp.PromptUpdate{
+			{
+				{
+					SessionID: session.ACPSessionID,
+					Update: acp.SessionUpdate{
+						SessionUpdate: "usage_update",
+						Used:          10000,
+						Size:          100000,
+					},
+				},
+			},
+		},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:    session.Key.BotID,
+		ChatID:   session.Key.ChatID,
+		ThreadID: session.Key.SubID,
+		ChatType: "topic_group",
+		Mentions: testBotMentions(),
+		Text:     "模型切换后继续",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt after size change) error = %v", err)
+	}
+	updated, ok := store.Get(session.Key)
+	if !ok || !updated.WorkspacePrompted || updated.ContextWindow == nil || updated.ContextWindow.Used != 10000 || updated.ContextWindow.Size != 100000 {
+		t.Fatalf("updated session = %+v, %v; want size change recorded without workspace prompt reset", updated, ok)
 	}
 }
 
@@ -3397,7 +3602,7 @@ func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	if len(rt.promptCalls) != 2 || rt.promptCalls[1].Session.Key.SubID != "" {
 		t.Fatalf("promptCalls = %+v, want second prompt on same private chat session", rt.promptCalls)
 	}
-	assertReadyPromptContainsUserTextAndMemoryPolicy(t, rt.promptCalls[1].Text, "继续")
+	assertPromptContainsUserTextOnly(t, rt.promptCalls[1].Text, "继续")
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     "bot-a",
@@ -10170,6 +10375,20 @@ func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, user
 	}
 }
 
+func assertPromptContainsUserTextOnly(t *testing.T, prompt, userText string) {
+	t.Helper()
+	for _, want := range []string{"## User Message", userText} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+	for _, notWant := range []string{"Workspace Context", "Workspace Memory Policy"} {
+		if strings.Contains(prompt, notWant) {
+			t.Fatalf("prompt = %q, should not contain %q", prompt, notWant)
+		}
+	}
+}
+
 func assertPromptContainsMessageMetadata(t *testing.T, prompt string, want map[string]string) {
 	t.Helper()
 	assertPromptContainsSectionMetadata(t, prompt, "## Message Metadata", want)
@@ -10224,6 +10443,7 @@ type fakeRuntime struct {
 	promptReply         string
 	promptErrors        []error
 	promptUpdates       []acp.PromptUpdate
+	promptUpdatesByCall [][]acp.PromptUpdate
 	afterUpdates        func()
 	permissionRequest   *acp.PermissionRequest
 	permissionOutcome   acp.PermissionOutcome
@@ -10395,6 +10615,10 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	}
 	callNumber := len(f.promptCalls)
 	updates := append([]acp.PromptUpdate(nil), f.promptUpdates...)
+	if len(f.promptUpdatesByCall) > 0 {
+		updates = append([]acp.PromptUpdate(nil), f.promptUpdatesByCall[0]...)
+		f.promptUpdatesByCall = f.promptUpdatesByCall[1:]
+	}
 	afterUpdates := f.afterUpdates
 	blockPrompt := f.blockPrompt
 	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
