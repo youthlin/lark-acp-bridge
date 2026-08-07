@@ -1,4 +1,4 @@
-//go:build (!unix && !windows) || ios
+//go:build !unix && !windows
 
 package main
 

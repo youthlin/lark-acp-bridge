@@ -1,4 +1,8 @@
-//go:build !unix || ios
+//go:build !unix
+
+// 本项目不考虑 ios 平台 所以构建标签里不额外考虑ios
+// 不然 gopls 会自动创建跨平台构建视图 导致编辑器会提示
+// ios/arm64 requires external (cgo) linking, but cgo is not enabled [ios,arm64]
 
 package main
 
