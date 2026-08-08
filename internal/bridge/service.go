@@ -9,6 +9,7 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 // Service 本项目核心服务
@@ -61,8 +62,9 @@ type serviceTasks struct {
 }
 
 type serviceScheduleRuns struct {
-	scheduleRuns map[string]scheduleRunStatus
-	scheduleJobs map[string]*scheduledTaskJob
+	scheduleRuns       map[string]scheduleRunStatus
+	scheduleRunsByTask map[string]map[string]struct{}
+	scheduleJobs       map[string]*scheduledTaskJob
 }
 
 type serviceACPUpdates struct {
@@ -104,8 +106,9 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			promptQueues:    make(map[SessionKey]*promptQueue),
 		},
 		serviceScheduleRuns: serviceScheduleRuns{
-			scheduleRuns: make(map[string]scheduleRunStatus),
-			scheduleJobs: make(map[string]*scheduledTaskJob),
+			scheduleRuns:       make(map[string]scheduleRunStatus),
+			scheduleRunsByTask: make(map[string]map[string]struct{}),
+			scheduleJobs:       make(map[string]*scheduledTaskJob),
 		},
 		serviceACPUpdates: serviceACPUpdates{
 			acpUpdateUnsub: make(map[SessionKey]func()),
@@ -216,6 +219,7 @@ type incomingPromptMessage struct {
 // 实现 [feishu.Handler], 在 [NewService] 时将 [Service] 实例传入给了 [feishu.NewAdapter]
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
 	incoming := s.normalizeIncomingMessage(msg)
+	ctx = incomingMessageTraceContext(ctx, incoming.msg)
 	slog.DebugContext(ctx, "处理解析后的消息", "text", incoming.text, "prompt_text", incoming.promptText)
 
 	if s.shouldSkipIncomingMessage(ctx, incoming) {
@@ -238,6 +242,40 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 		return s.handleSlashCommandMessage(ctx, incoming.msg, incoming.text), nil
 	}
 	return s.handlePromptMessage(ctx, incoming)
+}
+
+func incomingMessageTraceContext(ctx context.Context, msg feishu.Message) context.Context {
+	ctx = logging.CtxAddMissingAttr(ctx, incomingMessageLogAttrs(msg)...)
+	ctx, _ = logging.EnsureTraceID(ctx, incomingMessageTraceParts(msg)...)
+	return ctx
+}
+
+func incomingMessageLogAttrs(msg feishu.Message) []slog.Attr {
+	return []slog.Attr{
+		slog.String("bot", msg.BotID),
+		slog.String("message_id", msg.MessageID),
+		slog.String("chat_id", msg.ChatID),
+		slog.String("chat_type", msg.ChatType),
+		slog.String("thread_id", msg.ThreadID),
+		slog.String("root_id", msg.RootID),
+		slog.String("parent_id", msg.ParentID),
+		slog.String("sender_id", msg.SenderID),
+		slog.String("sender_type", msg.SenderType),
+		slog.String("msg_type", msg.MsgType),
+	}
+}
+
+func incomingMessageTraceParts(msg feishu.Message) []string {
+	return []string{
+		"feishu_message",
+		msg.BotID,
+		msg.MessageID,
+		msg.ChatID,
+		msg.ThreadID,
+		msg.RootID,
+		msg.ParentID,
+		msg.SenderID,
+	}
 }
 
 func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMessage {

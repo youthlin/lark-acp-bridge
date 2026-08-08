@@ -38,6 +38,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	msg = a.withChatInfo(ctx, msg)
 	ctx = logging.CtxAddAttr(ctx, messageLogAttrs(msg)...)
+	ctx, _ = logging.EnsureTraceID(ctx, incomingMessageTraceParts(msg)...)
 	if isStaleIncomingMessage(msg.CreatedAt, time.Now(), maxIncomingMessageAge) {
 		slog.InfoContext(ctx, "跳过过旧飞书消息",
 			"message_create_time", msg.CreatedAt.Format(time.RFC3339Nano),
@@ -214,5 +215,18 @@ func messageLogAttrs(msg Message) []slog.Attr {
 		slog.String("root_id", msg.RootID),
 		slog.String("parent_id", msg.ParentID),
 		slog.String("sender_id", msg.SenderID),
+	}
+}
+
+func incomingMessageTraceParts(msg Message) []string {
+	return []string{
+		"feishu_message",
+		msg.BotID,
+		msg.MessageID,
+		msg.ChatID,
+		msg.ThreadID,
+		msg.RootID,
+		msg.ParentID,
+		msg.SenderID,
 	}
 }

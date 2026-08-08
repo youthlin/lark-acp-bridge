@@ -187,12 +187,72 @@ func TestApplyEndToEnd(t *testing.T) {
 	if res.To != "v1.2.3" || res.ExePath != target {
 		t.Fatalf("bad result: %+v", res)
 	}
+	if res.BackupPath != target+".bak" {
+		t.Fatalf("BackupPath = %q, want %q", res.BackupPath, target+".bak")
+	}
 	got, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("replaced content = %q", got)
+	}
+	backup, err := os.ReadFile(target + ".bak")
+	if err != nil {
+		t.Fatalf("ReadFile(backup) error = %v", err)
+	}
+	if string(backup) != "old" {
+		t.Fatalf("backup content = %q, want old", backup)
+	}
+	if info, err := os.Stat(target + ".bak"); err != nil {
+		t.Fatalf("Stat(backup) error = %v", err)
+	} else if info.Mode()&0o111 == 0 {
+		t.Fatalf("backup mode = %o, want executable", info.Mode().Perm())
+	}
+}
+
+func TestRollbackRestoresBackup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("原子替换路径在 unix 上验证")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "lark-acp-bridge")
+	backup := target + ".bak"
+	if err := os.WriteFile(target, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := (&Options{GOOS: "linux", GOARCH: "amd64", ExePath: target}).Rollback(context.Background())
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.ExePath != target || res.BackupPath != backup || res.Size != int64(len("old")) {
+		t.Fatalf("Rollback() result = %+v, want target backup and old size", res)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("target after rollback = %q, want old", got)
+	}
+}
+
+func TestRollbackRejectsMissingBackup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("原子替换路径在 unix 上验证")
+	}
+	target := filepath.Join(t.TempDir(), "lark-acp-bridge")
+	if err := os.WriteFile(target, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&Options{GOOS: "linux", GOARCH: "amd64", ExePath: target}).Rollback(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "没有可回滚的备份文件") {
+		t.Fatalf("Rollback() error = %v, want missing backup error", err)
 	}
 }
 

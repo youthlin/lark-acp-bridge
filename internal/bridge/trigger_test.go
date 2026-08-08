@@ -11,6 +11,7 @@ import (
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 func TestTriggerRequestNormalizedFillsBotIDAndClonesMetadata(t *testing.T) {
@@ -847,7 +848,7 @@ func TestRunTriggerPromptRefreshesUnavailableSession(t *testing.T) {
 func TestRunTriggerPromptUsesDefaultPermissionOutcome(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
@@ -911,7 +912,7 @@ func TestRunTriggerPromptUsesDefaultPermissionOutcome(t *testing.T) {
 func TestRunTriggerPromptLogsSourceAndIdentifiers(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(logging.NewCtxHandler(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
@@ -944,6 +945,7 @@ func TestRunTriggerPromptLogsSourceAndIdentifiers(t *testing.T) {
 	for _, want := range []string{
 		"开始执行 trigger prompt",
 		"trigger prompt 执行完成",
+		"trace_id=" + logging.TraceIDFromParts("trigger", "bot-a", sessionSourceSchedule, "task:daily", "run:run-1", "daily", "run-1", ""),
 		"source=schedule",
 		"main_id=task:daily",
 		"sub_id=run:run-1",
@@ -953,6 +955,27 @@ func TestRunTriggerPromptLogsSourceAndIdentifiers(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("logs = %q, want %q", got, want)
+		}
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want one trigger prompt", rt.promptCalls)
+	}
+	attrs := rt.promptCalls[0].Attrs
+	for key, want := range map[string]string{
+		"trace_id": logging.TraceIDFromParts("trigger", "bot-a", sessionSourceSchedule, "task:daily", "run:run-1", "daily", "run-1", ""),
+		"source":   sessionSourceSchedule,
+		"main_id":  "task:daily",
+		"sub_id":   "run:run-1",
+		"task_id":  "daily",
+		"run_id":   "run-1",
+	} {
+		if got := attrs[key]; got != want {
+			t.Fatalf("prompt attrs[%s] = %q, want %q; attrs=%+v", key, got, want, attrs)
+		}
+	}
+	for key, value := range attrs {
+		if strings.Contains(value, "run") && key == "prompt" {
+			t.Fatalf("prompt attr %s=%q should not contain prompt text", key, value)
 		}
 	}
 }

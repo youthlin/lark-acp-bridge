@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -367,11 +368,19 @@ func intCmp(a, b int) int {
 
 // UpdateResult 描述一次更新结果。
 type UpdateResult struct {
-	From    string
-	To      string
-	ExePath string
+	From       string
+	To         string
+	ExePath    string
+	BackupPath string
 	// Source 是实际下载成功的源名（github / gitee ...）。
 	Source string
+}
+
+type RollbackResult struct {
+	ExePath    string
+	BackupPath string
+	Size       int64
+	SHA256     string
 }
 
 // Apply 下载指定 Release，校验 sha256 并替换当前可执行文件。
@@ -440,7 +449,57 @@ func (o *Options) Apply(ctx context.Context, rel *Release) (*UpdateResult, error
 	if err := replaceExecutable(exePath, bin, o.GOOS); err != nil {
 		return nil, err
 	}
-	return &UpdateResult{From: o.CurrentVersion, To: rel.Tag, ExePath: exePath, Source: usedFrom}, nil
+	return &UpdateResult{From: o.CurrentVersion, To: rel.Tag, ExePath: exePath, BackupPath: backupPathFor(exePath), Source: usedFrom}, nil
+}
+
+// Rollback 恢复最近一次 Apply 保存的备份。不负责重启服务。
+func (o *Options) Rollback(ctx context.Context) (*RollbackResult, error) {
+	o.normalize()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	exePath := o.ExePath
+	if exePath == "" {
+		var err error
+		exePath, err = os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("定位当前可执行文件失败: %w", err)
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	backupPath := backupPathFor(exePath)
+	if err := validateExecutableFile(exePath, "目标文件"); err != nil {
+		return nil, err
+	}
+	if err := validateExecutableFile(backupPath, "备份文件"); err != nil {
+		return nil, err
+	}
+	backupSHA, backupSize, err := fileSHA256AndSize(backupPath)
+	if err != nil {
+		return nil, fmt.Errorf("校验备份文件失败: %w", err)
+	}
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取备份文件失败: %w", err)
+	}
+	if err := replaceExecutableContent(exePath, data, 0o755, o.GOOS); err != nil {
+		return nil, err
+	}
+	if err := validateExecutableFile(exePath, "目标文件"); err != nil {
+		return nil, err
+	}
+	restoredSHA, restoredSize, err := fileSHA256AndSize(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("校验恢复后的目标文件失败: %w", err)
+	}
+	if restoredSHA != backupSHA || restoredSize != backupSize {
+		return nil, fmt.Errorf("回滚校验失败: 备份 sha256=%s size=%d, 目标 sha256=%s size=%d", backupSHA, backupSize, restoredSHA, restoredSize)
+	}
+	return &RollbackResult{ExePath: exePath, BackupPath: backupPath, Size: restoredSize, SHA256: restoredSHA}, nil
 }
 
 func (o *Options) fetchSha256(ctx context.Context, url string) (string, error) {
@@ -528,6 +587,13 @@ func extractBinary(data []byte, name string) ([]byte, error) {
 // Unix: 写临时文件 -> chmod -> rename 覆盖（允许替换正在运行的程序）。
 // Windows: 先把旧文件重命名为 .old，再写入新文件；旧文件留待重启删除。
 func replaceExecutable(target string, content []byte, goos string) error {
+	if err := backupExecutable(target); err != nil {
+		return err
+	}
+	return replaceExecutableContent(target, content, 0o755, goos)
+}
+
+func replaceExecutableContent(target string, content []byte, perm fs.FileMode, goos string) error {
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".lark-acp-bridge-update-*")
 	if err != nil {
@@ -541,7 +607,7 @@ func replaceExecutable(target string, content []byte, goos string) error {
 		cleanup()
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
-	if err := tmp.Chmod(0o755); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
 		cleanup()
 		return fmt.Errorf("设置可执行权限失败: %w", err)
@@ -573,6 +639,63 @@ func replaceExecutable(target string, content []byte, goos string) error {
 		return fmt.Errorf("替换可执行文件失败: %w", err)
 	}
 	return nil
+}
+
+func backupPathFor(target string) string {
+	return target + ".bak"
+}
+
+func backupExecutable(target string) error {
+	if err := validateExecutableFile(target, "当前可执行文件"); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return fmt.Errorf("读取当前可执行文件失败: %w", err)
+	}
+	backupPath := backupPathFor(target)
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("读取当前可执行文件状态失败: %w", err)
+	}
+	if err := replaceExecutableContent(backupPath, data, info.Mode().Perm()|0o111, runtime.GOOS); err != nil {
+		return fmt.Errorf("保存旧版本备份失败: %w", err)
+	}
+	if err := validateExecutableFile(backupPath, "备份文件"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateExecutableFile(path, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) && label == "备份文件" {
+			return fmt.Errorf("没有可回滚的备份文件: %s", path)
+		}
+		return fmt.Errorf("%s不可用: %s: %w", label, path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s不是普通文件: %s", label, path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s缺少可执行权限: %s", label, path)
+	}
+	return nil
+}
+
+func fileSHA256AndSize(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 // SortReleases 按版本号降序排序（最新在前），原地排序。

@@ -270,7 +270,7 @@ func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
 	if s.wikiWorkspaceBusy(session.Key, session.Workspace) {
 		return "当前会话正在忙碌，稍后再执行 /wiki lint。"
 	}
-	taskCtx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, wikiLintTaskOptions())
+	taskCtx, finish, err := s.startTaskWithOptions(context.WithoutCancel(ctx), session, agent, taskKindWiki, wikiLintTaskOptions())
 	if err != nil {
 		if errors.Is(err, errSessionTaskBusy) {
 			return "当前会话正在忙碌，稍后再执行 /wiki lint。"
@@ -602,6 +602,8 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		return
 	}
 
+	// Timer-driven reflection is independent of any Feishu request; task
+	// cancellation is controlled by the task manager and session lifecycle.
 	ctx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, wikiReflectionTaskOptions())
 	if err != nil {
 		if errors.Is(err, errSessionTaskBusy) {
@@ -643,6 +645,8 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	key := pending.session.Key
 	runtime := wikiRuntimeKey(key, pending.generation, pending.session.ACPSessionID)
+	// Pending wiki runs resume after foreground work finishes, outside the
+	// original request lifecycle.
 	ctx, finish, ok := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
 	if !ok {
 		s.scheduleWikiAfterUserPrompt(pending.session, pending.agent)

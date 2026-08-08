@@ -167,6 +167,8 @@ func (a *Adapter) markPermissionCardCancelled(requestID string, entry permission
 	if a == nil || a.client == nil || cardID == "" {
 		return
 	}
+	// This runs after the permission wait context is cancelled, so use a short
+	// independent context to finish the best-effort card status update.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := a.updatePermissionCard(ctx, cardID, newPermissionCardCancelledJSON(requestID, entry.request, entry.source)); err != nil {

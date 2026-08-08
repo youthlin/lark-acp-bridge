@@ -3,6 +3,8 @@ package bridge
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,59 @@ func TestHandleUpdateCommandCheckRunsAsync(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for async update reply")
+	}
+}
+
+func TestHandleUpdateCommandRollbackRunsAsync(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "lark-acp-bridge")
+	if err := os.WriteFile(target, []byte("new"), 0o755); err != nil {
+		t.Fatalf("WriteFile(target) error = %v", err)
+	}
+	backup := target + ".bak"
+	if err := os.WriteFile(backup, []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile(backup) error = %v", err)
+	}
+
+	svc := newTestService(config.Default(), nil).WithVersion("v1.0.0")
+	client := newFakeSentMessageClient("om_update")
+	replies := make(chan string, 1)
+	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
+		replies <- text
+		return nil
+	}
+	ctx := withFakeSentMessageClient(context.Background(), svc, "default", client)
+	msg := feishu.Message{BotID: "default", ChatID: "oc_chat", SenderID: testOwnerOpenID}
+
+	got := svc.handleUpdateCommand(ctx, "/update rollback --binary "+target, msg)
+	if got != "" {
+		t.Fatalf("reply = %q, want empty (async)", got)
+	}
+	select {
+	case reply := <-replies:
+		for _, want := range []string{"已回滚到最近一次备份", backup, "请用 /restart 重启 bridge 服务使回滚版本生效"} {
+			if !strings.Contains(reply, want) {
+				t.Fatalf("async reply = %q, want %q", reply, want)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async update rollback reply")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(target) error = %v", err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("target = %q, want old", data)
+	}
+}
+
+func TestHandleUpdateCommandRollbackRejectsUpdateFlags(t *testing.T) {
+	svc := newTestService(config.Default(), nil).WithVersion("v1.0.0")
+	msg := feishu.Message{BotID: "default", ChatID: "oc_chat", SenderID: testOwnerOpenID}
+
+	got := svc.handleUpdateCommand(context.Background(), "/update rollback --check", msg)
+	if !strings.Contains(got, "rollback 只支持 --binary") {
+		t.Fatalf("reply = %q, want rollback flag rejection", got)
 	}
 }
 

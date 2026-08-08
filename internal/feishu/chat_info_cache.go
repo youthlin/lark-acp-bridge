@@ -7,25 +7,36 @@ import (
 )
 
 const defaultChatInfoCacheTTL = 10 * time.Minute
+const defaultChatInfoCacheMaxEntries = 1024
 
 type chatInfoCache struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	entries map[string]chatInfoCacheEntry
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	entries    map[string]chatInfoCacheEntry
 }
 
 type chatInfoCacheEntry struct {
 	info      chatInfo
+	cachedAt  time.Time
 	expiresAt time.Time
 }
 
 func newChatInfoCache(ttl time.Duration) *chatInfoCache {
+	return newChatInfoCacheWithMaxEntries(ttl, defaultChatInfoCacheMaxEntries)
+}
+
+func newChatInfoCacheWithMaxEntries(ttl time.Duration, maxEntries int) *chatInfoCache {
 	if ttl <= 0 {
 		ttl = defaultChatInfoCacheTTL
 	}
+	if maxEntries <= 0 {
+		maxEntries = defaultChatInfoCacheMaxEntries
+	}
 	return &chatInfoCache{
-		ttl:     ttl,
-		entries: make(map[string]chatInfoCacheEntry),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		entries:    make(map[string]chatInfoCacheEntry),
 	}
 }
 
@@ -62,13 +73,40 @@ func (c *chatInfoCache) Set(chatID string, info chatInfo) {
 	defer c.mu.Unlock()
 	now := time.Now()
 	// 写入时顺带淘汰已过期的条目，避免长期不再访问的群信息无限残留。
+	c.evictExpiredLocked(now)
+	c.entries[chatID] = chatInfoCacheEntry{
+		info:      info,
+		cachedAt:  now,
+		expiresAt: now.Add(c.ttl),
+	}
+	c.evictOldestLocked()
+}
+
+func (c *chatInfoCache) evictExpiredLocked(now time.Time) {
 	for id, entry := range c.entries {
 		if now.After(entry.expiresAt) {
 			delete(c.entries, id)
 		}
 	}
-	c.entries[chatID] = chatInfoCacheEntry{
-		info:      info,
-		expiresAt: now.Add(c.ttl),
+}
+
+func (c *chatInfoCache) evictOldestLocked() {
+	for len(c.entries) > c.maxEntries {
+		var oldestID string
+		var oldestAt time.Time
+		for id, entry := range c.entries {
+			cachedAt := entry.cachedAt
+			if cachedAt.IsZero() {
+				cachedAt = entry.expiresAt.Add(-c.ttl)
+			}
+			if oldestID == "" || cachedAt.Before(oldestAt) || (cachedAt.Equal(oldestAt) && id < oldestID) {
+				oldestID = id
+				oldestAt = cachedAt
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(c.entries, oldestID)
 	}
 }

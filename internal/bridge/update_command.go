@@ -18,10 +18,11 @@ import (
 var currentExecutable = os.Executable
 
 // updateCommandUsage 是 /update 斜杠命令的帮助。
-const updateCommandUsage = `/update [--check] [--version <tag>] - 更新 bridge 二进制（只替换不重启）
+const updateCommandUsage = `/update [rollback] [--check] [--version <tag>] - 更新 bridge 二进制（只替换不重启）
   --check            只检查是否有新版本，不下载替换
   --version <tag>    升级到指定版本（如 v1.2.3），默认最新版本
-更新完成后需用 /restart 重启服务使新版本生效。`
+  rollback           恢复最近一次更新前保存的备份
+更新或回滚完成后需用 /restart 重启服务使目标版本生效。`
 
 // handleUpdateCommand 处理 owner-only 的 /update 斜杠命令。
 // 它复用 internal/update 完成版本发现、下载、校验和原子替换，但不会自动重启服务。
@@ -34,6 +35,12 @@ func (s *Service) handleUpdateCommand(ctx context.Context, text string, msg feis
 	}
 
 	args := commandRemainder(text, 1)
+	fields := strings.Fields(args)
+	rollback := false
+	if len(fields) > 0 && fields[0] == "rollback" {
+		rollback = true
+		fields = fields[1:]
+	}
 	fs := flag.NewFlagSet("/update", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	checkOnly := fs.Bool("check", false, "只检查是否有新版本，不下载替换")
@@ -41,11 +48,14 @@ func (s *Service) handleUpdateCommand(ctx context.Context, text string, msg feis
 	repo := fs.String("repo", "", "GitHub 发布仓库（形如 owner/name）")
 	giteeRepo := fs.String("gitee-repo", "", `Gitee 镜像仓库（owner/name），传 "-" 禁用`)
 	binary := fs.String("binary", "", "待替换的可执行文件路径（默认当前可执行文件）")
-	if err := fs.Parse(strings.Fields(args)); err != nil {
+	if err := fs.Parse(fields); err != nil {
 		return "参数解析失败：" + err.Error() + "\n" + updateCommandUsage
 	}
 	if fs.NArg() != 0 {
 		return updateCommandUsage
+	}
+	if rollback && (*checkOnly || strings.TrimSpace(*target) != "" || strings.TrimSpace(*repo) != "" || strings.TrimSpace(*giteeRepo) != "") {
+		return "rollback 只支持 --binary 参数。\n" + updateCommandUsage
 	}
 
 	current := s.version
@@ -68,6 +78,10 @@ func (s *Service) handleUpdateCommand(ctx context.Context, text string, msg feis
 
 	// 更新涉及网络下载，异步执行，避免阻塞飞书事件处理；通过中间消息回报结果。
 	s.goBackground("update-command", func() {
+		if rollback {
+			s.runUpdateRollbackCommand(context.WithoutCancel(ctx), msg, opts)
+			return
+		}
 		s.runUpdateCommand(context.WithoutCancel(ctx), msg, opts, *checkOnly, strings.TrimSpace(*target))
 	})
 	return ""
@@ -118,7 +132,21 @@ func (s *Service) runUpdateCommand(ctx context.Context, msg feishu.Message, opts
 		reply("更新失败：" + err.Error())
 		return
 	}
-	reply(fmt.Sprintf("已更新: %s -> %s（下载源: %s）。\n请用 /restart 重启 bridge 服务使新版本生效。", result.From, result.To, result.Source))
+	reply(fmt.Sprintf("已更新: %s -> %s（下载源: %s）。\n已保存旧版本备份: %s\n请用 /restart 重启 bridge 服务使新版本生效。", result.From, result.To, result.Source, result.BackupPath))
+}
+
+func (s *Service) runUpdateRollbackCommand(ctx context.Context, msg feishu.Message, opts *update.Options) {
+	reply := func(text string) {
+		if err := s.mustSendIntermediateReply(ctx, msg, text, "缺少 /update rollback 结果回复发送器"); err != nil {
+			slog.WarnContext(ctx, "发送 /update rollback 回复失败", "错误", err)
+		}
+	}
+	result, err := opts.Rollback(ctx)
+	if err != nil {
+		reply("回滚失败：" + err.Error())
+		return
+	}
+	reply(fmt.Sprintf("已回滚到最近一次备份: %s\n目标文件: %s\n校验: sha256=%s size=%d\n请用 /restart 重启 bridge 服务使回滚版本生效。", result.BackupPath, result.ExePath, result.SHA256, result.Size))
 }
 
 // validateUpdateExePath 确定待替换的可执行文件路径，并拒绝 go run 临时二进制。

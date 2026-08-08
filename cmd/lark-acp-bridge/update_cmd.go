@@ -14,6 +14,7 @@ import (
 
 type updateCommandOptions struct {
 	CheckOnly     bool
+	Rollback      bool
 	TargetVersion string
 	Repo          string
 	GiteeRepo     string
@@ -30,6 +31,17 @@ func runUpdate(options updateCommandOptions) error {
 		Repo:           strings.TrimSpace(options.Repo),
 		GiteeRepo:      strings.TrimSpace(options.GiteeRepo),
 		ExePath:        strings.TrimSpace(options.BinaryPath),
+	}
+	if options.Rollback {
+		result, err := opts.Rollback(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("已回滚到最近一次备份: %s\n", result.BackupPath)
+		fmt.Printf("目标文件: %s\n", result.ExePath)
+		fmt.Printf("校验: sha256=%s size=%d\n", result.SHA256, result.Size)
+		fmt.Println("请重启 lark-acp-bridge 服务（如 systemctl --user restart lark-acp-bridge）使回滚版本生效。")
+		return nil
 	}
 
 	var rel *update.Release
@@ -80,6 +92,7 @@ func runUpdate(options updateCommandOptions) error {
 		return err
 	}
 	fmt.Printf("已更新: %s -> %s（下载源: %s）\n", result.From, result.To, result.Source)
+	fmt.Printf("已保存旧版本备份: %s\n", result.BackupPath)
 	fmt.Println("请重启 lark-acp-bridge 服务（如 systemctl --user restart lark-acp-bridge）使新版本生效。")
 	return nil
 }

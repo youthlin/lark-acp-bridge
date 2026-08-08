@@ -74,7 +74,7 @@ func (s *Service) handleScheduleCommand(ctx context.Context, text string, msg fe
 		if len(fields) < 3 {
 			return "请使用 /schedule delete <id>。"
 		}
-		return s.handleScheduleDeleteCommand(msg, fields[2])
+		return s.handleScheduleDeleteCommand(ctx, msg, fields[2])
 	default:
 		return scheduleCommandUsage()
 	}
@@ -93,8 +93,13 @@ func scheduleCommandUsage() string {
 		"/schedule pause <id>",
 		"/schedule resume <id>",
 		"/schedule delete <id>",
-		"add 的 spec 支持 @every <duration> 或 5 段 cron；once 的时间用 YYYY-MM-DD HH:MM（按 --tz，缺省 local）或 RFC3339，例如 /schedule once 2026-08-05 09:00 生成早报。一次性任务执行后自动删除，启动时若时间已过也会删除不补跑。",
+		"add 的 spec 支持 @every <duration> 或 5 段 cron；once 的时间用 YYYY-MM-DD HH:MM（按 --tz，缺省 local）或 RFC3339，例如 /schedule once 2026-08-05 09:00 生成早报。一次性任务执行后自动删除。",
+		missedSchedulePolicyText(),
 	}, "\n")
+}
+
+func missedSchedulePolicyText() string {
+	return "错过执行策略：停机或未运行期间错过的一次性任务会删除且不补跑；循环任务跳过历史轮次，只从当前时间计算下一次；手动 /schedule run 不受该策略影响。"
 }
 
 func (s *Service) handleScheduleAddCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -263,6 +268,7 @@ func scheduleHowPrompt(goal string) (string, error) {
 		"- --cwd <workspace path>：可选，指定任务运行工作目录；用户未明确提供时不要编造。",
 		"- --agent <agent name>：可选，指定 ACP agent；用户未明确提供时不要编造。",
 		"- <prompt>：必填，触发时发送给 agent 的任务说明，必须放在时间/spec 后面。",
+		"- " + missedSchedulePolicyText(),
 		"- 如果用户给出的时间无法可靠转换，返回一句需要用户补充的信息，不要猜测。",
 		"",
 		"用户需求：",
@@ -436,7 +442,7 @@ func (s *Service) saveAndStartScheduledTask(ctx context.Context, store *Schedule
 		slog.ErrorContext(ctx, "保存"+kind+"失败", "错误", err)
 		return ScheduledTask{}, "保存" + kind + "失败：" + err.Error()
 	}
-	if err := s.startScheduledTask(context.Background(), task, workspace); err != nil {
+	if err := s.startScheduledTask(ctx, task, workspace); err != nil {
 		slog.ErrorContext(ctx, "注册"+kind+"失败", "task_id", task.ID, "错误", err)
 		return ScheduledTask{}, kind + "已保存，但注册到当前进程失败：" + err.Error()
 	}
@@ -472,9 +478,15 @@ func (s *Service) handleScheduleListCommand(msg feishu.Message) string {
 	}
 	tasks := store.List()
 	if len(tasks) == 0 {
-		return "当前 bot 还没有定时任务。"
+		return strings.Join([]string{
+			"当前 bot 还没有定时任务。",
+			missedSchedulePolicyText(),
+		}, "\n")
 	}
-	lines := []string{"当前 bot 的定时任务："}
+	lines := []string{
+		"当前 bot 的定时任务：",
+		missedSchedulePolicyText(),
+	}
 	for i, task := range tasks {
 		state := "暂停"
 		if task.Enabled {
@@ -506,6 +518,7 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		"prompt：" + task.Prompt,
 		"创建者：" + task.CreatorOpenID,
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
+		missedSchedulePolicyText(),
 	}
 	last, ok := s.lastScheduleRunStatus(task.ID)
 	if ok {
@@ -569,12 +582,12 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 	}
 	if task.Enabled {
 		workspace := s.scheduleTaskWorkspace(task, msg)
-		if err := s.startScheduledTask(context.Background(), task, workspace); err != nil {
+		if err := s.startScheduledTask(ctx, task, workspace); err != nil {
 			slog.ErrorContext(ctx, "重新注册定时任务失败", "task_id", task.ID, "错误", err)
 			return "定时任务已保存，但重新注册到当前进程失败：" + err.Error()
 		}
 	} else {
-		s.stopScheduledTask(task)
+		s.stopScheduledTask(ctx, task)
 	}
 	return formatScheduledTaskUpdated(task)
 }
@@ -616,17 +629,17 @@ func (s *Service) setScheduledTaskEnabled(ctx context.Context, msg feishu.Messag
 		return "定时任务不存在：" + strings.TrimSpace(id)
 	}
 	if enabled {
-		if err := s.startScheduledTask(context.Background(), task, msg.Workspace); err != nil {
+		if err := s.startScheduledTask(ctx, task, msg.Workspace); err != nil {
 			slog.ErrorContext(ctx, "注册定时任务失败", "task_id", task.ID, "错误", err)
 			return "定时任务已恢复，但注册到当前进程失败：" + err.Error()
 		}
 		return "已恢复定时任务：" + task.ID
 	}
-	s.stopScheduledTask(task)
+	s.stopScheduledTask(ctx, task)
 	return "已暂停定时任务：" + task.ID
 }
 
-func (s *Service) handleScheduleDeleteCommand(msg feishu.Message, id string) string {
+func (s *Service) handleScheduleDeleteCommand(ctx context.Context, msg feishu.Message, id string) string {
 	store := s.scheduledTaskStoreForBotID(msg.BotID)
 	if store == nil {
 		return "当前 bot workspace 未初始化，无法删除定时任务。"
@@ -642,7 +655,7 @@ func (s *Service) handleScheduleDeleteCommand(msg feishu.Message, id string) str
 	if !deleted {
 		return "定时任务不存在：" + strings.TrimSpace(id)
 	}
-	s.stopScheduledTask(task)
+	s.stopScheduledTask(ctx, task)
 	return "已删除定时任务：" + task.ID
 }
 
@@ -652,8 +665,9 @@ func (s *Service) lastScheduleRunStatus(taskID string) (scheduleRunStatus, bool)
 	defer s.taskMu.Unlock()
 	var last scheduleRunStatus
 	var ok bool
-	for _, status := range s.scheduleRuns {
-		if status.TaskID != taskID {
+	for id := range s.scheduleRunsByTask[taskID] {
+		status, exists := s.scheduleRuns[id]
+		if !exists || status.TaskID != taskID {
 			continue
 		}
 		if !ok || scheduleRunStatusTime(status).After(scheduleRunStatusTime(last)) {

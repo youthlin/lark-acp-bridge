@@ -35,7 +35,11 @@ func (c larkMessageClient) GetMessage(ctx context.Context, messageID string, wor
 		MessageId(messageID).
 		UserIdType(larkim.GetMessageContentV1UserIDTypeOpenId).
 		Build()
-	resp, err := c.client.Im.V1.Message.Get(ctx, req)
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkim.GetMessageResp, error) {
+		return c.client.Im.V1.Message.Get(ctx, req)
+	}, func(resp *larkim.GetMessageResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("调用飞书获取消息接口: %w", err)
 	}
@@ -194,7 +198,11 @@ func (c larkMessageClient) DownloadImage(ctx context.Context, messageID string, 
 		FileKey(imageKey).
 		Type("image").
 		Build()
-	resp, err := c.client.Im.V1.MessageResource.Get(ctx, req)
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkim.GetMessageResourceResp, error) {
+		return c.client.Im.V1.MessageResource.Get(ctx, req)
+	}, func(resp *larkim.GetMessageResourceResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return "", fmt.Errorf("调用飞书获取图片资源接口: %w", err)
 	}

@@ -25,7 +25,11 @@ func (c larkChatInfoClient) GetChatInfo(ctx context.Context, chatID string) (cha
 		ChatId(chatID).
 		UserIdType(larkim.GetChatUserIDTypeOpenId).
 		Build()
-	resp, err := c.client.Im.Chat.Get(ctx, req)
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkim.GetChatResp, error) {
+		return c.client.Im.Chat.Get(ctx, req)
+	}, func(resp *larkim.GetChatResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return chatInfo{}, fmt.Errorf("调用飞书获取群信息接口: %w", err)
 	}

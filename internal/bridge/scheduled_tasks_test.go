@@ -444,6 +444,68 @@ func TestStartLoadsEnabledScheduledTasksAndTriggersRuns(t *testing.T) {
 	}
 }
 
+func TestStartDeletesExpiredOnceTaskWithoutCatchUp(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:        "bot-a",
+			Workspace: workspace,
+		}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	store := NewScheduledTaskStore(filepath.Join(workspace, "scheduled_tasks.json"))
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.Upsert(ScheduledTask{
+		ID:        "expired-once",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Once:      true,
+		Spec:      "@at " + past,
+		AgentName: "traex",
+		Cwd:       cwd,
+		Prompt:    "should not catch up",
+	}); err != nil {
+		t.Fatalf("Upsert(expired once) error = %v", err)
+	}
+
+	svc := NewService(cfg, nil)
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-expired-once"}, promptReply: "done"}
+	svc.setRuntime(rt)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = svc.Shutdown(context.Background()) }()
+	waitForCondition(t, time.Second, func() bool {
+		return svc.scheduledTaskJobCount() == 0 && len(svc.scheduledTaskStoreForBotID("bot-a").List()) == 0
+	})
+	if rt.promptCallCount() != 0 {
+		t.Fatalf("prompt calls = %d, want expired once deleted without catch-up run", rt.promptCallCount())
+	}
+	if tasks := svc.scheduledTaskStoreForBotID("bot-a").List(); len(tasks) != 0 {
+		t.Fatalf("tasks = %+v, want expired once task deleted", tasks)
+	}
+}
+
+func TestRecurringSchedulesSkipMissedHistory(t *testing.T) {
+	after := time.Date(2026, 8, 7, 23, 9, 34, 0, time.UTC)
+	every := everyScheduleSpec{interval: time.Hour}
+	next, ok := every.Next(after)
+	if !ok || !next.Equal(after.Add(time.Hour)) {
+		t.Fatalf("every Next() = %s %v, want one interval after current time", next, ok)
+	}
+
+	cron, err := parseScheduleSpec("0 9 * * *", "UTC")
+	if err != nil {
+		t.Fatalf("parseScheduleSpec(cron) error = %v", err)
+	}
+	next, ok = cron.Next(after)
+	want := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+	if !ok || !next.Equal(want) {
+		t.Fatalf("cron Next() = %s %v, want next future run %s without catch-up", next, ok, want)
+	}
+}
+
 func TestScheduleRunStatusTransitions(t *testing.T) {
 	svc := NewService(config.Config{}, nil)
 	task := ScheduledTask{
@@ -526,6 +588,52 @@ func TestScheduleRunHistoryPrunesOldFinishedRunsAndKeepsRunning(t *testing.T) {
 	if _, ok := svc.scheduleRuns[scheduleRunStatusID("daily", "run-104")]; !ok {
 		t.Fatal("newest finished status missing, want retained")
 	}
+	if got := len(svc.scheduleRunsByTask["daily"]); got != scheduleRunHistoryLimit+1 {
+		t.Fatalf("scheduleRunsByTask[daily] len = %d, want %d", got, scheduleRunHistoryLimit+1)
+	}
+}
+
+func TestScheduleRunHistoryPrunesOnlyTargetTaskIndex(t *testing.T) {
+	svc := NewService(config.Config{}, nil)
+	target := ScheduledTask{
+		ID:        "daily",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "0 9 * * *",
+		AgentName: "traex",
+		Cwd:       "/repo",
+		Prompt:    "generate report",
+	}
+	other := target
+	other.ID = "weekly"
+	started := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+
+	for i := 0; i < scheduleRunHistoryLimit; i++ {
+		runID := "other-" + strconv.Itoa(i)
+		svc.markScheduleRunSkipped(other, runID, scheduledTaskRunKey(other, runID), started.Add(time.Duration(i)*time.Minute), "done")
+	}
+	for i := 0; i < scheduleRunHistoryLimit+5; i++ {
+		runID := "target-" + strconv.Itoa(i)
+		svc.markScheduleRunSkipped(target, runID, scheduledTaskRunKey(target, runID), started.Add(time.Duration(i)*time.Minute), "done")
+	}
+
+	svc.taskMu.Lock()
+	defer svc.taskMu.Unlock()
+	if got := len(svc.scheduleRunsByTask[target.ID]); got != scheduleRunHistoryLimit {
+		t.Fatalf("target task index len = %d, want %d", got, scheduleRunHistoryLimit)
+	}
+	if got := len(svc.scheduleRunsByTask[other.ID]); got != scheduleRunHistoryLimit {
+		t.Fatalf("other task index len = %d, want %d", got, scheduleRunHistoryLimit)
+	}
+	if _, ok := svc.scheduleRuns[scheduleRunStatusID(target.ID, "target-0")]; ok {
+		t.Fatal("oldest target status still exists, want pruned")
+	}
+	if _, ok := svc.scheduleRuns[scheduleRunStatusID(other.ID, "other-0")]; !ok {
+		t.Fatal("oldest other status missing, want unrelated task history retained")
+	}
+	if _, ok := svc.scheduleRunsByTask[target.ID][scheduleRunStatusID(target.ID, "target-0")]; ok {
+		t.Fatal("oldest target status still indexed, want index pruned with status")
+	}
 }
 
 type noNextScheduleSpec struct{}
@@ -561,6 +669,55 @@ func TestRunScheduledTaskJobRemovesDeadJobAndRecordsFailure(t *testing.T) {
 	}
 	if last.State != scheduleRunFailed || !strings.Contains(last.LastError, "无法计算下次触发时间") {
 		t.Fatalf("last status = %+v, want failed next-time error", last)
+	}
+}
+
+func TestStartScheduledTaskSurvivesRequestContextCancellation(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-scheduled"},
+		promptReply:    "schedule done",
+	}
+	svc.setRuntime(rt)
+	cwd := t.TempDir()
+	task := ScheduledTask{
+		ID:        "ctx-survives",
+		BotID:     "bot-a",
+		Enabled:   true,
+		Spec:      "@every 100ms",
+		AgentName: "traex",
+		Cwd:       cwd,
+		Prompt:    "still run",
+	}
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	if err := svc.startScheduledTask(requestCtx, task, cwd); err != nil {
+		t.Fatalf("startScheduledTask() error = %v", err)
+	}
+	cancel()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		rt.mu.Lock()
+		promptCalls := append([]fakePromptCall(nil), rt.promptCalls...)
+		rt.mu.Unlock()
+		if len(promptCalls) > 0 {
+			if !strings.Contains(promptCalls[0].Text, "still run") {
+				t.Fatalf("prompt text = %q, want scheduled prompt", promptCalls[0].Text)
+			}
+			svc.stopScheduledTask(context.Background(), task)
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("scheduled job did not run after request context cancellation")
+		}
 	}
 }
 
@@ -762,7 +919,7 @@ func TestStopScheduledTaskCancelsActiveRun(t *testing.T) {
 	}
 	svc.taskMu.Unlock()
 
-	svc.stopScheduledTask(task)
+	svc.stopScheduledTask(context.Background(), task)
 
 	if got := svc.scheduledTaskJobCount(); got != 0 {
 		t.Fatalf("scheduledTaskJobCount() = %d, want stopped job", got)

@@ -129,6 +129,8 @@ func (s *Service) consumeRestartAckAsync(ctx context.Context, adapter restartAck
 		return
 	}
 	s.goBackground("restart-ack", func() {
+		// Restart ack is consumed during service startup, outside any
+		// inbound Feishu request; keep it bounded but independent.
 		ackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := consumeRestartAck(ackCtx, bot.Workspace, adapter, bot.ID); err != nil {

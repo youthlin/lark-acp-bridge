@@ -2,9 +2,12 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -340,7 +343,13 @@ func (s *Service) handleRestartCommand(ctx context.Context, msg feishu.Message) 
 		removeRestartAck(workspace)
 		return "当前上下文不支持主动发送重启准备消息。"
 	}
-	go s.runRestartCommand(context.Background(), workspace)
+	go func() {
+		// The restart command must outlive the inbound request after the
+		// acknowledgement has been sent, but it should not run forever.
+		restartCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		s.runRestartCommand(restartCtx, workspace)
+	}()
 	return ""
 }
 
@@ -412,6 +421,9 @@ func (s *Service) status(msg feishu.Message) string {
 		"当前聊天默认 agent：" + s.chatAgentName(msg),
 		"当前 bot：" + displayBotID(msg.BotID),
 	}
+	if snapshot, ok := s.runtimeManagerSnapshot(); ok {
+		lines = append(lines, "runtime："+formatRuntimeManagerStatus(snapshot))
+	}
 	if strings.TrimSpace(msg.Workspace) != "" {
 		lines = append(lines, "workspace："+msg.Workspace)
 	}
@@ -432,6 +444,7 @@ func (s *Service) status(msg feishu.Message) string {
 		acpError, hasACPError := s.acpErrorSnapshot(session)
 		lines = append(lines,
 			"运行态："+formatSessionBusyStatus(status),
+			"runtime会话："+formatRuntimeSessionStatus(session.Key, s.runtimeSlotSnapshots()),
 			"队列："+formatSessionQueueStatus(status),
 			"wiki："+formatSessionWikiStatus(wikiStatus),
 			"loop："+formatSessionLoopStatus(loopStatus, hasLoopStatus),
@@ -442,6 +455,22 @@ func (s *Service) status(msg feishu.Message) string {
 		lines = append(lines, sessionLabel(msg)+"还没有会话映射；发送普通文本会自动创建，或用 /new <cwd> 指定工作目录。")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) runtimeManagerSnapshot() (runtimeManagerSnapshot, bool) {
+	runtime, ok := s.runtime.(*runtimeManager)
+	if !ok || runtime == nil {
+		return runtimeManagerSnapshot{}, false
+	}
+	return runtime.snapshot(), true
+}
+
+func (s *Service) runtimeSlotSnapshots() []runtimeSlotSnapshot {
+	snapshot, ok := s.runtimeManagerSnapshot()
+	if !ok {
+		return nil
+	}
+	return snapshot.Slots
 }
 
 func formatSessionBusyStatus(status sessionRuntimeStatus) string {
@@ -466,6 +495,60 @@ func formatSessionQueueStatus(status sessionRuntimeStatus) string {
 		draining = "，正在执行"
 	}
 	return "待执行 " + strconv.Itoa(status.QueueLen) + " 条" + draining
+}
+
+func formatRuntimeManagerStatus(snapshot runtimeManagerSnapshot) string {
+	limit := "不限"
+	if snapshot.MaxSlots > 0 {
+		limit = strconv.Itoa(snapshot.MaxSlots)
+	}
+	return fmt.Sprintf("slots %d，clients %d/%s，busy %d，idle %d，markers %d",
+		snapshot.TotalSlots, snapshot.ClientSlots, limit, snapshot.ActiveSlots, snapshot.IdleSlots, snapshot.MarkerSlots)
+}
+
+func formatRuntimeSessionStatus(key SessionKey, slots []runtimeSlotSnapshot) string {
+	key = normalizeSessionKey(key)
+	if len(slots) == 0 {
+		return "无"
+	}
+	total := 0
+	clients := 0
+	busy := 0
+	idle := 0
+	scopes := make([]string, 0, 2)
+	seenScope := make(map[string]bool)
+	for _, slot := range slots {
+		if normalizeSessionKey(slot.Key.SessionKey) != key {
+			continue
+		}
+		total++
+		if slot.HasClient {
+			clients++
+		}
+		if slot.Active > 0 {
+			busy++
+		}
+		if slot.Idle {
+			idle++
+		}
+		scope := slot.Key.Scope
+		if scope == "" {
+			scope = runtimeScopeCurrent
+		}
+		if !seenScope[scope] {
+			seenScope[scope] = true
+			scopes = append(scopes, scope)
+		}
+	}
+	if total == 0 {
+		return "无"
+	}
+	sort.Strings(scopes)
+	text := fmt.Sprintf("slots %d，clients %d，busy %d，idle %d", total, clients, busy, idle)
+	if len(scopes) > 0 {
+		text += "，scope " + strings.Join(scopes, "/")
+	}
+	return text
 }
 
 func formatSessionWikiStatus(snapshot wikiStatusSnapshot) string {

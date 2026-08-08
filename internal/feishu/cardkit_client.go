@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"unicode/utf8"
 
@@ -133,10 +134,15 @@ func (a *Adapter) updateCardJSON(ctx context.Context, req cardUpdateRequest) err
 	if req.sequence > 0 {
 		body.Sequence(req.sequence)
 	}
-	resp, err := a.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
-		CardId(req.cardID).
-		Body(body.Build()).
-		Build())
+	body.Uuid(cardKitRequestUUID("card-update", req.cardID, "", req.sequence, req.data))
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.UpdateCardResp, error) {
+		return a.client.Cardkit.V1.Card.Update(ctx, larkcardkit.NewUpdateCardReqBuilder().
+			CardId(req.cardID).
+			Body(body.Build()).
+			Build())
+	}, func(resp *larkcardkit.UpdateCardResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", req.action, err)
 	}
@@ -152,15 +158,21 @@ func (a *Adapter) updateCardJSON(ctx context.Context, req cardUpdateRequest) err
 }
 
 func (a *Adapter) createCardElementsAfter(ctx context.Context, cardID string, targetElementID string, createdElementID string, elements string, sequence int, action string) error {
-	resp, err := a.client.Cardkit.V1.CardElement.Create(ctx, larkcardkit.NewCreateCardElementReqBuilder().
-		CardId(cardID).
-		Body(larkcardkit.NewCreateCardElementReqBodyBuilder().
-			Type(larkcardkit.TypeInsertAfter).
-			TargetElementId(targetElementID).
-			Elements(elements).
-			Sequence(sequence).
-			Build()).
-		Build())
+	body := larkcardkit.NewCreateCardElementReqBodyBuilder().
+		Type(larkcardkit.TypeInsertAfter).
+		TargetElementId(targetElementID).
+		Elements(elements).
+		Sequence(sequence).
+		Uuid(cardKitRequestUUID("element-create", cardID, createdElementID, sequence, targetElementID, elements)).
+		Build()
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.CreateCardElementResp, error) {
+		return a.client.Cardkit.V1.CardElement.Create(ctx, larkcardkit.NewCreateCardElementReqBuilder().
+			CardId(cardID).
+			Body(body).
+			Build())
+	}, func(resp *larkcardkit.CreateCardElementResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -176,14 +188,20 @@ func (a *Adapter) createCardElementsAfter(ctx context.Context, cardID string, ta
 }
 
 func (a *Adapter) updateCardElementContent(ctx context.Context, cardID string, elementID string, content string, sequence int, action string) error {
-	resp, err := a.client.Cardkit.V1.CardElement.Content(ctx, larkcardkit.NewContentCardElementReqBuilder().
-		CardId(cardID).
-		ElementId(elementID).
-		Body(larkcardkit.NewContentCardElementReqBodyBuilder().
-			Content(content).
-			Sequence(sequence).
-			Build()).
-		Build())
+	body := larkcardkit.NewContentCardElementReqBodyBuilder().
+		Content(content).
+		Sequence(sequence).
+		Uuid(cardKitRequestUUID("element-content", cardID, elementID, sequence, content)).
+		Build()
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.ContentCardElementResp, error) {
+		return a.client.Cardkit.V1.CardElement.Content(ctx, larkcardkit.NewContentCardElementReqBuilder().
+			CardId(cardID).
+			ElementId(elementID).
+			Body(body).
+			Build())
+	}, func(resp *larkcardkit.ContentCardElementResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -197,14 +215,20 @@ func (a *Adapter) updateCardElementContent(ctx context.Context, cardID string, e
 }
 
 func (a *Adapter) patchCardElement(ctx context.Context, cardID string, elementID string, partial string, sequence int, action string) error {
-	resp, err := a.client.Cardkit.V1.CardElement.Patch(ctx, larkcardkit.NewPatchCardElementReqBuilder().
-		CardId(cardID).
-		ElementId(elementID).
-		Body(larkcardkit.NewPatchCardElementReqBodyBuilder().
-			PartialElement(partial).
-			Sequence(sequence).
-			Build()).
-		Build())
+	body := larkcardkit.NewPatchCardElementReqBodyBuilder().
+		PartialElement(partial).
+		Sequence(sequence).
+		Uuid(cardKitRequestUUID("element-patch", cardID, elementID, sequence, partial)).
+		Build()
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.PatchCardElementResp, error) {
+		return a.client.Cardkit.V1.CardElement.Patch(ctx, larkcardkit.NewPatchCardElementReqBuilder().
+			CardId(cardID).
+			ElementId(elementID).
+			Body(body).
+			Build())
+	}, func(resp *larkcardkit.PatchCardElementResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -218,13 +242,19 @@ func (a *Adapter) patchCardElement(ctx context.Context, cardID string, elementID
 }
 
 func (a *Adapter) deleteCardElement(ctx context.Context, cardID string, elementID string, sequence int, action string) error {
-	resp, err := a.client.Cardkit.V1.CardElement.Delete(ctx, larkcardkit.NewDeleteCardElementReqBuilder().
-		CardId(cardID).
-		ElementId(elementID).
-		Body(larkcardkit.NewDeleteCardElementReqBodyBuilder().
-			Sequence(sequence).
-			Build()).
-		Build())
+	body := larkcardkit.NewDeleteCardElementReqBodyBuilder().
+		Sequence(sequence).
+		Uuid(cardKitRequestUUID("element-delete", cardID, elementID, sequence)).
+		Build()
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.DeleteCardElementResp, error) {
+		return a.client.Cardkit.V1.CardElement.Delete(ctx, larkcardkit.NewDeleteCardElementReqBuilder().
+			CardId(cardID).
+			ElementId(elementID).
+			Body(body).
+			Build())
+	}, func(resp *larkcardkit.DeleteCardElementResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -236,13 +266,19 @@ func (a *Adapter) deleteCardElement(ctx context.Context, cardID string, elementI
 }
 
 func (a *Adapter) updateCardSettings(ctx context.Context, cardID string, settings string, sequence int, action string) error {
-	resp, err := a.client.Cardkit.V1.Card.Settings(ctx, larkcardkit.NewSettingsCardReqBuilder().
-		CardId(cardID).
-		Body(larkcardkit.NewSettingsCardReqBodyBuilder().
-			Settings(settings).
-			Sequence(sequence).
-			Build()).
-		Build())
+	body := larkcardkit.NewSettingsCardReqBodyBuilder().
+		Settings(settings).
+		Sequence(sequence).
+		Uuid(cardKitRequestUUID("card-settings", cardID, "", sequence, settings)).
+		Build()
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkcardkit.SettingsCardResp, error) {
+		return a.client.Cardkit.V1.Card.Settings(ctx, larkcardkit.NewSettingsCardReqBuilder().
+			CardId(cardID).
+			Body(body).
+			Build())
+	}, func(resp *larkcardkit.SettingsCardResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -253,4 +289,12 @@ func (a *Adapter) updateCardSettings(ctx context.Context, cardID string, setting
 		return fmt.Errorf("%s返回错误: code=%d msg=%s", action, resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func cardKitRequestUUID(parts ...any) string {
+	h := fnv.New64a()
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(h, "%v\x00", part)
+	}
+	return fmt.Sprintf("lark-acp-bridge-%016x", h.Sum64())
 }

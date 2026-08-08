@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +22,11 @@ const (
 
 	acpRuntimeIdleTimeout       = 30 * time.Minute
 	acpRuntimeIdleSweepInterval = 5 * time.Minute
+	acpRuntimeMaxSlots          = 32
 )
 
 var errACPSessionUnavailable = errors.New("acp session unavailable")
+var errACPRuntimeLimitReached = errors.New("acp runtime limit reached")
 
 type acpRuntime interface {
 	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error)
@@ -93,12 +96,32 @@ type runtimeManager struct {
 
 	idleTimeout       time.Duration
 	idleSweepInterval time.Duration
+	maxSlots          int
 	now               func() time.Time
 	cleanerOnce       sync.Once
 	cleanerMu         sync.Mutex
 	cleanerCancel     context.CancelFunc
 
 	startAndResumeClientFunc func(context.Context, Session, config.AgentConfig) (*acp.Client, acp.SessionInfo, error)
+}
+
+type runtimeManagerSnapshot struct {
+	Slots       []runtimeSlotSnapshot
+	TotalSlots  int
+	ClientSlots int
+	ActiveSlots int
+	IdleSlots   int
+	MarkerSlots int
+	MaxSlots    int
+}
+
+type runtimeSlotSnapshot struct {
+	Key       runtimeKey
+	SessionID string
+	HasClient bool
+	Active    int
+	LastUsed  time.Time
+	Idle      bool
 }
 
 // clientBuild 协调同一 runtimeKey 上并发的 client 创建。
@@ -169,6 +192,7 @@ type runtimeClientSlot struct {
 	unsub     func()
 	lastUsed  time.Time
 	active    int
+	reserved  int
 }
 
 func (slot runtimeClientSlot) unsubscribe() {
@@ -199,6 +223,7 @@ func newRuntimeManager() *runtimeManager {
 		subscriptions:     make(map[SessionKey]map[int64]acp.UpdateHandler),
 		idleTimeout:       acpRuntimeIdleTimeout,
 		idleSweepInterval: acpRuntimeIdleSweepInterval,
+		maxSlots:          acpRuntimeMaxSlots,
 		now:               time.Now,
 	}
 }
@@ -242,41 +267,106 @@ func (r *runtimeManager) stopIdleCleaner() {
 	}
 }
 
+func (r *runtimeManager) snapshot() runtimeManagerSnapshot {
+	if r == nil {
+		return runtimeManagerSnapshot{}
+	}
+	now := r.currentTime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := runtimeManagerSnapshot{
+		Slots:    make([]runtimeSlotSnapshot, 0, len(r.slots)),
+		MaxSlots: r.maxSlots,
+	}
+	for key, slot := range r.slots {
+		item := runtimeSlotSnapshot{
+			Key:       key,
+			SessionID: slot.sessionID,
+			HasClient: slot.client != nil,
+			Active:    slot.active,
+			LastUsed:  slot.lastUsed,
+			Idle:      r.slotIdleLocked(slot, now),
+		}
+		snapshot.Slots = append(snapshot.Slots, item)
+		snapshot.TotalSlots++
+		if item.HasClient {
+			snapshot.ClientSlots++
+		} else {
+			snapshot.MarkerSlots++
+		}
+		if item.Active > 0 {
+			snapshot.ActiveSlots++
+		}
+		if item.Idle {
+			snapshot.IdleSlots++
+		}
+	}
+	sort.Slice(snapshot.Slots, func(i, j int) bool {
+		left := snapshot.Slots[i]
+		right := snapshot.Slots[j]
+		for _, pair := range [][2]string{
+			{left.Key.BotID, right.Key.BotID},
+			{left.Key.ChatID, right.Key.ChatID},
+			{left.Key.Source, right.Key.Source},
+			{left.Key.MainID, right.Key.MainID},
+			{left.Key.SubID, right.Key.SubID},
+			{left.Key.Scope, right.Key.Scope},
+			{left.Key.RunID, right.Key.RunID},
+		} {
+			if pair[0] != pair[1] {
+				return pair[0] < pair[1]
+			}
+		}
+		return left.SessionID < right.SessionID
+	})
+	return snapshot
+}
+
 func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	key = normalizeSessionKey(key)
 	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
 	defer cancel()
 
-	client, err := acp.Start(ctx, agent, workspace)
+	runtime := currentRuntimeKey(key)
+	releaseReservation, err := r.reserveRuntimeSlot(runtime)
 	if err != nil {
 		return nil, err
 	}
+	client, err := acp.Start(ctx, agent, workspace)
+	if err != nil {
+		releaseReservation()
+		return nil, err
+	}
 	if err := client.Initialize(ctx); err != nil {
+		releaseReservation()
 		_ = client.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
 	sessionInfo, err := client.NewSession(ctx, cwd)
 	if err != nil {
+		releaseReservation()
 		_ = client.Close()
 		return nil, fmt.Errorf("session/new: %w", err)
 	}
 
 	return &runtimeSessionCandidate{
-		manager: r,
-		key:     currentRuntimeKey(key),
-		client:  client,
-		info:    sessionInfo,
+		manager:            r,
+		key:                runtime,
+		client:             client,
+		info:               sessionInfo,
+		releaseReservation: releaseReservation,
 	}, nil
 }
 
 type runtimeSessionCandidate struct {
-	mu        sync.Mutex
-	manager   *runtimeManager
-	key       runtimeKey
-	client    *acp.Client
-	info      acp.SessionInfo
-	committed bool
-	closed    bool
+	mu                 sync.Mutex
+	manager            *runtimeManager
+	key                runtimeKey
+	client             *acp.Client
+	info               acp.SessionInfo
+	releaseReservation func()
+	committed          bool
+	closed             bool
 }
 
 func (c *runtimeSessionCandidate) Info() acp.SessionInfo {
@@ -305,6 +395,7 @@ func (c *runtimeSessionCandidate) Commit(persist func() error) error {
 		if err := persist(); err != nil {
 			transition.Unlock()
 			c.closed = true
+			c.releaseRuntimeSlotReservation()
 			_ = c.manager.closeClient(c.client, c.info.SessionID)
 			return err
 		}
@@ -314,6 +405,7 @@ func (c *runtimeSessionCandidate) Commit(persist func() error) error {
 	c.manager.touchRuntimeKey(c.key)
 	c.committed = true
 	transition.Unlock()
+	c.releaseRuntimeSlotReservation()
 
 	_ = old.closeReplacedBy(c.manager, c.client)
 	return nil
@@ -329,7 +421,16 @@ func (c *runtimeSessionCandidate) Abort() {
 		return
 	}
 	c.closed = true
+	c.releaseRuntimeSlotReservation()
 	_ = c.manager.closeClient(c.client, c.info.SessionID)
+}
+
+func (c *runtimeSessionCandidate) releaseRuntimeSlotReservation() {
+	if c == nil || c.releaseReservation == nil {
+		return
+	}
+	c.releaseReservation()
+	c.releaseReservation = nil
 }
 
 func (r *runtimeManager) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
@@ -620,6 +721,131 @@ func (r *runtimeManager) Shutdown(ctx context.Context) error {
 	return firstErr
 }
 
+func (r *runtimeManager) reserveRuntimeSlot(key runtimeKey) (func(), error) {
+	key = normalizeRuntimeKey(key)
+	if r == nil {
+		return func() {}, nil
+	}
+	if r.maxSlots <= 0 {
+		return func() {}, nil
+	}
+	now := r.currentTime()
+	for {
+		victim, ok, err := r.reserveRuntimeSlotLocked(key, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			break
+		}
+		if err := r.closeRuntimeSlotForCapacity(victim); err != nil {
+			return nil, err
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.releaseRuntimeSlotReservation(key)
+		})
+	}, nil
+}
+
+func (r *runtimeManager) releaseRuntimeSlotReservation(key runtimeKey) {
+	key = normalizeRuntimeKey(key)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	slot := r.slots[key]
+	if slot.reserved <= 0 {
+		return
+	}
+	slot.reserved--
+	if slot.client == nil && slot.sessionID == "" {
+		if slot.reserved <= 0 {
+			delete(r.slots, key)
+			return
+		}
+		r.slots[key] = slot
+		return
+	}
+	r.slots[key] = slot
+}
+
+func (r *runtimeManager) reserveRuntimeSlotLocked(target runtimeKey, now time.Time) (runtimeKey, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if slot := r.slots[target]; slot.client != nil || slot.reserved > 0 {
+		slot.reserved++
+		slot.lastUsed = now
+		r.slots[target] = slot
+		return runtimeKey{}, true, nil
+	}
+	if r.maxSlots <= 0 || r.runtimeCapacityUsedLocked() < r.maxSlots {
+		r.setRuntimeSlotReservationLocked(target, now)
+		return runtimeKey{}, true, nil
+	}
+	var victim runtimeKey
+	var victimLastUsed time.Time
+	victimOK := false
+	for key, slot := range r.slots {
+		if !r.slotCapacityReclaimableLocked(slot) {
+			continue
+		}
+		lastUsed := slot.lastUsed
+		if lastUsed.IsZero() {
+			lastUsed = now
+		}
+		if !victimOK || lastUsed.Before(victimLastUsed) {
+			victim = key
+			victimLastUsed = lastUsed
+			victimOK = true
+		}
+	}
+	if victimOK {
+		return victim, false, nil
+	}
+	return runtimeKey{}, false, fmt.Errorf("%w: 当前 ACP runtime 已达到上限 %d，且没有可回收的 idle runtime", errACPRuntimeLimitReached, r.maxSlots)
+}
+
+func (r *runtimeManager) setRuntimeSlotReservationLocked(key runtimeKey, now time.Time) {
+	slot := r.slots[key]
+	slot.reserved++
+	slot.lastUsed = now
+	r.slots[key] = slot
+}
+
+func (r *runtimeManager) runtimeCapacityUsedLocked() int {
+	used := 0
+	for _, slot := range r.slots {
+		if slot.client != nil || slot.reserved > 0 {
+			used++
+		}
+	}
+	return used
+}
+
+func (r *runtimeManager) closeRuntimeSlotForCapacity(key runtimeKey) error {
+	key = normalizeRuntimeKey(key)
+	lock := r.transitionLock(key)
+	lock.Lock()
+	r.mu.Lock()
+	slot := r.slots[key]
+	if r.slotCapacityReclaimableLocked(slot) {
+		delete(r.slots, key)
+	} else {
+		slot = runtimeClientSlot{}
+	}
+	r.mu.Unlock()
+	lock.Unlock()
+	return slot.close(r)
+}
+
+func (r *runtimeManager) slotCapacityReclaimableLocked(slot runtimeClientSlot) bool {
+	return slot.client != nil && slot.active == 0 && slot.reserved <= 0
+}
+
 func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) (*acp.Client, func(), error) {
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
@@ -651,10 +877,16 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	}
 
 	// leader：在锁外启动并握手 client。
+	releaseReservation, err := r.reserveRuntimeSlot(key)
+	if err != nil {
+		r.finishClientBuild(key, build)
+		return nil, nil, err
+	}
 	client, info, err := r.startAndResumeRuntimeClient(ctx, session, agent)
 	build.setResult(client, info, err)
 
 	if err != nil {
+		releaseReservation()
 		r.finishClientBuild(key, build)
 		if client != nil {
 			_ = client.Close()
@@ -668,6 +900,7 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	// 交换前再确认一次：可能有更新的 client 已被插入（例如被 close 后重建）。
 	if existing, release, ok := r.acquireCachedClientForSession(key, session.ACPSessionID); ok {
 		lock.Unlock()
+		releaseReservation()
 		r.finishClientBuild(key, build)
 		_ = client.Close()
 		return existing, release, nil
@@ -676,6 +909,7 @@ func (r *runtimeManager) clientForRuntimeSession(ctx context.Context, key runtim
 	r.attachClientSubscriptions(key, client)
 	client, release, _ := r.acquireCachedClientForSession(key, session.ACPSessionID)
 	lock.Unlock()
+	releaseReservation()
 	r.finishClientBuild(key, build)
 
 	_ = old.closeReplacedBy(r, client)
@@ -776,7 +1010,7 @@ func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionI
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old := r.slots[key]
-	r.slots[key] = runtimeClientSlot{client: client, sessionID: sessionID, lastUsed: r.currentTime()}
+	r.slots[key] = runtimeClientSlot{client: client, sessionID: sessionID, lastUsed: r.currentTime(), reserved: old.reserved}
 	return old
 }
 func (r *runtimeManager) detachClient(key runtimeKey) runtimeClientSlot {
@@ -932,6 +1166,8 @@ func (r *runtimeManager) closeClient(client *acp.Client, sessionID string) error
 	}
 	var firstErr error
 	if sessionID != "" && client.SupportsCloseSession() {
+		// Runtime shutdown may be triggered by idle cleanup or session
+		// transitions rather than an inbound request; bound the close RPC.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := client.CloseSession(ctx, sessionID); err != nil && firstErr == nil {
 			firstErr = err

@@ -262,9 +262,9 @@ func newServiceUninstallCommand() *cobra.Command {
 func newUpdateCommand() *cobra.Command {
 	options := updateCommandOptions{GiteeRepo: defaultGiteeUpdateRepo()}
 	cmd := &cobra.Command{
-		Use:          "update",
+		Use:          "update [rollback]",
 		Short:        "更新 bridge 二进制（只替换不重启）",
-		Args:         noArgsUsage("用法: lark-acp-bridge update [--check] [--version <tag>] [--repo <owner/name>] [--gitee-repo <owner/name>|-] [--binary <path>]"),
+		Args:         updateArgsUsage(&options),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runUpdate(options)
@@ -276,6 +276,19 @@ func newUpdateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&options.GiteeRepo, "gitee-repo", defaultGiteeUpdateRepo(), "Gitee 镜像仓库（owner/name），GitHub 下载失败时回退；传 \"-\" 禁用")
 	cmd.Flags().StringVar(&options.BinaryPath, "binary", "", "待替换的可执行文件路径（默认当前可执行文件）")
 	return cmd
+}
+
+func updateArgsUsage(options *updateCommandOptions) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		if len(args) == 1 && args[0] == "rollback" {
+			options.Rollback = true
+			return nil
+		}
+		return errors.New("用法: lark-acp-bridge update [rollback] [--check] [--version <tag>] [--repo <owner/name>] [--gitee-repo <owner/name>|-] [--binary <path>]")
+	}
 }
 
 func noArgsUsage(usage string) cobra.PositionalArgs {

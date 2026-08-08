@@ -34,6 +34,51 @@ func TestCtxHandlerAddsContextAttrsToJSONLog(t *testing.T) {
 	}
 }
 
+func TestEnsureTraceIDAddsStableTraceAndPreservesExisting(t *testing.T) {
+	ctx, traceID := EnsureTraceID(context.Background(), "bot-a", "om_1")
+	want := TraceIDFromParts("bot-a", "om_1")
+	if traceID != want {
+		t.Fatalf("traceID = %q, want %q", traceID, want)
+	}
+	if got := TraceID(ctx); got != want {
+		t.Fatalf("TraceID(ctx) = %q, want %q", got, want)
+	}
+
+	ctx = CtxAddAttr(ctx, slog.String("message_id", "om_1"))
+	ctx, got := EnsureTraceID(ctx, "bot-a", "om_2")
+	if got != want || TraceID(ctx) != want {
+		t.Fatalf("EnsureTraceID(existing) = %q / %q, want existing %q", got, TraceID(ctx), want)
+	}
+	if CtxAttrString(ctx, "message_id") != "om_1" {
+		t.Fatalf("message_id = %q, want preserved", CtxAttrString(ctx, "message_id"))
+	}
+}
+
+func TestCtxAddMissingAttrDoesNotDuplicateExistingKeys(t *testing.T) {
+	ctx := CtxAddAttr(context.Background(), slog.String("message_id", "om_original"))
+	ctx = CtxAddMissingAttr(ctx,
+		slog.String("message_id", "om_new"),
+		slog.String("chat_id", "oc_chat"),
+	)
+
+	if got := CtxAttrString(ctx, "message_id"); got != "om_original" {
+		t.Fatalf("message_id = %q, want original", got)
+	}
+	if got := CtxAttrString(ctx, "chat_id"); got != "oc_chat" {
+		t.Fatalf("chat_id = %q, want added attr", got)
+	}
+	attrs := CtxAttrs(ctx)
+	count := 0
+	for _, attr := range attrs {
+		if attr.Key == "message_id" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("message_id attrs count = %d, want 1; attrs=%+v", count, attrs)
+	}
+}
+
 func TestLevelFromEnv(t *testing.T) {
 	t.Setenv(LevelEnv, "debug")
 	if got := LevelFromEnv(); got.Level() != slog.LevelDebug {

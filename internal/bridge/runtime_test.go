@@ -177,6 +177,143 @@ func TestRuntimeCloseIdleRuntimeSlotsKeepsBusyClient(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshotReportsClientAndSlotState(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.idleTimeout = 30 * time.Minute
+	current := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	wiki := wikiRuntimeKey(current.SessionKey, 1, "session-wiki")
+	marker := currentRuntimeKey(SessionKey{BotID: "bot-b", ChatID: "oc_other"})
+	r.slots[current] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "session-1",
+		lastUsed:  base.Add(-31 * time.Minute),
+	}
+	r.slots[wiki] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "session-wiki",
+		lastUsed:  base,
+		active:    1,
+	}
+	r.slots[marker] = runtimeClientSlot{
+		sessionID: "session-marker",
+		lastUsed:  base,
+	}
+
+	snapshot := r.snapshot()
+	if snapshot.TotalSlots != 3 || snapshot.ClientSlots != 2 || snapshot.ActiveSlots != 1 || snapshot.IdleSlots != 1 || snapshot.MarkerSlots != 1 || snapshot.MaxSlots != acpRuntimeMaxSlots {
+		t.Fatalf("snapshot = %+v, want total=3 clients=2 active=1 idle=1 markers=1 max=%d", snapshot, acpRuntimeMaxSlots)
+	}
+	if len(snapshot.Slots) != 3 {
+		t.Fatalf("snapshot slots = %+v, want 3", snapshot.Slots)
+	}
+	if !snapshot.Slots[0].HasClient || snapshot.Slots[0].SessionID != "session-1" || !snapshot.Slots[0].Idle {
+		t.Fatalf("first slot = %+v, want idle current client sorted first", snapshot.Slots[0])
+	}
+}
+
+func TestRuntimeReserveSlotReclaimsOldestIdleClientAtLimit(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.maxSlots = 2
+	oldKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "old"})
+	newerKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "newer"})
+	targetKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "target"})
+	r.slots[oldKey] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "old-session",
+		lastUsed:  base.Add(-2 * time.Hour),
+	}
+	r.slots[newerKey] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "newer-session",
+		lastUsed:  base.Add(-time.Hour),
+	}
+
+	release, err := r.reserveRuntimeSlot(targetKey)
+	if err != nil {
+		t.Fatalf("reserveRuntimeSlot() error = %v", err)
+	}
+	defer release()
+	if _, ok := r.slots[oldKey]; ok {
+		t.Fatal("oldest idle runtime slot still exists, want reclaimed")
+	}
+	if _, ok := r.slots[newerKey]; !ok {
+		t.Fatal("newer runtime slot missing, want retained")
+	}
+	if slot := r.slots[targetKey]; slot.reserved != 1 {
+		t.Fatalf("target slot = %+v, want reserved placeholder", slot)
+	}
+}
+
+func TestRuntimeReserveSlotTracksMultipleReservationsForSameKey(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.maxSlots = 1
+	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "same"})
+	otherKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "other"})
+
+	releaseOne, err := r.reserveRuntimeSlot(key)
+	if err != nil {
+		t.Fatalf("reserveRuntimeSlot(first) error = %v", err)
+	}
+	releaseTwo, err := r.reserveRuntimeSlot(key)
+	if err != nil {
+		t.Fatalf("reserveRuntimeSlot(second) error = %v", err)
+	}
+	if slot := r.slots[key]; slot.reserved != 2 {
+		t.Fatalf("slot after two reservations = %+v, want reserved=2", slot)
+	}
+
+	releaseOne()
+	if slot := r.slots[key]; slot.reserved != 1 {
+		t.Fatalf("slot after one release = %+v, want reserved=1", slot)
+	}
+	if releaseOther, err := r.reserveRuntimeSlot(otherKey); err == nil {
+		releaseOther()
+		t.Fatal("reserveRuntimeSlot(other) succeeded while same-key reservation still holds capacity")
+	} else if !errors.Is(err, errACPRuntimeLimitReached) {
+		t.Fatalf("reserveRuntimeSlot(other) error = %v, want errACPRuntimeLimitReached", err)
+	}
+
+	releaseTwo()
+	if _, ok := r.slots[key]; ok {
+		t.Fatalf("slot still exists after all releases: %+v", r.slots[key])
+	}
+}
+
+func TestRuntimeReserveSlotRejectsWhenLimitIsAllBusy(t *testing.T) {
+	r := newRuntimeManager()
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return base }
+	r.maxSlots = 1
+	busyKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "busy"})
+	targetKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "target"})
+	r.slots[busyKey] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: "busy-session",
+		lastUsed:  base.Add(-2 * time.Hour),
+		active:    1,
+	}
+
+	release, err := r.reserveRuntimeSlot(targetKey)
+	if err == nil || !errors.Is(err, errACPRuntimeLimitReached) {
+		t.Fatalf("reserveRuntimeSlot() err = %v, want errACPRuntimeLimitReached", err)
+	}
+	if release != nil {
+		t.Fatal("reserveRuntimeSlot() returned release function on failure")
+	}
+	if _, ok := r.slots[busyKey]; !ok {
+		t.Fatal("busy runtime slot missing, want retained")
+	}
+	if _, ok := r.slots[targetKey]; ok {
+		t.Fatal("target runtime slot exists after failed reserve")
+	}
+}
+
 func TestRuntimeClientForRuntimeSessionSingleflightsConcurrentBuilds(t *testing.T) {
 	r := newRuntimeManager()
 	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})

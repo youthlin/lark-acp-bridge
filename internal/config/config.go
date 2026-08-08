@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,8 @@ const appName = "lark-acp-bridge"
 const encryptedSecretPrefix = "lark-acp-bridge-secret:v1:"
 
 var configPathLocks sync.Map
+
+const sensitiveFileTooPermissiveMask fs.FileMode = 0o066
 
 type Config struct {
 	AgentList       []NamedAgentConfig `json:"agent_list,omitempty"`
@@ -132,7 +135,7 @@ func (s *Secret) Resolve(label string) error {
 		if err != nil {
 			return fmt.Errorf("展开 %s file path: %w", label, err)
 		}
-		data, err := os.ReadFile(path)
+		data, err := readSensitiveFile("secret", path)
 		if err != nil {
 			return fmt.Errorf("读取 %s file secret %s: %w", label, path, err)
 		}
@@ -159,7 +162,7 @@ func resolveFileSecretValue(path string, data []byte) (string, error) {
 		return "", fmt.Errorf("secret 文件必须是加密格式")
 	}
 	keyPath := secretKeyPath(path)
-	keyData, err := os.ReadFile(keyPath)
+	keyData, err := readSensitiveFile("key", keyPath)
 	if err != nil {
 		return "", fmt.Errorf("读取 key 文件 %s: %w", keyPath, err)
 	}
@@ -352,7 +355,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readSensitiveFile("config", path)
 	if err != nil {
 		return Config{}, fmt.Errorf("读取配置文件: %w", err)
 	}
@@ -546,7 +549,7 @@ func UpdateBotDriveComment(path, botID string, update func(*DriveCommentConfig))
 	}
 	unlock := lockConfigPath(path)
 	defer unlock()
-	data, err := os.ReadFile(path)
+	data, err := readSensitiveFile("config", path)
 	if err != nil {
 		return DriveCommentConfig{}, fmt.Errorf("读取配置文件: %w", err)
 	}
@@ -637,7 +640,7 @@ func WriteResolvedBotFields(path string, bots []BotConfig) (bool, error) {
 	}
 	unlock := lockConfigPath(path)
 	defer unlock()
-	data, err := os.ReadFile(path)
+	data, err := readSensitiveFile("config", path)
 	if err != nil {
 		return false, fmt.Errorf("读取配置文件: %w", err)
 	}
@@ -741,6 +744,23 @@ func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func readSensitiveFile(category, path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	warnIfSensitiveFileTooPermissive(category, path)
+	return data, nil
+}
+
+func warnSensitiveFileTooPermissive(category, path string, mode fs.FileMode) {
+	slog.Warn("敏感配置文件权限过宽",
+		"category", strings.TrimSpace(category),
+		"path", path,
+		"mode", mode.Perm().String(),
+	)
 }
 
 func lockConfigPath(path string) func() {

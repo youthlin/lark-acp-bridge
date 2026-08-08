@@ -794,6 +794,64 @@ func TestHandleFeishuMessageSlashCommandRejectsNonOwner(t *testing.T) {
 	}
 }
 
+func TestStatusShowsRuntimeSnapshot(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	svc := newTestService(cfg, store)
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	runtime := newRuntimeManager()
+	runtime.maxSlots = 4
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	runtime.now = func() time.Time { return base }
+	runtime.idleTimeout = 30 * time.Minute
+	current := currentRuntimeKey(session.Key)
+	wiki := wikiRuntimeKey(session.Key, 1, session.ACPSessionID)
+	other := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	runtime.slots[current] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: session.ACPSessionID,
+		lastUsed:  base.Add(-31 * time.Minute),
+	}
+	runtime.slots[wiki] = runtimeClientSlot{
+		client:    &acp.Client{},
+		sessionID: session.ACPSessionID,
+		lastUsed:  base,
+		active:    1,
+	}
+	runtime.slots[other] = runtimeClientSlot{
+		sessionID: "marker-only",
+		lastUsed:  base,
+	}
+	svc.setRuntime(runtime)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:  "bot-a",
+		ChatID: "oc_chat",
+		Text:   "/status",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/status) error = %v", err)
+	}
+	for _, want := range []string{
+		"runtime：slots 3，clients 2/4，busy 1，idle 1，markers 1",
+		"runtime会话：slots 2，clients 2，busy 1，idle 1，scope current/wiki",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, want %q", reply, want)
+		}
+	}
+}
+
 func TestHandleFeishuMessageDebugCommandTogglesProgramLevel(t *testing.T) {
 	orig := logging.ProgramLevel().Level()
 	t.Cleanup(func() {
@@ -8518,6 +8576,65 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageInjectsTraceAttrsIntoPromptContext(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "ACP 回复"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+
+	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_trace_prompt",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		SenderID:         "ou_sender",
+		Text:             "@智能助手 帮我处理 secret-token",
+		Mentions:         testBotMentions(),
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("prompt calls = %+v, want one call", rt.promptCalls)
+	}
+	attrs := rt.promptCalls[0].Attrs
+	traceID := attrs["trace_id"]
+	if traceID == "" {
+		t.Fatalf("prompt attrs = %+v, want trace_id", attrs)
+	}
+	wantTraceID := logging.TraceIDFromParts("feishu_message", "bot-a", "om_trace_prompt", "oc_chat", "omt_thread", "", "", "ou_sender")
+	if traceID != wantTraceID {
+		t.Fatalf("trace_id = %q, want stable %q", traceID, wantTraceID)
+	}
+	for key, want := range map[string]string{
+		"message_id": "om_trace_prompt",
+		"chat_id":    "oc_chat",
+		"thread_id":  "omt_thread",
+		"sender_id":  "ou_sender",
+	} {
+		if got := attrs[key]; got != want {
+			t.Fatalf("prompt attrs[%s] = %q, want %q; attrs=%+v", key, got, want, attrs)
+		}
+	}
+	for key, value := range attrs {
+		if strings.Contains(value, "secret-token") || strings.Contains(value, "帮我处理") {
+			t.Fatalf("prompt attr %s=%q should not contain message body or secret", key, value)
+		}
+	}
+}
+
 func TestHandleFeishuMessageReplyToDriveCommentTraceCardUsesBoundSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{promptReply: "trace 群回复"}
@@ -10483,6 +10600,7 @@ type fakePromptCall struct {
 	Runtime              runtimeKey
 	Session              Session
 	Text                 string
+	Attrs                map[string]string
 	HasUpdateHandler     bool
 	HasPermissionHandler bool
 	Seq                  int
@@ -10604,6 +10722,7 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 		Runtime:              key,
 		Session:              session,
 		Text:                 text,
+		Attrs:                slogAttrsMap(logging.CtxAttrs(ctx)),
 		HasUpdateHandler:     opts.OnUpdate != nil,
 		HasPermissionHandler: opts.OnPermissionRequest != nil,
 		Seq:                  f.nextCallSeqLocked(),

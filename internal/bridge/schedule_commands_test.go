@@ -69,9 +69,15 @@ func TestHandleScheduleCommandAddListStatusPauseResumeDelete(t *testing.T) {
 	if !strings.Contains(list, task.ID) || !strings.Contains(list, "[启用]") || !strings.Contains(list, "生成日报") {
 		t.Fatalf("list reply = %q, want created task", list)
 	}
+	if !strings.Contains(list, missedSchedulePolicyText()) {
+		t.Fatalf("list reply = %q, want missed schedule policy", list)
+	}
 	status := svc.handleScheduleCommand(context.Background(), "/schedule status "+task.ID, msg)
 	if !strings.Contains(status, "定时任务："+task.ID) || !strings.Contains(status, "状态：启用") || !strings.Contains(status, "回传：IM oc_chat") || strings.Contains(status, "回传：IM oc_chat /") {
 		t.Fatalf("status reply = %q, want task details", status)
+	}
+	if !strings.Contains(status, missedSchedulePolicyText()) {
+		t.Fatalf("status reply = %q, want missed schedule policy", status)
 	}
 
 	pause := svc.handleScheduleCommand(context.Background(), "/schedule pause "+task.ID, msg)
@@ -107,6 +113,31 @@ func TestHandleScheduleCommandAddListStatusPauseResumeDelete(t *testing.T) {
 	}
 	if got := svc.scheduledTaskJobCount(); got != 0 {
 		t.Fatalf("scheduledTaskJobCount() = %d, want job stopped after delete", got)
+	}
+}
+
+func TestScheduleOutputsExposeMissedRunPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: t.TempDir()}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+	}
+	for name, text := range map[string]string{
+		"usage":      scheduleCommandUsage(),
+		"empty list": svc.handleScheduleCommand(context.Background(), "/schedule list", msg),
+	} {
+		if !strings.Contains(text, missedSchedulePolicyText()) {
+			t.Fatalf("%s output = %q, want missed schedule policy", name, text)
+		}
 	}
 }
 
@@ -379,6 +410,9 @@ func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) 
 	if !strings.Contains(runReply, "已开始立即执行定时任务："+tasks[0].ID) || !strings.Contains(runReply, "run："+tasks[0].ID+"-") {
 		t.Fatalf("run reply = %q, want immediate run ack", runReply)
 	}
+	if strings.Contains(runReply, missedSchedulePolicyText()) {
+		t.Fatalf("run reply = %q, manual run should not be presented as missed-run policy handling", runReply)
+	}
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
 	var gotSent sentResult
@@ -542,6 +576,7 @@ func TestHandleScheduleHowCommandReturnsRecommendedAddCommand(t *testing.T) {
 		"每天上午 8 点执行 scripts/report.sh",
 		"## /schedule add 命令格式（循环）",
 		"每天上午 8 点应生成 0 8 * * *",
+		missedSchedulePolicyText(),
 		"最终只返回一条 /schedule 命令",
 		"不要真正创建任务，只生成命令",
 	} {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
+	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
 // TriggerSink 接收非 IM 触发源的执行结果和状态。
@@ -115,6 +116,7 @@ func triggerUpdateText(update acp.PromptUpdate) string {
 
 func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (TriggerResult, error) {
 	req = req.normalized()
+	ctx = triggerTraceContext(ctx, req)
 	slog.InfoContext(ctx, "开始执行 trigger prompt", triggerLogArgs(req, Session{})...)
 	prepared, err := s.prepareTrigger(req)
 	if err != nil {
@@ -184,6 +186,37 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 		slog.InfoContext(ctx, "trigger prompt 执行完成", triggerLogArgs(req, result.Session)...)
 	}
 	return result, err
+}
+
+func triggerTraceContext(ctx context.Context, req TriggerRequest) context.Context {
+	req = req.normalized()
+	key := normalizeSessionKey(req.Key)
+	ctx = logging.CtxAddMissingAttr(ctx,
+		slog.String("bot", req.BotID),
+		slog.String("source", sessionKeySource(key)),
+		slog.String("main_id", sessionKeyMainID(key)),
+		slog.String("sub_id", strings.TrimSpace(key.SubID)),
+		slog.String("task_id", strings.TrimSpace(req.Metadata["task_id"])),
+		slog.String("run_id", strings.TrimSpace(req.Metadata["run_id"])),
+		slog.String("comment_id", strings.TrimSpace(req.Metadata["comment_id"])),
+	)
+	ctx, _ = logging.EnsureTraceID(ctx, triggerTraceParts(req)...)
+	return ctx
+}
+
+func triggerTraceParts(req TriggerRequest) []string {
+	req = req.normalized()
+	key := normalizeSessionKey(req.Key)
+	return []string{
+		"trigger",
+		req.BotID,
+		sessionKeySource(key),
+		sessionKeyMainID(key),
+		strings.TrimSpace(key.SubID),
+		strings.TrimSpace(req.Metadata["task_id"]),
+		strings.TrimSpace(req.Metadata["run_id"]),
+		strings.TrimSpace(req.Metadata["comment_id"]),
+	}
 }
 
 func (s *Service) subscribeTriggerStateUpdates(ctx context.Context, prepared preparedTrigger) {

@@ -80,7 +80,11 @@ func (c larkReactionClient) DeleteReaction(ctx context.Context, messageID string
 		MessageId(messageID).
 		ReactionId(reactionID).
 		Build()
-	resp, err := c.client.Im.V1.MessageReaction.Delete(ctx, req)
+	resp, err := retryFeishuAPI(ctx, defaultFeishuRetryOptions(), func(ctx context.Context) (*larkim.DeleteMessageReactionResp, error) {
+		return c.client.Im.V1.MessageReaction.Delete(ctx, req)
+	}, func(resp *larkim.DeleteMessageReactionResp) bool {
+		return resp != nil && shouldRetryFeishuAPIResp(resp.ApiResp)
+	})
 	if err != nil {
 		return fmt.Errorf("调用飞书删除 reaction 接口: %w", err)
 	}

@@ -471,6 +471,7 @@ func TestAdapterAddsMessageAttrsToContext(t *testing.T) {
 		"root_id":            "om_root",
 		"parent_id":          "om_parent",
 		"sender_id":          "ou_sender",
+		"trace_id":           logging.TraceIDFromParts("feishu_message", "bot-a", "om_1", "oc_1", "omt_1", "om_root", "om_parent", "ou_sender"),
 	} {
 		if got := attrs[key]; got != want {
 			t.Fatalf("ctx attr %s = %q, want %q; attrs=%v", key, got, want, attrs)
