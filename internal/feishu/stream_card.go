@@ -376,6 +376,7 @@ func (c *sdkStreamCard) UpdateText(ctx context.Context, text string) error {
 func (c *sdkStreamCard) SetFinalText(ctx context.Context, text string, render OutboundRenderContext) error {
 	blocks, err := c.adapter.renderOutboundBlocks(ctx, text, outboundRenderContextFromPublic(render))
 	if err != nil {
+		slog.ErrorContext(ctx, "渲染 ACP 流式卡片最终文本失败", "card_id", c.cardID, "base_dir", render.BaseDir, "错误", err)
 		return err
 	}
 	c.mu.Lock()
@@ -391,8 +392,15 @@ func (c *sdkStreamCard) SetFinalText(ctx context.Context, text string, render Ou
 	c.text = normalizedText
 	c.finalBlocks = blocks
 	if hasImage || c.shouldUseNormalUpdateLocked() {
+		if hasImage {
+			slog.InfoContext(ctx, "ACP 流式卡片最终文本包含图片，使用完整卡片更新", "card_id", c.cardID, "image_count", outboundBlocksImageCount(blocks), "base_dir", render.BaseDir)
+		}
 		c.streamingClosed = true
-		return c.updateFullCardLocked(ctx, true)
+		if err := c.updateFullCardLocked(ctx, true); err != nil {
+			slog.ErrorContext(ctx, "更新 ACP 流式卡片最终文本失败", "card_id", c.cardID, "has_image", hasImage, "image_count", outboundBlocksImageCount(blocks), "错误", err)
+			return err
+		}
+		return nil
 	}
 	return c.handleStreamMutationErrorLocked(ctx, c.updateElementLocked(ctx, streamCardTextElementID, c.text))
 }

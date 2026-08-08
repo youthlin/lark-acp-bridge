@@ -35,14 +35,14 @@ func (s *driveCommentTraceSink) OnUpdate(ctx context.Context, result TriggerResu
 	}
 	stream.updatePromptStatusFromUpdate(result.Update)
 	if chunk, ok := promptUpdateChunk(result.Update); ok {
-		if chunk.ToolBoundary {
-			s.chunks.markToolBoundary()
+		if chunk.FinalBoundary {
+			s.chunks.markFinalBoundary()
 		}
 		s.chunks.add(chunk)
 		return nil
 	}
-	if isToolBoundaryUpdateKind(promptUpdateKind(result.Update)) {
-		s.chunks.markToolBoundary()
+	if isFinalTextBoundaryUpdateKind(promptUpdateKind(result.Update)) {
+		s.chunks.markFinalBoundary()
 	} else {
 		s.chunks.finishStream()
 	}
@@ -52,7 +52,8 @@ func (s *driveCommentTraceSink) OnUpdate(ctx context.Context, result TriggerResu
 
 func (s *driveCommentTraceSink) OnComplete(ctx context.Context, result TriggerResult) error {
 	text := strings.TrimSpace(result.Text)
-	if text == "" {
+	explicitEmpty := result.TextSet && text == ""
+	if text == "" && !explicitEmpty {
 		text = "云文档评论已完成，但没有返回文本。"
 	}
 	if stream := s.ensureStream(ctx, result); stream != nil {
@@ -61,7 +62,9 @@ func (s *driveCommentTraceSink) OnComplete(ctx context.Context, result TriggerRe
 		if s.chunks != nil {
 			s.chunks.close()
 		}
-		stream.setFinalTextWithContext(finalCtx, text)
+		if text != "" {
+			stream.setFinalTextWithContext(finalCtx, text)
+		}
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
 		stream.updatePromptResult(result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)

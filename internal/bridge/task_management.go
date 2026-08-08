@@ -101,6 +101,8 @@ func wikiReflectionTaskOptions() runningTaskOptions {
 type promptTaskRunResult struct {
 	result       acp.PromptResult
 	sentProgress bool
+	reply        string
+	replySet     bool
 }
 
 type sessionWorkSnapshot struct {

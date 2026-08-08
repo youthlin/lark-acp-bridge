@@ -43,6 +43,7 @@ type TriggerResult struct {
 	ACPResult      acp.PromptResult
 	Update         acp.PromptUpdate
 	Text           string
+	TextSet        bool
 	SentProgress   bool
 	Err            error
 	Skipped        bool
@@ -81,9 +82,9 @@ func (r TriggerRequest) valid() bool {
 	return r.BotID != "" && r.Key.Valid() && r.Prompt != ""
 }
 
-func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptResult, text string, sentProgress bool, err error) TriggerResult {
+func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptResult, text string, textSet bool, sentProgress bool, err error) TriggerResult {
 	session = normalizeSessionForStore(session)
-	if text == "" {
+	if !textSet && text == "" {
 		text = acpResult.Text
 	}
 	return TriggerResult{
@@ -91,6 +92,7 @@ func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptR
 		Session:        session,
 		ACPResult:      acpResult,
 		Text:           text,
+		TextSet:        textSet,
 		SentProgress:   sentProgress,
 		Err:            err,
 		ACPSessionID:   session.ACPSessionID,
@@ -99,7 +101,7 @@ func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptR
 }
 
 func newTriggerUpdateResult(req TriggerRequest, session Session, update acp.PromptUpdate) TriggerResult {
-	result := newTriggerResult(req, session, acp.PromptResult{}, triggerUpdateText(update), false, nil)
+	result := newTriggerResult(req, session, acp.PromptResult{}, triggerUpdateText(update), true, false, nil)
 	result.Update = update
 	return result
 }
@@ -150,6 +152,7 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 			session:      result.Session,
 			result:       result.ACPResult,
 			reply:        result.Text,
+			replySet:     result.TextSet,
 			sentProgress: result.SentProgress,
 			err:          err,
 		}
@@ -171,7 +174,7 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 			return s.updateTriggerAutomaticTitle(titleCtx, prepared, current)
 		},
 	})
-	result := newTriggerResult(req, post.session, out.result, post.reply, out.sentProgress, out.err)
+	result := newTriggerResult(req, post.session, out.result, post.reply, post.replySet, out.sentProgress, out.err)
 	err = out.err
 	if req.Sink != nil {
 		if err != nil {
@@ -369,7 +372,7 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
 		err := fmt.Errorf("未找到 trigger session 的 agent 配置: %s", session.AgentName)
-		return newTriggerResult(req, session, acp.PromptResult{}, "", false, err), err
+		return newTriggerResult(req, session, acp.PromptResult{}, "", false, false, err), err
 	}
 	chunks := &triggerTextAccumulator{}
 	out, err := runPromptTask(s, ctx, session, agent, triggerPromptTaskOptions(), func(taskCtx context.Context) (acp.PromptResult, bool, error) {
@@ -386,11 +389,11 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 		})
 		return result, false, err
 	})
-	text := chunks.finalText()
+	text, textSet := chunks.finalText()
 	if text != "" && strings.TrimSpace(out.result.Text) == "" {
 		out.result.Text = text
 	}
-	result := newTriggerResult(req, session, out.result, text, out.sentProgress, err)
+	result := newTriggerResult(req, session, out.result, text, textSet, out.sentProgress, err)
 	return result, err
 }
 
@@ -484,13 +487,14 @@ func triggerPermissionSourceLabel(req TriggerRequest) string {
 type triggerTextAccumulator struct {
 	reply          strings.Builder
 	finalCandidate strings.Builder
+	lastFinalText  string
 	hasBoundary    bool
 }
 
 func (a *triggerTextAccumulator) add(update acp.PromptUpdate) {
 	chunk, ok := promptUpdateChunk(update)
 	if ok {
-		if chunk.ToolBoundary {
+		if chunk.FinalBoundary {
 			a.markBoundary()
 		}
 		if chunk.Target == promptChunkTargetText {
@@ -499,26 +503,30 @@ func (a *triggerTextAccumulator) add(update acp.PromptUpdate) {
 		}
 		return
 	}
-	if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
+	if isFinalTextBoundaryUpdateKind(promptUpdateKind(update)) {
 		a.markBoundary()
 	}
 }
 
 func (a *triggerTextAccumulator) markBoundary() {
-	if strings.TrimSpace(a.finalCandidate.String()) != "" {
+	if text := strings.TrimSpace(a.finalCandidate.String()); text != "" {
+		a.lastFinalText = text
 		a.finalCandidate.Reset()
 	}
 	a.hasBoundary = true
 }
 
-func (a *triggerTextAccumulator) finalText() string {
+func (a *triggerTextAccumulator) finalText() (string, bool) {
 	if text := strings.TrimSpace(a.finalCandidate.String()); text != "" {
-		return text
+		return text, true
 	}
 	if a.hasBoundary {
-		return ""
+		return strings.TrimSpace(a.lastFinalText), true
 	}
-	return strings.TrimSpace(a.reply.String())
+	if text := strings.TrimSpace(a.reply.String()); text != "" {
+		return text, true
+	}
+	return "", false
 }
 
 func (s *Service) prepareTriggerRequest(req TriggerRequest) (TriggerRequest, *SessionStore, error) {

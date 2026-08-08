@@ -4854,6 +4854,66 @@ func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCar
 	}
 }
 
+func TestHandleFeishuGroupChatAtAutoSuppressesExplicitEmptyFinalText(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptResult: acp.PromptResult{
+			Text: "raw result should not be sent",
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Check context",
+				},
+			},
+		},
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_empty",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "普通群消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group no mention auto) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want no fallback text for explicit empty final text", reply)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want no delayed auto card without final text", cards)
+	}
+	if got := client.sent; len(got) != 0 {
+		t.Fatalf("sent = %+v, want no default fallback message", got)
+	}
+}
+
 func TestHandleFeishuPrivateChatIgnoresAtConfigAndAlwaysResponds(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
@@ -6472,6 +6532,66 @@ func TestHandleFeishuMessageFinalStreamCardUsesMarkdownImageRenderContext(t *tes
 	}
 }
 
+func TestHandleFeishuMessageFinalStreamCardRendersMarkdownImageAfterTool(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "结果如下：\n\n![截图](result.png)",
+		promptUpdates: []acp.PromptUpdate{
+			{SessionID: "acp-session-1", Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "生成图片",
+			}},
+			{SessionID: "acp-session-1", Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "结果如下：\n\n![截图](result.png)"},
+			}},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "生成图片",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because card was used", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "结果如下：\n\n![截图](result.png)" {
+		t.Fatalf("final text updates = %+v, want markdown image final text after tool", got)
+	}
+	if got := cards[0].finalRenderContextsSnapshot(); len(got) != 1 || got[0].BaseDir != workDir {
+		t.Fatalf("final render contexts = %+v, want session cwd", got)
+	}
+	if !cards[0].isClosed() {
+		t.Fatalf("stream card should be closed")
+	}
+}
+
 func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{
@@ -6573,6 +6693,216 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 	}
 	if strings.Contains(lastProcess, "最终结论") {
 		t.Fatalf("last process update = %q, should not include final agent text", lastProcess)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "最终结论。" {
+		t.Fatalf("final text updates = %+v, want only text after last tool", got)
+	}
+}
+
+func TestHandleFeishuMessageKeepsTextBeforeSingleFinalBoundaryAsFallback(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "先检查。",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "先检查。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Run tests",
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "先检查。" {
+		t.Fatalf("final text updates = %+v, want text before single final boundary", got)
+	}
+	processUpdates := cards[0].processUpdatesSnapshot()
+	if len(processUpdates) == 0 {
+		t.Fatalf("processUpdates = %+v, want text before boundary preserved in process", processUpdates)
+	}
+	lastProcess := processUpdates[len(processUpdates)-1]
+	for _, want := range []string{"💬 先检查。", "⏳ Run tests"} {
+		if !strings.Contains(lastProcess, want) {
+			t.Fatalf("last process update = %q, want %q", lastProcess, want)
+		}
+	}
+}
+
+func TestHandleFeishuMessageDoesNotFallbackToRawResultAfterFinalBoundary(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "raw result should not be final",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Run tests",
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("final text updates = %+v, want no raw result fallback after final boundary", got)
+	}
+}
+
+func TestHandleFeishuMessageKeepsTextBetweenFinalBoundariesAsFallback(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "文字1\n文字2",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "文字1"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "plan",
+					PlanEntries: []acp.PlanEntry{
+						{Content: "第一步", Status: "completed"},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "文字2"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "tool_call",
+					Title:         "Run tests",
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "文字2" {
+		t.Fatalf("final text updates = %+v, want text between final boundaries", got)
+	}
+	processUpdates := cards[0].processUpdatesSnapshot()
+	if len(processUpdates) == 0 {
+		t.Fatalf("processUpdates = %+v, want text before first boundary preserved in process", processUpdates)
+	}
+	lastProcess := processUpdates[len(processUpdates)-1]
+	if !strings.Contains(lastProcess, "💬 文字1") {
+		t.Fatalf("last process update = %q, want text before first boundary in process", lastProcess)
+	}
+	if !strings.Contains(lastProcess, "💬 文字2") {
+		t.Fatalf("last process update = %q, want text before second boundary in process", lastProcess)
 	}
 }
 
@@ -7175,6 +7505,87 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 	want := "📌 计划\n• ✅ 读取现有实现\n• 🔄 补过程消息展示"
 	if got[len(got)-1] != want {
 		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
+	}
+}
+
+func TestHandleFeishuMessageUsesFinalTextAfterPlanBoundary(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "先说明。\n最终结论。",
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "先说明。"},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "plan",
+					PlanEntries: []acp.PlanEntry{
+						{Content: "确认实现", Status: "completed"},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "最终结论。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	ctx := context.Background()
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want empty final reply because progress already streamed", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	if got := cards[0].finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "最终结论。" {
+		t.Fatalf("final text updates = %+v, want only text after plan boundary", got)
+	}
+	gotProcess := cards[0].processUpdatesSnapshot()
+	if len(gotProcess) == 0 {
+		t.Fatalf("processUpdates = %+v, want plan and previous text in process", gotProcess)
+	}
+	lastProcess := gotProcess[len(gotProcess)-1]
+	for _, want := range []string{"💬 先说明。", "📌 计划", "确认实现"} {
+		if !strings.Contains(lastProcess, want) {
+			t.Fatalf("last process update = %q, want %q", lastProcess, want)
+		}
+	}
+	if strings.Contains(lastProcess, "最终结论") {
+		t.Fatalf("last process update = %q, should not include final text after plan boundary", lastProcess)
 	}
 }
 

@@ -145,19 +145,22 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 		s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
 		roundPrompt := s.promptTextWithWorkspaceContextForSession(session, msg, loopPrompt(basePrompt, s.takeLoopPendingAdd(session.Key, started), req, round, started, deadline))
 		includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
-		result, sentProgress, rawResult, streamedReply, err := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round))
-		if includedWorkspaceContext && (err == nil || sentProgress) {
+		run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round))
+		result := run.result
+		rawResult := run.rawResult
+		streamedReply := run.reply
+		if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
 			session = s.markWorkspacePrompted(ctx, msg, session)
 		}
 		s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
+		if run.err != nil {
+			if errors.Is(run.err, context.Canceled) {
 				return "已取消", context.Canceled
 			}
 			if strings.TrimSpace(rawResult.Text) != "" || strings.TrimSpace(result.Text) != "" {
-				return "执行失败：" + err.Error(), err
+				return "执行失败：" + run.err.Error(), run.err
 			}
-			return "执行失败：" + err.Error(), err
+			return "执行失败：" + run.err.Error(), run.err
 		}
 		if loopDone(rawResult.Text) || loopDone(result.Text) || loopDone(streamedReply) {
 			return "agent 返回 DONE", nil

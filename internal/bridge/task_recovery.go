@@ -66,8 +66,15 @@ func runUserTask[T any](s *Service, ctx context.Context, session Session, agent 
 }
 
 func runPromptTask(s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (acp.PromptResult, bool, error)) (promptTaskRunResult, error) {
-	return runUserTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptTaskRunResult, error) {
+	return runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
 		result, sentProgress, err := run(taskCtx)
-		return promptTaskRunResult{result: result, sentProgress: sentProgress}, err
+		return promptRuntimeResult{result: result, sentProgress: sentProgress, err: err}, err
+	})
+}
+
+func runPromptTaskDetailed(s *Service, ctx context.Context, session Session, agent config.AgentConfig, opts runningTaskOptions, run func(context.Context) (promptRuntimeResult, error)) (promptTaskRunResult, error) {
+	return runUserTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptTaskRunResult, error) {
+		run, err := run(taskCtx)
+		return promptTaskRunResult{result: run.result, sentProgress: run.sentProgress, reply: run.reply, replySet: run.replySet}, err
 	})
 }

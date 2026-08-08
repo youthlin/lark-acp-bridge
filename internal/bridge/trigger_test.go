@@ -81,6 +81,7 @@ func TestNewTriggerResultClonesSessionMeta(t *testing.T) {
 		acp.PromptResult{Text: "done"},
 		"",
 		false,
+		false,
 		errPrompt,
 	)
 	meta["mode"] = "manual"
@@ -387,6 +388,205 @@ func TestRunTriggerPromptUsesFinalTextAfterToolBoundary(t *testing.T) {
 	}
 	if result.ACPResult.Text != "先检查。\n中间过程。\n最终正文。" {
 		t.Fatalf("raw result text = %q, want preserved ACP result", result.ACPResult.Text)
+	}
+}
+
+func TestRunTriggerPromptUsesFinalTextAfterPlanBoundary(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger"},
+		promptReply:    "先说明。\n最终正文。",
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "先说明。"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "plan",
+				PlanEntries: []acp.PlanEntry{
+					{Content: "确认实现", Status: "completed"},
+				},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "最终正文。"},
+			}},
+		},
+	}
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+
+	result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: t.TempDir(),
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "reply comment",
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if result.Text != "最终正文。" {
+		t.Fatalf("result text = %q, want final text after plan boundary", result.Text)
+	}
+	if result.ACPResult.Text != "先说明。\n最终正文。" {
+		t.Fatalf("raw result text = %q, want preserved ACP result", result.ACPResult.Text)
+	}
+}
+
+func TestRunTriggerPromptKeepsTextBeforeSingleFinalBoundaryAsFallback(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger"},
+		promptReply:    "先说明。",
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "先说明。"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "plan",
+				PlanEntries: []acp.PlanEntry{
+					{Content: "确认实现", Status: "completed"},
+				},
+			}},
+		},
+	}
+	svc.setRuntime(rt)
+	sink := &recordingTriggerSink{}
+	key := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+
+	result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: t.TempDir(),
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "reply comment",
+		Sink:      sink,
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if result.Text != "先说明。" {
+		t.Fatalf("result text = %q, want text before single final boundary", result.Text)
+	}
+	if result.ACPResult.Text != "先说明。" {
+		t.Fatalf("raw result text = %q, want preserved ACP result", result.ACPResult.Text)
+	}
+	if sink.lastComplete.Text != "先说明。" {
+		t.Fatalf("sink complete text = %q, want text before single final boundary", sink.lastComplete.Text)
+	}
+}
+
+func TestRunTriggerPromptDoesNotFallbackToRawResultAfterFinalBoundary(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger"},
+		promptReply:    "raw result should not be final",
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Run tests",
+			}},
+		},
+	}
+	svc.setRuntime(rt)
+	sink := &recordingTriggerSink{}
+	key := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+
+	result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: t.TempDir(),
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "reply comment",
+		Sink:      sink,
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if result.Text != "" {
+		t.Fatalf("result text = %q, want no raw result fallback after final boundary", result.Text)
+	}
+	if !result.TextSet {
+		t.Fatalf("result TextSet = false, want explicit empty final text")
+	}
+	if result.ACPResult.Text != "raw result should not be final" {
+		t.Fatalf("raw result text = %q, want preserved ACP result", result.ACPResult.Text)
+	}
+	if sink.lastComplete.Text != "" {
+		t.Fatalf("sink complete text = %q, want no raw result fallback", sink.lastComplete.Text)
+	}
+	if !sink.lastComplete.TextSet {
+		t.Fatalf("sink complete TextSet = false, want explicit empty final text")
+	}
+}
+
+func TestRunTriggerPromptKeepsTextBetweenFinalBoundariesAsFallback(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}, store)
+	rt := &fakeRuntime{
+		newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger"},
+		promptReply:    "文字1\n文字2",
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "文字1"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "plan",
+				PlanEntries: []acp.PlanEntry{
+					{Content: "第一步", Status: "completed"},
+				},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "文字2"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Run tests",
+			}},
+		},
+	}
+	svc.setRuntime(rt)
+	sink := &recordingTriggerSink{}
+	key := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
+
+	result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:     "bot-a",
+		Key:       key,
+		Workspace: t.TempDir(),
+		AgentName: "traex",
+		Cwd:       t.TempDir(),
+		Prompt:    "reply comment",
+		Sink:      sink,
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	if result.Text != "文字2" {
+		t.Fatalf("result text = %q, want text between final boundaries", result.Text)
+	}
+	if result.ACPResult.Text != "文字1\n文字2" {
+		t.Fatalf("raw result text = %q, want preserved ACP result", result.ACPResult.Text)
+	}
+	if sink.lastComplete.Text != "文字2" {
+		t.Fatalf("sink complete text = %q, want text between final boundaries", sink.lastComplete.Text)
 	}
 }
 

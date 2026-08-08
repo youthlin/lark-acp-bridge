@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -17,13 +18,21 @@ func (a *Adapter) SendText(ctx context.Context, msg Message, text string) error 
 func (a *Adapter) SendTextWithRenderContext(ctx context.Context, msg Message, text string, render OutboundRenderContext) error {
 	blocks, err := a.renderOutboundBlocks(ctx, text, outboundRenderContextFromPublic(render))
 	if err != nil {
+		slog.ErrorContext(ctx, "渲染飞书出站消息失败", "message_id", msg.MessageID, "chat_id", msg.ChatID, "base_dir", render.BaseDir, "错误", err)
 		return err
 	}
 	if outboundBlocksHaveImage(blocks) {
+		slog.InfoContext(ctx, "飞书出站消息包含图片，改用富文本发送", "message_id", msg.MessageID, "chat_id", msg.ChatID, "image_count", outboundBlocksImageCount(blocks), "base_dir", render.BaseDir)
 		_, err := a.SendPostMessage(ctx, msg, blocks)
+		if err != nil {
+			slog.ErrorContext(ctx, "发送飞书富文本图片消息失败", "message_id", msg.MessageID, "chat_id", msg.ChatID, "image_count", outboundBlocksImageCount(blocks), "错误", err)
+		}
 		return err
 	}
 	_, err = a.SendTextMessage(ctx, msg, text)
+	if err != nil {
+		slog.ErrorContext(ctx, "发送飞书文本消息失败", "message_id", msg.MessageID, "chat_id", msg.ChatID, "错误", err)
+	}
 	return err
 }
 

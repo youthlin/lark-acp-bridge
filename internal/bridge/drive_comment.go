@@ -51,6 +51,9 @@ func (s *Service) HandleDriveComment(ctx context.Context, comment feishu.DriveCo
 	if driveCommentShouldSuppressReply(comment, text) {
 		return nil
 	}
+	if result.TextSet && text == "" {
+		return nil
+	}
 	if text == "" {
 		text = "已完成。"
 	}

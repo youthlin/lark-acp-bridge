@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -84,15 +85,27 @@ func outboundRenderContextFromPublic(render OutboundRenderContext) outboundRende
 
 func (a *Adapter) renderOutboundBlocks(ctx context.Context, text string, render outboundRenderContext) ([]outboundBlock, error) {
 	blocks := parseOutboundMarkdown(text, render)
+	imageCount := 0
+	uploadedCount := 0
 	for i := range blocks {
-		if blocks[i].Kind != outboundBlockImage || strings.TrimSpace(blocks[i].ImageKey) != "" {
+		if blocks[i].Kind != outboundBlockImage {
 			continue
 		}
+		imageCount++
+		if strings.TrimSpace(blocks[i].ImageKey) != "" {
+			continue
+		}
+		slog.InfoContext(ctx, "准备上传出站 Markdown 图片", "path", blocks[i].Path, "base_dir", render.BaseDir)
 		imageKey, err := a.uploadReplyImage(ctx, blocks[i].Path)
 		if err != nil {
+			slog.ErrorContext(ctx, "上传出站 Markdown 图片失败", "path", blocks[i].Path, "base_dir", render.BaseDir, "错误", err)
 			return nil, err
 		}
 		blocks[i].ImageKey = imageKey
+		uploadedCount++
+	}
+	if imageCount > 0 {
+		slog.InfoContext(ctx, "出站 Markdown 图片渲染完成", "image_count", imageCount, "uploaded_count", uploadedCount, "base_dir", render.BaseDir)
 	}
 	return blocks, nil
 }
@@ -104,6 +117,16 @@ func outboundBlocksHaveImage(blocks []outboundBlock) bool {
 		}
 	}
 	return false
+}
+
+func outboundBlocksImageCount(blocks []outboundBlock) int {
+	count := 0
+	for _, block := range blocks {
+		if block.Kind == outboundBlockImage && strings.TrimSpace(block.ImageKey) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func outboundBlocksPostContent(blocks []outboundBlock) (string, error) {

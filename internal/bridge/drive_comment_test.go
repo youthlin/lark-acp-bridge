@@ -240,6 +240,43 @@ func TestDriveCommentReusesSameCommentSessionAndIsolatesDifferentComments(t *tes
 	}
 }
 
+func TestDriveCommentSuppressesExplicitEmptyFinalReply(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      driveCommentEnabledBotConfig(workspace),
+	}, store)
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{{Text: "raw result should not be written"}},
+		promptUpdates: []acp.PromptUpdate{{
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Check comment",
+			},
+		}},
+	}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	svc.setOutbound("bot-a", replies)
+
+	if err := svc.HandleDriveComment(context.Background(), feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "please handle",
+	}); err != nil {
+		t.Fatalf("HandleDriveComment() error = %v", err)
+	}
+	if len(replies.texts) != 0 {
+		t.Fatalf("replies = %+v, want no default reply for explicit empty final text", replies.texts)
+	}
+}
+
 func TestDriveCommentMissingBodyRepliesWithoutTriggerPrompt(t *testing.T) {
 	workspace := t.TempDir()
 	cwd := t.TempDir()
@@ -349,6 +386,44 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	wantKey := driveCommentSessionKey(comment)
 	if !ok || binding.SessionKey != wantKey || session.Key != wantKey {
 		t.Fatalf("message binding ok=%v binding=%+v session=%+v, want trace message bound to drive comment session", ok, binding, session)
+	}
+}
+
+func TestDriveCommentTraceSuppressesExplicitEmptyFinalText(t *testing.T) {
+	comment := feishu.DriveComment{
+		BotID:       "bot-a",
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "please handle",
+	}
+	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
+	sink := &driveCommentTraceSink{
+		message: feishu.Message{BotID: "bot-a", ChatID: "oc_trace"},
+		cwd:     t.TempDir(),
+		comment: comment,
+		starter: func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+			return card, nil
+		},
+	}
+
+	result := TriggerResult{
+		Request: TriggerRequest{BotID: "bot-a", Key: driveCommentSessionKey(comment)},
+		Session: Session{Key: driveCommentSessionKey(comment), ACPSessionID: "acp-drive"},
+		ACPResult: acp.PromptResult{
+			StopReason: "end_turn",
+		},
+		TextSet: true,
+	}
+	if err := sink.OnComplete(context.Background(), result); err != nil {
+		t.Fatalf("OnComplete() error = %v", err)
+	}
+	if got := card.finalTextUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("final text updates = %+v, want no default final text for explicit empty", got)
+	}
+	if !card.isClosed() {
+		t.Fatal("trace stream card was not closed")
 	}
 }
 

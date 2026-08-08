@@ -129,6 +129,10 @@ func isToolBoundaryUpdateKind(kind string) bool {
 	}
 }
 
+func isFinalTextBoundaryUpdateKind(kind string) bool {
+	return isToolBoundaryUpdateKind(kind) || isPlanUpdateKind(kind)
+}
+
 func toolStatusFromUpdate(kind, status string) toolProgressStatus {
 	if strings.Contains(kind, "error") {
 		return toolProgressFailed
@@ -185,7 +189,7 @@ func promptUpdateChunk(update acp.PromptUpdate) (promptChunk, bool) {
 	} else if streamName := promptChunkStreamName(kind); streamName != "" {
 		key = streamName
 	}
-	return promptChunk{Target: target, Key: key, Text: text}, true
+	return promptChunk{Target: target, Key: key, Text: text, FinalBoundary: target == promptChunkTargetPlan}, true
 }
 
 func promptUpdateKind(update acp.PromptUpdate) string {

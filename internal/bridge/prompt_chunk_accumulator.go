@@ -18,10 +18,10 @@ const (
 )
 
 type promptChunk struct {
-	Target       string
-	Key          string
-	Text         string
-	ToolBoundary bool
+	Target        string
+	Key           string
+	Text          string
+	FinalBoundary bool
 }
 
 type promptChunkStream struct {
@@ -38,15 +38,16 @@ type promptChunkFlush struct {
 }
 
 type promptChunkAccumulator struct {
-	mu              sync.Mutex
-	stream          *promptCardStream
-	current         *promptChunkStream
-	reply           strings.Builder
-	finalCandidate  strings.Builder
-	hasTool         bool
-	timer           *time.Timer
-	timerGeneration int64
-	flushing        sync.WaitGroup
+	mu                sync.Mutex
+	stream            *promptCardStream
+	current           *promptChunkStream
+	reply             strings.Builder
+	finalCandidate    strings.Builder
+	lastFinalText     string
+	finalBoundarySeen bool
+	timer             *time.Timer
+	timerGeneration   int64
+	flushing          sync.WaitGroup
 }
 
 func newPromptChunkAccumulator(stream *promptCardStream) *promptChunkAccumulator {
@@ -83,27 +84,28 @@ func (a *promptChunkAccumulator) add(chunk promptChunk) {
 	}
 }
 
-func (a *promptChunkAccumulator) markToolBoundary() {
+func (a *promptChunkAccumulator) markFinalBoundary() {
 	var flushes []promptChunkFlush
 	a.mu.Lock()
 	flushes = append(flushes, a.takeFlushLocked(true))
 	a.stopTimerLocked()
 	processText := strings.TrimSpace(a.finalCandidate.String())
 	if processText != "" {
+		a.lastFinalText = processText
 		flushes = append(flushes, promptChunkFlush{target: promptChunkTargetProcessMessage, text: processText, finish: true})
 		a.finalCandidate.Reset()
 	}
-	a.hasTool = true
+	a.finalBoundarySeen = true
 	a.mu.Unlock()
 	for _, flush := range flushes {
 		a.applyFlush(flush)
 	}
 }
 
-func (a *promptChunkAccumulator) hasToolBoundary() bool {
+func (a *promptChunkAccumulator) hasFinalBoundary() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.hasTool
+	return a.finalBoundarySeen
 }
 
 func (a *promptChunkAccumulator) finishStream() {
@@ -124,6 +126,9 @@ func (a *promptChunkAccumulator) finalText() string {
 	defer a.mu.Unlock()
 	if text := strings.TrimSpace(a.finalCandidate.String()); text != "" {
 		return text
+	}
+	if a.finalBoundarySeen {
+		return strings.TrimSpace(a.lastFinalText)
 	}
 	return strings.TrimSpace(a.reply.String())
 }

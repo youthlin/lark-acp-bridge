@@ -289,6 +289,67 @@ func TestScheduledTaskTriggerRequestBuildsExplicitNonIMRequest(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskIMSinkSuppressesExplicitEmptyFinalText(t *testing.T) {
+	card := &fakeStreamCard{}
+	var sent []string
+	sink := &scheduledTaskIMSink{
+		message: feishu.Message{BotID: "bot-a", ChatID: "oc_schedule"},
+		cwd:     t.TempDir(),
+		starter: func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+			return card, nil
+		},
+		messageSender: func(_ context.Context, _ feishu.Message, text string) (feishu.SentMessage, error) {
+			sent = append(sent, text)
+			return feishu.SentMessage{MessageID: "om_schedule", ChatID: "oc_schedule"}, nil
+		},
+	}
+
+	result := TriggerResult{
+		Request: TriggerRequest{BotID: "bot-a", Key: SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"}},
+		Session: Session{Key: SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"}, ACPSessionID: "acp-schedule"},
+		ACPResult: acp.PromptResult{
+			StopReason: "end_turn",
+		},
+		TextSet: true,
+	}
+	if err := sink.OnComplete(context.Background(), result); err != nil {
+		t.Fatalf("OnComplete() error = %v", err)
+	}
+	if got := card.finalTextUpdatesSnapshot(); len(got) != 0 {
+		t.Fatalf("final text updates = %+v, want no default final text for explicit empty", got)
+	}
+	if !card.isClosed() {
+		t.Fatal("stream card should be closed")
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent = %+v, want no fallback message", sent)
+	}
+}
+
+func TestScheduledTaskIMSinkSuppressesExplicitEmptyFallbackMessage(t *testing.T) {
+	var sent []string
+	sink := &scheduledTaskIMSink{
+		message: feishu.Message{BotID: "bot-a", ChatID: "oc_schedule"},
+		cwd:     t.TempDir(),
+		messageSender: func(_ context.Context, _ feishu.Message, text string) (feishu.SentMessage, error) {
+			sent = append(sent, text)
+			return feishu.SentMessage{MessageID: "om_schedule", ChatID: "oc_schedule"}, nil
+		},
+	}
+
+	result := TriggerResult{
+		Request: TriggerRequest{BotID: "bot-a", Key: SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"}},
+		Session: Session{Key: SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"}, ACPSessionID: "acp-schedule"},
+		TextSet: true,
+	}
+	if err := sink.OnComplete(context.Background(), result); err != nil {
+		t.Fatalf("OnComplete() error = %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent = %+v, want no fallback message", sent)
+	}
+}
+
 func TestScheduledTaskTriggerRequestRejectsMissingRunContext(t *testing.T) {
 	task := ScheduledTask{
 		ID:        "daily",

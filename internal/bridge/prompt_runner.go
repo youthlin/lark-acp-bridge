@@ -36,13 +36,24 @@ type promptStreamRun struct {
 	result        acp.PromptResult
 	rawResult     acp.PromptResult
 	streamedReply string
+	streamedSet   bool
 	err           error
+}
+
+type promptRuntimeResult struct {
+	result       acp.PromptResult
+	sentProgress bool
+	rawResult    acp.PromptResult
+	reply        string
+	replySet     bool
+	err          error
 }
 
 type promptRunOutcome struct {
 	session      Session
 	result       acp.PromptResult
 	reply        string
+	replySet     bool
 	sentProgress bool
 	err          error
 }
@@ -64,10 +75,14 @@ type promptPostWorkOptions struct {
 type promptPostWorkResult struct {
 	session    Session
 	reply      string
+	replySet   bool
 	suppressed bool
 }
 
 func (out promptRunOutcome) replyText() string {
+	if out.replySet {
+		return out.reply
+	}
 	if out.reply != "" {
 		return out.reply
 	}
@@ -95,11 +110,11 @@ func (s *Service) executePromptWithRecovery(ctx context.Context, session Session
 func (s *Service) runUserPromptWithWorkspaceContext(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRunOutcome {
 	promptText := s.promptTextWithWorkspaceContextForSession(session, msg, text)
 	includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
-	result, sentProgress, err := s.runUserPromptWithOptions(ctx, msg, session, agent, promptText, opts)
-	if includedWorkspaceContext && (err == nil || sentProgress) {
+	run := s.runUserPromptWithOptionsDetailed(ctx, msg, session, agent, promptText, opts)
+	if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
 		session = s.markWorkspacePrompted(ctx, msg, session)
 	}
-	return promptRunOutcome{session: session, result: result, sentProgress: sentProgress, err: err}
+	return promptRunOutcome{session: session, result: run.result, reply: run.reply, replySet: run.replySet, sentProgress: run.sentProgress, err: run.err}
 }
 
 func (s *Service) markWorkspacePrompted(ctx context.Context, msg feishu.Message, session Session) Session {
@@ -176,7 +191,7 @@ func (s *Service) finishPromptPostWork(ctx context.Context, out promptRunOutcome
 	if opts.recordACPError && shouldRecordPromptError(out.err) {
 		s.recordACPError(session, opts.operation, out.err)
 	}
-	return promptPostWorkResult{session: session, reply: reply}
+	return promptPostWorkResult{session: session, reply: reply, replySet: out.replySet}
 }
 
 func shouldUpdatePromptTitle(err error, reply string, sentProgress bool, successOnly bool) bool {
@@ -287,7 +302,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		return "", out.err
 	}
 	if strings.TrimSpace(reply) == "" {
-		if out.sentProgress {
+		if out.sentProgress || post.replySet {
 			return "", nil
 		}
 		return "ACP session 已完成，但没有返回文本。", nil
@@ -382,17 +397,23 @@ func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session
 }
 
 func (s *Service) runUserPromptWithOptions(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) (acp.PromptResult, bool, error) {
-	out, err := runPromptTask(s, ctx, session, agent, opts, func(taskCtx context.Context) (acp.PromptResult, bool, error) {
+	run := s.runUserPromptWithOptionsDetailed(ctx, msg, session, agent, text, opts)
+	return run.result, run.sentProgress, run.err
+}
+
+func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRuntimeResult {
+	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
 		if opts.silentPrompt {
 			result, err := s.runtime.Prompt(taskCtx, session, agent, text, acp.PromptOptions{})
-			return result, false, err
+			return promptRuntimeResult{result: result, err: err}, err
 		}
-		return s.promptRuntimeWithProgress(taskCtx, msg, session, agent, text)
+		run := s.promptRuntimeWithProgressRawStatusPrefix(taskCtx, msg, session, agent, text, "")
+		return run, run.err
 	})
-	if errors.Is(err, context.Canceled) {
-		return out.result, out.sentProgress, err
+	if opts.silentPrompt {
+		return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, err: err}
 	}
-	return out.result, out.sentProgress, err
+	return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, reply: out.reply, replySet: out.replySet, err: err}
 }
 
 func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
@@ -401,25 +422,30 @@ func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Mess
 }
 
 func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
-	return s.promptRuntimeWithProgressRawStatusPrefix(ctx, msg, session, agent, text, "")
+	run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, msg, session, agent, text, "")
+	return run.result, run.sentProgress, run.rawResult, run.reply, run.err
 }
 
-func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
+func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) promptRuntimeResult {
 	if s.shouldDelayAtAutoProgress(msg) {
 		run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, true)
 		result := run.result
-		if strings.TrimSpace(run.streamedReply) != "" && (run.chunks.hasToolBoundary() || strings.TrimSpace(result.Text) == "") {
+		if run.chunks.hasFinalBoundary() {
+			result.Text = run.streamedReply
+		} else if strings.TrimSpace(run.streamedReply) != "" && strings.TrimSpace(result.Text) == "" {
 			result.Text = run.streamedReply
 		}
 		if run.err == nil && strings.TrimSpace(result.Text) != "" && !s.shouldSuppressAtAutoReply(msg, result.Text) {
 			finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
 			defer finalCancel()
-			if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !run.chunks.hasToolBoundary() {
+			if finalReply := promptFinalCardText(run, result); finalReply != "" {
+				slog.InfoContext(finalCtx, "准备更新 ACP 流式卡片最终文本", "session", session.ACPSessionID, "final_boundary", run.chunks.hasFinalBoundary(), "delayed", true)
 				run.stream.setFinalTextWithContext(finalCtx, finalReply)
 			}
 			run.stream.flushDelayedWithContext(finalCtx, result, result.StopReason)
 		}
-		return result, run.stream.hasStarted(), result, run.streamedReply, run.err
+		reply, replySet := delayedPromptReply(run, result)
+		return promptRuntimeResult{result: result, sentProgress: run.stream.hasStarted(), rawResult: result, reply: reply, replySet: replySet, err: run.err}
 	}
 
 	run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, false)
@@ -427,7 +453,8 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 	if run.stream.hasStarted() {
 		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
 		defer finalCancel()
-		if finalReply := strings.TrimSpace(result.Text); finalReply != "" && !run.chunks.hasToolBoundary() {
+		if finalReply := promptFinalCardText(run, result); finalReply != "" {
+			slog.InfoContext(finalCtx, "准备更新 ACP 流式卡片最终文本", "session", session.ACPSessionID, "final_boundary", run.chunks.hasFinalBoundary(), "delayed", false)
 			run.stream.setFinalTextWithContext(finalCtx, finalReply)
 		}
 		if run.err != nil {
@@ -448,7 +475,21 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 	if run.stream.hasStarted() {
 		result.Text = ""
 	}
-	return result, run.stream.hasStarted(), run.rawResult, run.streamedReply, run.err
+	return promptRuntimeResult{result: result, sentProgress: run.stream.hasStarted(), rawResult: run.rawResult, reply: run.streamedReply, replySet: run.streamedSet, err: run.err}
+}
+
+func promptFinalCardText(run promptStreamRun, result acp.PromptResult) string {
+	if run.chunks != nil && run.chunks.hasFinalBoundary() {
+		return strings.TrimSpace(run.streamedReply)
+	}
+	return strings.TrimSpace(result.Text)
+}
+
+func delayedPromptReply(run promptStreamRun, result acp.PromptResult) (string, bool) {
+	if run.chunks != nil && run.chunks.hasFinalBoundary() {
+		return run.streamedReply, true
+	}
+	return result.Text, false
 }
 
 func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string, delayed bool) promptStreamRun {
@@ -460,12 +501,14 @@ func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, s
 	result, err := s.runtime.Prompt(ctx, session, agent, text, s.promptStreamOptions(msg, stream, chunks))
 	rawResult := result
 	chunks.close()
+	streamedReply := chunks.finalText()
 	return promptStreamRun{
 		stream:        stream,
 		chunks:        chunks,
 		result:        result,
 		rawResult:     rawResult,
-		streamedReply: chunks.finalText(),
+		streamedReply: streamedReply,
+		streamedSet:   chunks.hasFinalBoundary() || strings.TrimSpace(streamedReply) != "",
 		err:           err,
 	}
 }
@@ -480,14 +523,14 @@ func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStre
 			s.handleACPStateUpdate(stream.ctx, msg, stream.session.Key, sessionID, update.Update)
 			stream.updatePromptStatusFromUpdate(update)
 			if chunk, ok := promptUpdateChunk(update); ok {
-				if chunk.ToolBoundary {
-					chunks.markToolBoundary()
+				if chunk.FinalBoundary {
+					chunks.markFinalBoundary()
 				}
 				chunks.add(chunk)
 				return
 			}
-			if isToolBoundaryUpdateKind(promptUpdateKind(update)) {
-				chunks.markToolBoundary()
+			if isFinalTextBoundaryUpdateKind(promptUpdateKind(update)) {
+				chunks.markFinalBoundary()
 			} else {
 				chunks.finishStream()
 			}
