@@ -389,6 +389,69 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	}
 }
 
+func TestDriveCommentTraceUsesFinalTextAfterBoundary(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	bots := driveCommentEnabledBotConfig(workspace)
+	bots[0].DriveComment.TraceEnabled = true
+	bots[0].DriveComment.TraceChatID = "oc_trace"
+	svc := NewService(config.Config{
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+		Bots:      bots,
+	}, store)
+	rt := &fakeRuntime{
+		promptResults: []acp.PromptResult{{Text: "raw result should not replace final text", StopReason: "end_turn"}},
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "先检查。"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				ToolCallID:    "tool-1",
+				Title:         "读取评论上下文",
+				Status:        "in_progress",
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "最终回复评论。"},
+			}},
+		},
+	}
+	svc.setRuntime(rt)
+	replies := &driveCommentReplyRecorder{}
+	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
+	outbound := &fakeSentMessageClient{}
+	outbound.driveCommentReplySender = replies.ReplyDriveComment
+	outbound.streamStarter = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+		return streamCard, nil
+	}
+	svc.setOutbound("bot-a", outbound)
+
+	comment := feishu.DriveComment{
+		BotID:       "bot-a",
+		Workspace:   workspace,
+		FileToken:   "doc-token",
+		FileType:    "docx",
+		CommentID:   "comment-1",
+		IsMentioned: true,
+		CommentText: "please handle",
+	}
+	if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
+		t.Fatalf("HandleDriveComment() error = %v", err)
+	}
+	if got := streamCard.textUpdatesSnapshot(); len(got) == 0 || got[len(got)-1] != "最终回复评论。" {
+		t.Fatalf("text updates = %+v, want final chunk in card text area", got)
+	}
+	if got := streamCard.finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "最终回复评论。" {
+		t.Fatalf("final text updates = %+v, want final text after tool boundary", got)
+	}
+	if len(replies.texts) != 1 || replies.texts[0] != "最终回复评论。" {
+		t.Fatalf("drive comment replies = %+v, want final text after tool boundary", replies.texts)
+	}
+}
+
 func TestDriveCommentTraceSuppressesExplicitEmptyFinalText(t *testing.T) {
 	comment := feishu.DriveComment{
 		BotID:       "bot-a",

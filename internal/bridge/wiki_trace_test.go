@@ -38,6 +38,16 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		Content:       &acp.ContentBlock{Type: "text", Text: "正在整理知识。"},
 	}})
 	observer.onUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call",
+		ToolCallID:    "tool-0",
+		Title:         "读取 workspace",
+		Status:        "in_progress",
+	}})
+	observer.onUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "agent_message_chunk",
+		Content:       &acp.ContentBlock{Type: "text", Text: "整理完成。"},
+	}})
+	observer.onUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
 		SessionUpdate: "thought_chunk",
 		Content:       &acp.ContentBlock{Type: "text", Text: "分析是否需要沉淀。"},
 	}})
@@ -73,8 +83,8 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		t.Fatalf("text updates = %q, want agent text", got)
 	}
 	final := card.finalTextUpdatesSnapshot()
-	if len(final) != 1 || !strings.Contains(final[0], "knowledge/index.md") {
-		t.Fatalf("final text updates = %+v, want audit summary", final)
+	if len(final) != 1 || final[0] != "整理完成。" {
+		t.Fatalf("final text updates = %+v, want final agent text after boundary", final)
 	}
 	if !card.isClosed() {
 		t.Fatal("wiki trace card was not closed")

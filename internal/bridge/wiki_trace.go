@@ -102,16 +102,30 @@ func (o *wikiTraceObserver) complete(ctx context.Context, result acp.PromptResul
 		stream.closeWithContext(finalCtx)
 		return
 	}
-	summary := wikiResultSummary(result)
-	if summary == "" {
-		summary = "检查完成，无需沉淀。"
+	finalText := o.finalCardText(result)
+	if finalText == "" {
+		finalText = "检查完成，无需沉淀。"
 	}
-	stream.setFinalTextWithContext(finalCtx, summary)
+	stream.setFinalTextWithContext(finalCtx, finalText)
 	stream.updatePromptStatusFromResultWithContext(finalCtx, result)
 	stream.updatePromptResult(result)
 	stream.finishPromptStatusWithContext(finalCtx, result.StopReason)
 	stream.updateMetaWithContext(finalCtx, o.streamCardMeta(wikiTraceCardCompleted))
 	stream.closeWithContext(finalCtx)
+}
+
+func (o *wikiTraceObserver) finalCardText(result acp.PromptResult) string {
+	if o == nil || o.chunks == nil {
+		return wikiResultSummary(result)
+	}
+	text := strings.TrimSpace(o.chunks.finalText())
+	if o.chunks.hasFinalBoundary() {
+		return text
+	}
+	if text != "" {
+		return text
+	}
+	return wikiResultSummary(result)
 }
 
 func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream {
