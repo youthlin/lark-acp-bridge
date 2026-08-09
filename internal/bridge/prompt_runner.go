@@ -260,7 +260,9 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	out := s.executePromptWithRecovery(ctx, session, func(runCtx context.Context, runSession Session) promptRunOutcome {
 		runOpts := userPromptTaskOptions()
-		if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
+		if s.shouldHandleAtAutoMessage(msg) {
+			runOpts = atAutoPromptTaskOptions()
+		} else if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
 			runOpts = atAutoUserPromptTaskOptions()
 		}
 		return s.runUserPromptWithWorkspaceContext(runCtx, msg, runSession, agent, text, runOpts)
@@ -284,6 +286,9 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	session = post.session
 	reply := post.reply
 	if post.suppressed {
+		if !opts.SkipPendingAtAutoDrain {
+			s.runPendingAtAutoAsync(ctx, msg, session, agent)
+		}
 		return "", nil
 	}
 	if out.sentProgress {
@@ -315,7 +320,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 }
 
 func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) {
-	if !isAtAutoMode(s.chatAtMode(msg)) || !messageMentionsBot(msg) {
+	if !isAtAutoMode(s.chatAtMode(msg)) {
 		return
 	}
 	pending := s.takePendingAtAutoMessages(session.Key)
@@ -390,7 +395,9 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
 	opts := userPromptTaskOptions()
-	if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
+	if s.shouldHandleAtAutoMessage(msg) {
+		opts = atAutoPromptTaskOptions()
+	} else if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
 		opts = atAutoUserPromptTaskOptions()
 	}
 	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, opts)
@@ -402,17 +409,27 @@ func (s *Service) runUserPromptWithOptions(ctx context.Context, msg feishu.Messa
 }
 
 func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRuntimeResult {
-	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
-		if opts.silentPrompt {
-			result, err := s.runtime.Prompt(taskCtx, session, agent, text, acp.PromptOptions{})
-			return promptRuntimeResult{result: result, err: err}, err
+	if !opts.silentPrompt {
+		delayed := s.shouldDelayAtAutoProgress(msg)
+		stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), "", s.streamCardStarterForMessage(msg))
+		if delayed {
+			stream.delayCardCreation()
 		}
-		run := s.promptRuntimeWithProgressRawStatusPrefix(taskCtx, msg, session, agent, text, "")
+		opts.replacementWait = stream
+		return s.runUserPromptWithStreamOptionsDetailed(ctx, msg, session, agent, text, opts, stream, delayed)
+	}
+	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
+		result, err := s.runtime.Prompt(taskCtx, session, agent, text, acp.PromptOptions{})
+		return promptRuntimeResult{result: result, err: err}, err
+	})
+	return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, err: err}
+}
+
+func (s *Service) runUserPromptWithStreamOptionsDetailed(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions, stream *promptCardStream, delayed bool) promptRuntimeResult {
+	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
+		run := s.promptRuntimeWithProgressRawStatusPrefixAndStream(taskCtx, msg, session, agent, text, stream, delayed)
 		return run, run.err
 	})
-	if opts.silentPrompt {
-		return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, err: err}
-	}
 	return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, reply: out.reply, replySet: out.replySet, err: err}
 }
 
@@ -427,8 +444,17 @@ func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.M
 }
 
 func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string) promptRuntimeResult {
-	if s.shouldDelayAtAutoProgress(msg) {
-		run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, true)
+	delayed := s.shouldDelayAtAutoProgress(msg)
+	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
+	if delayed {
+		stream.delayCardCreation()
+	}
+	return s.promptRuntimeWithProgressRawStatusPrefixAndStream(ctx, msg, session, agent, text, stream, delayed)
+}
+
+func (s *Service) promptRuntimeWithProgressRawStatusPrefixAndStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream, delayed bool) promptRuntimeResult {
+	if delayed {
+		run := s.runPromptWithStream(ctx, msg, session, agent, text, stream)
 		result := run.result
 		if run.chunks.hasFinalBoundary() {
 			result.Text = run.streamedReply
@@ -448,7 +474,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 		return promptRuntimeResult{result: result, sentProgress: run.stream.hasStarted(), rawResult: result, reply: reply, replySet: replySet, err: run.err}
 	}
 
-	run := s.runPromptWithStream(ctx, msg, session, agent, text, statusPrefix, false)
+	run := s.runPromptWithStream(ctx, msg, session, agent, text, stream)
 	result := run.result
 	if run.stream.hasStarted() {
 		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
@@ -492,13 +518,14 @@ func delayedPromptReply(run promptStreamRun, result acp.PromptResult) (string, b
 	return result.Text, false
 }
 
-func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, statusPrefix string, delayed bool) promptStreamRun {
-	stream := newPromptCardStreamWithStatusPrefix(ctx, msg, session, s.chatConfigForMessage(msg), statusPrefix, s.streamCardStarterForMessage(msg))
-	if delayed {
-		stream.delayCardCreation()
+func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream) promptStreamRun {
+	if stream == nil {
+		stream = newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg), s.streamCardStarterForMessage(msg))
 	}
 	chunks := newPromptChunkAccumulator(stream)
+	stopStatusRefresh := stream.startStatusRefresh(ctx)
 	result, err := s.runtime.Prompt(ctx, session, agent, text, s.promptStreamOptions(msg, stream, chunks))
+	stopStatusRefresh()
 	rawResult := result
 	chunks.close()
 	streamedReply := chunks.finalText()

@@ -4699,7 +4699,7 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
+func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -4708,7 +4708,7 @@ func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
 	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionID:  "acp-session-1",
-		promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "第二条回复"}},
+		promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "第二轮回复"}},
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
 	}
@@ -4739,25 +4739,37 @@ func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
 	}()
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
 
-	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_auto_2",
-		ChatID:    key.ChatID,
-		ChatType:  "group",
-		SenderID:  "ou_b",
-		Text:      "无 at 第二条",
-	})
-	if err != nil {
-		t.Fatalf("HandleFeishuMessage(second auto) error = %v", err)
+	for _, msg := range []feishu.Message{
+		{
+			BotID:     "bot-a",
+			MessageID: "om_auto_2",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_b",
+			Text:      "无 at 第二条",
+		},
+		{
+			BotID:     "bot-a",
+			MessageID: "om_auto_3",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_c",
+			Text:      "无 at 第三条",
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleFeishuMessage(%s) error = %v", msg.MessageID, err)
+		}
+		if reply != "" {
+			t.Fatalf("reply = %q, want queued auto prompt to stay silent", reply)
+		}
 	}
-	if reply != "第二条回复" {
-		t.Fatalf("reply = %q, want second auto prompt to run immediately", reply)
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want later auto messages queued while first auto prompt runs", got)
 	}
-	if got := rt.promptCallCount(); got != 2 {
-		t.Fatalf("prompt calls = %d, want second auto prompt not queued", got)
-	}
-	if got := rt.cancelCallCount(); got != 1 {
-		t.Fatalf("cancel calls = %d, want second auto prompt to replace first auto prompt", got)
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want queued auto messages not to cancel running auto prompt", got)
 	}
 	close(rt.blockPrompt)
 	select {
@@ -4770,6 +4782,25 @@ func TestHandleFeishuGroupChatAtAutoDoesNotQueueBehindAutoPrompt(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first auto prompt did not finish")
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	rt.mu.Lock()
+	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("promptCalls = %+v, want original auto prompt and one batched auto prompt", calls)
+	}
+	autoPrompt := calls[1].Text
+	for _, want := range []string{
+		"## 群聊自动响应判断",
+		"## 以下是待判断是否需要响应的群消息",
+		"用户(ou_b)：无 at 第二条",
+		"用户(ou_c)：无 at 第三条",
+		"请只回复一次",
+	} {
+		if !strings.Contains(autoPrompt, want) {
+			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
+		}
 	}
 }
 
@@ -8063,6 +8094,74 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageRefreshesRunningStreamCardStatus(t *testing.T) {
+	oldInterval := promptStatusRefreshInterval
+	promptStatusRefreshInterval = 20 * time.Millisecond
+	t.Cleanup(func() {
+		promptStatusRefreshInterval = oldInterval
+	})
+
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	session := testReadySession(t, store)
+	rt := &fakeRuntime{
+		promptReply: "完成。",
+		promptUpdates: []acp.PromptUpdate{
+			{SessionID: session.ACPSessionID, Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "处理中。"},
+			}},
+		},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound(session.Key.BotID, client)
+
+	done := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     session.Key.BotID,
+			MessageID: "om_msg",
+			ChatID:    session.Key.ChatID,
+			ThreadID:  session.Key.SubID,
+			ChatType:  "topic_group",
+			Text:      "run",
+			Mentions:  []feishu.Mention{testBotMention("智能助手")},
+		})
+		done <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool {
+		return len(cards) == 1 && len(cards[0].statusUpdatesSnapshot()) >= 2
+	})
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("HandleFeishuMessage(prompt) error = %v", got.err)
+		}
+		if got.reply != "" {
+			t.Fatalf("reply = %q, want streamed reply", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not finish")
+	}
+}
+
 func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
@@ -9640,9 +9739,10 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 				},
 			},
 		},
-		blockPrompt:   make(chan struct{}),
-		blockPromptAt: 1,
-		blockCancel:   make(chan struct{}),
+		blockPrompt:            make(chan struct{}),
+		blockPromptAt:          1,
+		blockAfterPromptCancel: true,
+		blockCancel:            make(chan struct{}),
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
@@ -9709,12 +9809,14 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	if got := rt.promptCallCount(); got != 1 {
 		t.Fatalf("prompt calls = %d, want replacement prompt to wait for runtime cancel", got)
 	}
+	waitForCondition(t, time.Second, func() bool { return len(cards) >= 2 })
 	select {
 	case got := <-secondDone:
 		t.Fatalf("second prompt finished before runtime cancel returned: %+v", got)
 	default:
 	}
 	close(rt.blockCancel)
+	close(rt.blockPrompt)
 	var secondResult struct {
 		reply string
 		err   error
@@ -9777,6 +9879,16 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	if !cards[0].isClosed() {
 		t.Fatal("cancelled old card should be closed")
+	}
+	if len(cards) < 2 {
+		t.Fatalf("cards = %+v, want replacement stream card", cards)
+	}
+	replacementStatus := cards[1].statusUpdatesSnapshot()
+	if !hasSubstring(replacementStatus, "等待中断") {
+		t.Fatalf("replacement status updates = %+v, want waiting status", replacementStatus)
+	}
+	if !hasStatusWithoutSubstring(replacementStatus, "等待中断") {
+		t.Fatalf("replacement status updates = %+v, want normal running status after old task finishes", replacementStatus)
 	}
 	session, ok := store.Get(key)
 	if !ok {
@@ -10910,6 +11022,24 @@ func containsStringWithAll(values []string, parts ...string) bool {
 	return false
 }
 
+func hasSubstring(values []string, part string) bool {
+	for _, value := range values {
+		if strings.Contains(value, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasStatusWithoutSubstring(values []string, part string) bool {
+	for _, value := range values {
+		if strings.Contains(value, "⏳") && !strings.Contains(value, part) {
+			return true
+		}
+	}
+	return false
+}
+
 func assertReadyPromptContainsUserTextAndMemoryPolicy(t *testing.T, prompt, userText string) {
 	t.Helper()
 	for _, want := range []string{"Workspace Memory Policy", "本地文件工具", "MEMORY.md", "knowledge/core.md", "knowledge/index.md", "skills/core.md", "## User Message", userText} {
@@ -10982,43 +11112,44 @@ func promptSectionJSON(t *testing.T, prompt string, section string) map[string]s
 }
 
 type fakeRuntime struct {
-	mu                  sync.Mutex
-	newSessionID        string
-	newSessionIDs       []string
-	newSessionInfo      acp.SessionInfo
-	newSessionError     error
-	noDefaultState      bool
-	afterNewSession     func(key SessionKey, sessionID string)
-	promptReply         string
-	promptErrors        []error
-	promptUpdates       []acp.PromptUpdate
-	promptUpdatesByCall [][]acp.PromptUpdate
-	afterUpdates        func()
-	permissionRequest   *acp.PermissionRequest
-	permissionOutcome   acp.PermissionOutcome
-	blockPrompt         chan struct{}
-	blockPromptAt       int
-	promptResult        acp.PromptResult
-	promptResults       []acp.PromptResult
-	configOptions       []acp.SessionConfigOption
-	configCalls         []fakeConfigCall
-	modeCalls           []fakeModeCall
-	newCalls            []fakeNewCall
-	promptCalls         []fakePromptCall
-	wikiRuntimeCalls    []fakePromptCall
-	cancelCalls         []fakeCancelCall
-	callSeq             int
-	blockCancel         chan struct{}
-	closedRuntimeKeys   []runtimeKey
-	closedKeys          []SessionKey
-	shutdownCancelCount int
-	updateHandlers      map[SessionKey][]acp.UpdateHandler
-	blockWikiRuntime    chan struct{}
-	activeSessionIDs    map[SessionKey]string
-	abortedSessionIDs   []string
-	transitionBefore    func()
-	transitionMu        sync.Mutex
-	transitionCloseErr  error
+	mu                     sync.Mutex
+	newSessionID           string
+	newSessionIDs          []string
+	newSessionInfo         acp.SessionInfo
+	newSessionError        error
+	noDefaultState         bool
+	afterNewSession        func(key SessionKey, sessionID string)
+	promptReply            string
+	promptErrors           []error
+	promptUpdates          []acp.PromptUpdate
+	promptUpdatesByCall    [][]acp.PromptUpdate
+	afterUpdates           func()
+	permissionRequest      *acp.PermissionRequest
+	permissionOutcome      acp.PermissionOutcome
+	blockPrompt            chan struct{}
+	blockPromptAt          int
+	blockAfterPromptCancel bool
+	promptResult           acp.PromptResult
+	promptResults          []acp.PromptResult
+	configOptions          []acp.SessionConfigOption
+	configCalls            []fakeConfigCall
+	modeCalls              []fakeModeCall
+	newCalls               []fakeNewCall
+	promptCalls            []fakePromptCall
+	wikiRuntimeCalls       []fakePromptCall
+	cancelCalls            []fakeCancelCall
+	callSeq                int
+	blockCancel            chan struct{}
+	closedRuntimeKeys      []runtimeKey
+	closedKeys             []SessionKey
+	shutdownCancelCount    int
+	updateHandlers         map[SessionKey][]acp.UpdateHandler
+	blockWikiRuntime       chan struct{}
+	activeSessionIDs       map[SessionKey]string
+	abortedSessionIDs      []string
+	transitionBefore       func()
+	transitionMu           sync.Mutex
+	transitionCloseErr     error
 }
 
 type fakeNewCall struct {
@@ -11212,6 +11343,9 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	if blockThisPrompt {
 		select {
 		case <-ctx.Done():
+			if f.blockAfterPromptCancel {
+				<-blockPrompt
+			}
 			return acp.PromptResult{}, ctx.Err()
 		case <-blockPrompt:
 		}

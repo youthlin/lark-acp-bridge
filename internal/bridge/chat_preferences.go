@@ -369,7 +369,7 @@ func (s *Service) appendPendingAtAutoMessage(key SessionKey, entry pendingAtMess
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	task := s.tasks[key]
-	if task == nil || !task.drainPendingAtAuto {
+	if task == nil || !task.queuePendingAtAuto {
 		return false
 	}
 	pending := append(s.pendingAtAuto[key], entry)

@@ -60,8 +60,16 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	select {
 	case <-ctx.Done():
 		c.cancelRequest(ctx, req.ID)
-		if cancelWait <= 0 {
+		if cancelWait == 0 {
 			c.removePending(req.ID)
+			return nil, ctx.Err()
+		}
+		if cancelWait < 0 {
+			// session/prompt must not release promptMu until the server has
+			// answered the cancelled request or the read loop fails all pending
+			// calls. This prevents a later prompt from being written while an ACP
+			// agent is still busy finishing the old turn.
+			<-ch
 			return nil, ctx.Err()
 		}
 		// Prompt cancellation often races with the final server response. Waiting

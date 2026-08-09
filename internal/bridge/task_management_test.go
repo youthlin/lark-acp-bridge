@@ -22,7 +22,7 @@ func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, err := runUserTask(svc, context.Background(), session, agent, runningTaskOptions{drainPendingAtAuto: true}, func(ctx context.Context) (struct{}, error) {
+		_, err := runUserTask(svc, context.Background(), session, agent, runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}, func(ctx context.Context) (struct{}, error) {
 			close(started)
 			<-release
 			return struct{}{}, ctx.Err()
@@ -37,8 +37,8 @@ func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 	if task == nil {
 		t.Fatal("runUserTask did not register task")
 	}
-	if task.kind != taskKindUser || !task.drainPendingAtAuto {
-		t.Fatalf("task = %+v, want user task with drainPendingAtAuto", task)
+	if task.kind != taskKindUser || !task.drainPendingAtAuto || !task.queuePendingAtAuto {
+		t.Fatalf("task = %+v, want user task with pending at-auto flags", task)
 	}
 	cancelled := make(chan string, 1)
 	svc.setTaskCancelHandler(key, func(_ context.Context, reason string) {
@@ -98,6 +98,8 @@ func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 
 func TestStartTaskWithOptionsWaitsForReplacedTaskDone(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
+	rt := &fakeRuntime{}
+	svc.setRuntime(rt)
 	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
@@ -134,8 +136,51 @@ func TestStartTaskWithOptionsWaitsForReplacedTaskDone(t *testing.T) {
 	}
 }
 
+func TestStartTaskWithOptionsClosesRuntimeWhenReplacedTaskNeverCompletes(t *testing.T) {
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	rt := &fakeRuntime{}
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"})
+	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
+	agent := config.AgentConfig{Command: "traex"}
+	previousCtx, _ := svc.startTask(context.Background(), session, agent, taskKindUser)
+	incomingDone := make(chan error, 1)
+
+	go func() {
+		_, incomingFinish, err := svc.startTaskWithOptions(context.Background(), session, agent, taskKindUser, runningTaskOptions{
+			replacementTimeout: 20 * time.Millisecond,
+		})
+		if err == nil {
+			incomingFinish()
+		}
+		incomingDone <- err
+	}()
+
+	select {
+	case <-previousCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("previous task context was not cancelled")
+	}
+	select {
+	case err := <-incomingDone:
+		if err != nil {
+			t.Fatalf("incoming startTaskWithOptions() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incoming task did not start after replacement timeout")
+	}
+	rt.mu.Lock()
+	closed := append([]runtimeKey(nil), rt.closedRuntimeKeys...)
+	rt.mu.Unlock()
+	if len(closed) != 1 || closed[0] != currentRuntimeKey(key) {
+		t.Fatalf("closed runtime keys = %+v, want current runtime", closed)
+	}
+}
+
 func TestStartTaskWithOptionsWaitsForReplacedTaskChain(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
+	rt := &fakeRuntime{}
+	svc.setRuntime(rt)
 	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
@@ -241,7 +286,7 @@ func TestRunPromptTaskSharesUserTaskLifecycle(t *testing.T) {
 	agent := config.AgentConfig{Command: "traex"}
 	observed := make(chan *runningTask, 1)
 
-	out, err := runPromptTask(svc, context.Background(), session, agent, runningTaskOptions{drainPendingAtAuto: true}, func(context.Context) (acp.PromptResult, bool, error) {
+	out, err := runPromptTask(svc, context.Background(), session, agent, runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}, func(context.Context) (acp.PromptResult, bool, error) {
 		svc.taskMu.Lock()
 		observed <- svc.tasks[normalizeSessionKey(key)]
 		svc.taskMu.Unlock()
@@ -254,7 +299,7 @@ func TestRunPromptTaskSharesUserTaskLifecycle(t *testing.T) {
 		t.Fatalf("runPromptTask() = %+v, want prompt result and sentProgress", out)
 	}
 	task := <-observed
-	if task == nil || task.kind != taskKindUser || !task.drainPendingAtAuto {
+	if task == nil || task.kind != taskKindUser || !task.drainPendingAtAuto || !task.queuePendingAtAuto {
 		t.Fatalf("observed task = %+v, want shared user task lifecycle", task)
 	}
 	svc.taskMu.Lock()

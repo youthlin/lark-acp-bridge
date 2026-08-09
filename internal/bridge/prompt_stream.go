@@ -74,6 +74,102 @@ func (s *promptCardStream) delayCardCreation() {
 	s.mu.Unlock()
 }
 
+func (s *promptCardStream) ReplacementWaitStarted(ctx context.Context) {
+	s.mu.Lock()
+	s.delayed = false
+	s.mu.Unlock()
+	s.updateWaitingForReplacementStatus(ctx)
+}
+
+func (s *promptCardStream) ReplacementWaitTick(ctx context.Context) {
+	s.updateWaitingForReplacementStatus(ctx)
+}
+
+func (s *promptCardStream) ReplacementWaitFinished(ctx context.Context) {
+	s.updateRunningStatus(ctx)
+}
+
+func (s *promptCardStream) ReplacementWaitTimedOut(ctx context.Context) {
+	s.updateWaitingForReplacementStatus(ctx)
+}
+
+func (s *promptCardStream) updateWaitingForReplacementStatus(ctx context.Context) {
+	if !s.showStatusBar {
+		return
+	}
+	s.mu.Lock()
+	originalPrefix := s.status.prefix
+	s.status.prefix = strings.TrimSpace(strings.Join([]string{originalPrefix, "等待中断"}, " "))
+	statusText := s.status.text()
+	s.status.prefix = originalPrefix
+	s.mu.Unlock()
+	card := s.ensureCardWithContext(ctx)
+	if card == nil {
+		return
+	}
+	if err := card.UpdateStatus(ctx, statusText); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片等待状态失败", "session", s.session.ACPSessionID, "错误", err)
+	}
+}
+
+func (s *promptCardStream) updateRunningStatus(ctx context.Context) {
+	if !s.showStatusBar {
+		return
+	}
+	s.mu.Lock()
+	statusText := s.status.text()
+	s.mu.Unlock()
+	card := s.ensureCardWithContext(ctx)
+	if card == nil {
+		return
+	}
+	if err := card.UpdateStatus(ctx, statusText); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片运行状态失败", "session", s.session.ACPSessionID, "错误", err)
+	}
+}
+
+func (s *promptCardStream) startStatusRefresh(ctx context.Context) func() {
+	if !s.showStatusBar {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(promptStatusRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshRunningStatusIfVisible(ctx)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (s *promptCardStream) refreshRunningStatusIfVisible(ctx context.Context) {
+	s.mu.Lock()
+	delayed := s.delayed
+	started := s.started
+	s.mu.Unlock()
+	if delayed {
+		return
+	}
+	if !started {
+		card := s.ensureCardWithContext(ctx)
+		if card == nil {
+			return
+		}
+	}
+	s.updateRunningStatus(ctx)
+}
+
 func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result acp.PromptResult, stopReason string) {
 	s.mu.Lock()
 	s.delayed = false
@@ -602,6 +698,8 @@ const (
 	promptProcessFlushInterval = time.Second
 	maxPromptProcessRunes      = 6000
 )
+
+var promptStatusRefreshInterval = 3 * time.Second
 
 type promptProcessUpdateThrottler struct {
 	interval  time.Duration

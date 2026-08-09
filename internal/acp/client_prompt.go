@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 )
 
-const promptCancelResponseTimeout = 10 * time.Second
+const promptCancelResponseTimeout = -1
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
 	result, err := c.PromptWithOptions(ctx, sessionID, text, PromptOptions{})

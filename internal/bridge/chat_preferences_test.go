@@ -117,7 +117,7 @@ func TestAppendPendingAtAutoMessageSessionWorkBoundaries(t *testing.T) {
 			want:       nil,
 		},
 		{
-			name: "运行任务不允许 drain 时不入队",
+			name: "运行任务不允许 pending 入队时不入队",
 			setup: func(t *testing.T, svc *Service) {
 				_, finish := svc.startTask(context.Background(), Session{Key: normalizedKey, AgentName: "traex"}, agent, taskKindUser)
 				t.Cleanup(finish)
@@ -126,9 +126,9 @@ func TestAppendPendingAtAutoMessageSessionWorkBoundaries(t *testing.T) {
 			want:       nil,
 		},
 		{
-			name: "运行任务允许 drain 时按规范化 key 入队",
+			name: "运行任务允许 pending 入队时按规范化 key 入队",
 			setup: func(t *testing.T, svc *Service) {
-				_, finish, err := svc.startTaskWithOptions(context.Background(), Session{Key: normalizedKey, AgentName: "traex"}, agent, taskKindUser, runningTaskOptions{drainPendingAtAuto: true})
+				_, finish, err := svc.startTaskWithOptions(context.Background(), Session{Key: normalizedKey, AgentName: "traex"}, agent, taskKindUser, runningTaskOptions{queuePendingAtAuto: true})
 				if err != nil {
 					t.Fatalf("startTaskWithOptions() error = %v", err)
 				}
@@ -140,7 +140,7 @@ func TestAppendPendingAtAutoMessageSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "超过上限时保留最新消息",
 			setup: func(t *testing.T, svc *Service) {
-				_, finish, err := svc.startTaskWithOptions(context.Background(), Session{Key: normalizedKey, AgentName: "traex"}, agent, taskKindUser, runningTaskOptions{drainPendingAtAuto: true})
+				_, finish, err := svc.startTaskWithOptions(context.Background(), Session{Key: normalizedKey, AgentName: "traex"}, agent, taskKindUser, runningTaskOptions{queuePendingAtAuto: true})
 				if err != nil {
 					t.Fatalf("startTaskWithOptions() error = %v", err)
 				}

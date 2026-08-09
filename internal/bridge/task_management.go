@@ -14,7 +14,7 @@ import (
 
 var (
 	errSessionTaskBusy      = errors.New("session task busy")
-	replacedTaskDoneTimeout = 10 * time.Second
+	replacedTaskDoneTimeout = 2 * time.Minute
 )
 
 var closedRunningTaskDone = makeClosedTaskDone()
@@ -41,16 +41,27 @@ type runningTask struct {
 	session               Session
 	agent                 config.AgentConfig
 	drainPendingAtAuto    bool
+	queuePendingAtAuto    bool
 	onCancel              func(context.Context, string)
 }
 
 type runningTaskOptions struct {
 	drainPendingAtAuto  bool
+	queuePendingAtAuto  bool
 	queuedContinuation  bool
 	skipPostPromptWork  bool
 	silentPrompt        bool
 	keepWikiTimer       bool
 	blockWorkspaceTasks bool
+	replacementWait     replacedTaskWaitObserver
+	replacementTimeout  time.Duration
+}
+
+type replacedTaskWaitObserver interface {
+	ReplacementWaitStarted(context.Context)
+	ReplacementWaitTick(context.Context)
+	ReplacementWaitFinished(context.Context)
+	ReplacementWaitTimedOut(context.Context)
 }
 
 func userPromptTaskOptions() runningTaskOptions {
@@ -58,7 +69,11 @@ func userPromptTaskOptions() runningTaskOptions {
 }
 
 func atAutoUserPromptTaskOptions() runningTaskOptions {
-	return runningTaskOptions{drainPendingAtAuto: true}
+	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}
+}
+
+func atAutoPromptTaskOptions() runningTaskOptions {
+	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}
 }
 
 func queuedPromptTaskOptions() runningTaskOptions {
@@ -161,6 +176,7 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 		session:             session,
 		agent:               agent,
 		drainPendingAtAuto:  opts.drainPendingAtAuto,
+		queuePendingAtAuto:  opts.queuePendingAtAuto,
 	}
 
 	previous, busy := s.beginRunningTask(session.Key, task, opts)
@@ -170,8 +186,11 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 		return ctx, func() {}, errSessionTaskBusy
 	}
 	if previous != nil && !opts.queuedContinuation {
-		completed := s.cancelTask(ctx, previous, true)
-		if err := s.waitForReplacedTaskCompleted(ctx, previous, task, completed); err != nil {
+		if opts.replacementWait != nil {
+			opts.replacementWait.ReplacementWaitStarted(ctx)
+		}
+		completed := s.cancelTask(ctx, previous, false)
+		if err := s.waitForReplacedTaskCompleted(ctx, previous, completed, opts); err != nil {
 			shouldDrainQueue := s.finishRunningTask(session.Key, task, kind, opts)
 			cancel()
 			task.closeDone()
@@ -243,27 +262,53 @@ func makeClosedTaskDone() <-chan struct{} {
 	return ch
 }
 
-func (s *Service) waitForReplacedTaskCompleted(ctx context.Context, previous *runningTask, incoming *runningTask, completed <-chan struct{}) error {
+func (s *Service) waitForReplacedTaskCompleted(ctx context.Context, previous *runningTask, completed <-chan struct{}, opts runningTaskOptions) error {
 	if completed == nil {
 		return nil
 	}
-	timer := time.NewTimer(replacedTaskDoneTimeout)
+	timeout := opts.replacementTimeout
+	if timeout <= 0 {
+		timeout = replacedTaskDoneTimeout
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case <-completed:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		sessionID := ""
-		var kind taskKind
-		if previous != nil {
-			sessionID = previous.session.ACPSessionID
-			kind = previous.kind
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-completed:
+			if opts.replacementWait != nil {
+				opts.replacementWait.ReplacementWaitFinished(ctx)
+			}
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if opts.replacementWait != nil {
+				opts.replacementWait.ReplacementWaitTick(ctx)
+			}
+		case <-timer.C:
+			sessionID := ""
+			var kind taskKind
+			if previous != nil {
+				sessionID = previous.session.ACPSessionID
+				kind = previous.kind
+			}
+			if opts.replacementWait != nil {
+				opts.replacementWait.ReplacementWaitTimedOut(ctx)
+			}
+			slog.WarnContext(ctx, "等待旧任务结束超时，关闭旧 ACP runtime 后重建连接", "session", sessionID, "kind", kind, "timeout", timeout)
+			if previous != nil {
+				if err := s.runtime.CloseRuntimeKey(previous.runtime); err != nil {
+					slog.WarnContext(ctx, "关闭超时旧 ACP runtime 失败", "session", sessionID, "kind", kind, "错误", err)
+				}
+				if previous.cancel != nil {
+					previous.cancel()
+				}
+				previous.closeDone()
+			}
+			return nil
 		}
-		incoming.detachPredecessor()
-		slog.WarnContext(ctx, "等待旧任务结束超时，可能导致新消息被排队", "session", sessionID, "kind", kind)
-		return nil
 	}
 }
 
@@ -552,7 +597,7 @@ func (s *Service) cancelTask(ctx context.Context, task *runningTask, syncRuntime
 		s.cancelRuntimeTask(ctx, task)
 		return runningTaskCompleted(task)
 	}
-	go s.cancelRuntimeTask(ctx, task)
+	go s.cancelRuntimeTask(context.WithoutCancel(ctx), task)
 	return runningTaskCompleted(task)
 }
 
