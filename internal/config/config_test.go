@@ -358,6 +358,75 @@ func TestUpdateBotDriveCommentSerializesConcurrentReadModifyWrite(t *testing.T) 
 	}
 }
 
+func TestUpdateBotWikiTraceUpdatesOnlyWikiTraceField(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".lark-acp-bridge", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	raw := `{
+  "bots": [
+    {
+      "id": "bot-a",
+      "app_id": "cli_a",
+      "app_secret": {
+        "source": "file",
+        "path": "$HOME/.lark-acp-bridge/secrets/bot-a.appsecret"
+      },
+      "workspace": "$HOME/.lark-acp-bridge/bots/bot-a"
+    }
+  ],
+  "agent_list": [
+    {
+      "name": "traex",
+      "command": "traex",
+      "default_cwd": "$HOME"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	updated, err := UpdateBotWikiTrace(configPath, "bot-a", func(cfg *WikiTraceConfig) {
+		cfg.Enabled = true
+		cfg.ChatID = " oc_wiki "
+	})
+	if err != nil {
+		t.Fatalf("UpdateBotWikiTrace() error = %v", err)
+	}
+	if !updated.Enabled || updated.ChatID != "oc_wiki" {
+		t.Fatalf("updated wiki_trace = %+v, want normalized enabled", updated)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"path": "$HOME/.lark-acp-bridge/secrets/bot-a.appsecret"`,
+		`"workspace": "$HOME/.lark-acp-bridge/bots/bot-a"`,
+		`"chat_id": "oc_wiki"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config = %s, want preserved/updated field %s", text, want)
+		}
+	}
+	if strings.Contains(text, `"mode"`) {
+		t.Fatalf("config = %s, want no wiki_trace mode field", text)
+	}
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := loaded.Bots[0].WikiTrace; !got.Enabled || got.ChatID != "oc_wiki" {
+		t.Fatalf("loaded wiki_trace = %+v, want enabled", got)
+	}
+}
+
 func TestAddBotWritesSecretFileAndConfigReference(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

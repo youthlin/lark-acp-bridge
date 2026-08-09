@@ -49,6 +49,105 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	if !strings.Contains(status.lastSummary, "knowledge/core.md") {
 		t.Fatalf("wiki summary = %q, want changed files", status.lastSummary)
 	}
+	if rt.promptCalls[0].HasUpdateHandler {
+		t.Fatal("wiki prompt has update handler while wiki trace is disabled")
+	}
+}
+
+func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bots[0].WikiTrace = config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"}
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply: "NoReply",
+		promptUpdates: []acp.PromptUpdate{{
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				ToolCallID:    "tool-1",
+				Title:         "读取知识索引",
+				Status:        "in_progress",
+			},
+		}},
+	}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	card := &fakeStreamCard{}
+	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+		return card, nil
+	}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session := Session{
+		Key:          key,
+		Title:        "来源会话",
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    filepath.Join(t.TempDir(), "workspace"),
+	}
+	svc.taskMu.Lock()
+	svc.wikiGenerations[key] = 1
+	svc.taskMu.Unlock()
+
+	svc.runWikiTimer(key, 1, session, mustConfigAgent(t, cfg, "traex"))
+
+	if rt.promptCallCount() != 1 || !rt.promptCalls[0].HasUpdateHandler {
+		t.Fatalf("prompt calls = %+v, want wiki trace update handler", rt.promptCalls)
+	}
+	if got := strings.Join(card.processUpdatesSnapshot(), "\n"); !strings.Contains(got, "读取知识索引") {
+		t.Fatalf("process updates = %q, want tool progress", got)
+	}
+	if got := card.finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "检查完成，无需沉淀。" {
+		t.Fatalf("final text updates = %+v, want no changes summary", got)
+	}
+}
+
+func TestPendingWikiTraceKeepsIndependentRuntimeKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bots[0].WikiTrace = config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"}
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply: "changed: yes\nfiles:\n- knowledge/core.md\nsummary: 更新入口\nreason: 长期保留",
+		promptUpdates: []acp.PromptUpdate{{
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				ToolCallID:    "tool-1",
+				Title:         "更新 knowledge/core.md",
+				Status:        "completed",
+			},
+		}},
+	}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	card := &fakeStreamCard{}
+	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+		return card, nil
+	}
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	pending := pendingWikiRun{
+		generation: 7,
+		session: Session{
+			Key:          key,
+			Title:        "旧会话",
+			AgentName:    "traex",
+			ACPSessionID: "acp-old",
+			Cwd:          t.TempDir(),
+			Workspace:    filepath.Join(t.TempDir(), "workspace"),
+		},
+		agent: mustConfigAgent(t, cfg, "traex"),
+	}
+
+	svc.runPendingWikiWithRuntimeKey(pending)
+
+	if rt.wikiRuntimeCallCount() != 1 {
+		t.Fatalf("wiki runtime calls = %d, want one", rt.wikiRuntimeCallCount())
+	}
+	call := rt.wikiRuntimeCalls[0]
+	if call.Runtime != wikiRuntimeKey(key, 7, "acp-old") || !call.HasUpdateHandler {
+		t.Fatalf("wiki runtime call = %+v, want independent runtime key with update handler", call)
+	}
+	if got := strings.Join(card.processUpdatesSnapshot(), "\n"); !strings.Contains(got, "更新 knowledge/core.md") {
+		t.Fatalf("process updates = %q, want tool progress", got)
+	}
 }
 
 func TestWikiReflectionPromptRequestsAuditSummary(t *testing.T) {

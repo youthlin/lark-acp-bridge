@@ -53,12 +53,19 @@ type BotConfig struct {
 	OwnerOpenIDs []string `json:"owner_open_ids,omitempty"`
 	// 云文档评论处理配置
 	DriveComment DriveCommentConfig `json:"drive_comment,omitzero"`
+	// 自动知识沉淀过程展示配置
+	WikiTrace WikiTraceConfig `json:"wiki_trace,omitzero"`
 }
 
 type DriveCommentConfig struct {
 	Enabled      bool   `json:"enabled,omitempty"`
 	TraceEnabled bool   `json:"trace_enabled,omitempty"`
 	TraceChatID  string `json:"trace_chat_id,omitempty"`
+}
+
+type WikiTraceConfig struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	ChatID  string `json:"chat_id,omitempty"`
 }
 
 type Secret struct {
@@ -543,64 +550,83 @@ func RemoveBot(path, id string) (bool, error) {
 }
 
 func UpdateBotDriveComment(path, botID string, update func(*DriveCommentConfig)) (DriveCommentConfig, error) {
+	var updated DriveCommentConfig
+	err := updateBotSubConfig(path, botID, "drive_comment", &updated, func() bool {
+		if update != nil {
+			update(&updated)
+		}
+		updated.TraceChatID = strings.TrimSpace(updated.TraceChatID)
+		return updated.Enabled || updated.TraceEnabled || updated.TraceChatID != ""
+	})
+	return updated, err
+}
+
+func UpdateBotWikiTrace(path, botID string, update func(*WikiTraceConfig)) (WikiTraceConfig, error) {
+	var updated WikiTraceConfig
+	err := updateBotSubConfig(path, botID, "wiki_trace", &updated, func() bool {
+		if update != nil {
+			update(&updated)
+		}
+		updated.ChatID = strings.TrimSpace(updated.ChatID)
+		return updated.Enabled || updated.ChatID != ""
+	})
+	return updated, err
+}
+
+func updateBotSubConfig(path, botID, field string, value any, normalize func() bool) error {
 	path, err := ExpandPath(path)
 	if err != nil {
-		return DriveCommentConfig{}, err
+		return err
 	}
 	unlock := lockConfigPath(path)
 	defer unlock()
 	data, err := readSensitiveFile("config", path)
 	if err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("读取配置文件: %w", err)
+		return fmt.Errorf("读取配置文件: %w", err)
 	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("解析配置文件: %w", err)
+		return fmt.Errorf("解析配置文件: %w", err)
 	}
 	var rawBots []map[string]json.RawMessage
 	if err := json.Unmarshal(root["bots"], &rawBots); err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("解析配置 bots: %w", err)
+		return fmt.Errorf("解析配置 bots: %w", err)
 	}
 	index := rawBotIndex(rawBots, botID)
 	if index < 0 {
-		return DriveCommentConfig{}, fmt.Errorf("未找到 bot 配置: %s", strings.TrimSpace(botID))
+		return fmt.Errorf("未找到 bot 配置: %s", strings.TrimSpace(botID))
 	}
-	var driveComment DriveCommentConfig
-	if raw := rawBots[index]["drive_comment"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &driveComment); err != nil {
-			return DriveCommentConfig{}, fmt.Errorf("解析 bot %q drive_comment: %w", strings.TrimSpace(botID), err)
+	if raw := rawBots[index][field]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, value); err != nil {
+			return fmt.Errorf("解析 bot %q %s: %w", strings.TrimSpace(botID), field, err)
 		}
 	}
-	if update != nil {
-		update(&driveComment)
-	}
-	driveComment.TraceChatID = strings.TrimSpace(driveComment.TraceChatID)
-	if !driveComment.Enabled && !driveComment.TraceEnabled && driveComment.TraceChatID == "" {
-		delete(rawBots[index], "drive_comment")
+	if !normalize() {
+		delete(rawBots[index], field)
 	} else {
-		raw, err := json.Marshal(driveComment)
+		raw, err := json.Marshal(value)
 		if err != nil {
-			return DriveCommentConfig{}, fmt.Errorf("编码 bot %q drive_comment: %w", strings.TrimSpace(botID), err)
+			return fmt.Errorf("编码 bot %q %s: %w", strings.TrimSpace(botID), field, err)
 		}
-		rawBots[index]["drive_comment"] = raw
+		rawBots[index][field] = raw
 	}
 	raw, err := json.Marshal(rawBots)
 	if err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("编码配置 bots: %w", err)
+		return fmt.Errorf("编码配置 bots: %w", err)
 	}
 	root["bots"] = raw
 	data, err = json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("编码配置文件: %w", err)
+		return fmt.Errorf("编码配置文件: %w", err)
 	}
 	data = append(data, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("创建配置目录: %w", err)
+		return fmt.Errorf("创建配置目录: %w", err)
 	}
 	if err := writeFileAtomic(path, data, 0o600); err != nil {
-		return DriveCommentConfig{}, fmt.Errorf("写入配置文件: %w", err)
+		return fmt.Errorf("写入配置文件: %w", err)
 	}
-	return driveComment, nil
+	return nil
 }
 
 func rawBotIndex(rawBots []map[string]json.RawMessage, botID string) int {
@@ -994,6 +1020,7 @@ func normalize(cfg *Config) error {
 		bot.BotOpenID = strings.TrimSpace(bot.BotOpenID)
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
 		bot.DriveComment.TraceChatID = strings.TrimSpace(bot.DriveComment.TraceChatID)
+		bot.WikiTrace.ChatID = strings.TrimSpace(bot.WikiTrace.ChatID)
 		bot.AppSecret.normalize()
 		cfg.Bots[i] = bot
 	}

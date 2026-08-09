@@ -206,8 +206,11 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
-		name:      "/wiki",
-		helpLines: []string{"/wiki on|off|status|lint|upgrade|interval <duration> - 管理当前聊天的自动知识沉淀和一致性检查"},
+		name: "/wiki",
+		helpLines: []string{
+			"/wiki on|off|status|lint|upgrade|interval <duration> - 管理当前聊天的自动知识沉淀和一致性检查",
+			"/wiki trace on|off|new - 管理当前 bot 的自动知识沉淀过程卡片",
+		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleWikiCommand(ctx, text, msg)
 		},

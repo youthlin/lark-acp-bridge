@@ -86,6 +86,8 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 		return "已关闭当前聊天的自动知识沉淀。"
 	case "status":
 		return s.wikiStatus(msg, chat)
+	case "trace":
+		return s.handleWikiTraceCommand(ctx, fields, msg)
 	case "lint":
 		return s.runWikiLint(ctx, msg)
 	case "upgrade":
@@ -117,7 +119,7 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 }
 
 func wikiCommandUsage() string {
-	return "可用命令：/wiki on、/wiki off、/wiki status、/wiki lint、/wiki upgrade 或 /wiki interval <duration>。"
+	return "可用命令：/wiki on、/wiki off、/wiki status、/wiki lint、/wiki upgrade、/wiki interval <duration> 或 /wiki trace on|off|new。"
 }
 
 func parseWikiInterval(raw string) (time.Duration, error) {
@@ -184,6 +186,9 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 		}
 	} else {
 		lines = append(lines, "状态：尚未触发")
+	}
+	if bot, ok := s.botConfig(msg.BotID); ok {
+		lines = append(lines, formatWikiTraceStatus(bot.WikiTrace))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -614,7 +619,10 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		return
 	}
 	s.markWikiStarted(key)
-	result, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), acp.PromptOptions{})
+	trace := s.wikiTraceObserver(session)
+	trace.start(ctx)
+	result, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), wikiTracePromptOptions(trace))
+	trace.complete(ctx, result, err)
 	finish()
 	s.markWikiFinished(key, session, result, err)
 }
@@ -659,7 +667,10 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 		}
 	}()
 	s.markWikiStarted(key)
-	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), acp.PromptOptions{})
+	trace := s.wikiTraceObserver(pending.session)
+	trace.start(ctx)
+	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), wikiTracePromptOptions(trace))
+	trace.complete(ctx, result, err)
 	s.markWikiFinished(key, pending.session, result, err)
 }
 
