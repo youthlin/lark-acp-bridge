@@ -1094,8 +1094,8 @@ func TestNewModelSelectionCardJSONContainsDropdownAndCallbackContext(t *testing.
 		RequesterID:  "ou_requester",
 		CurrentModel: "gpt-5.5",
 		Options: []ModelOption{
-			{Value: "gpt-5.5", Name: "GPT-5.5"},
-			{Value: "gpt-5.6", Name: "GPT-5.6"},
+			{Value: "gpt-5.5", Name: "GPT-5.5", LoadPercent: intPtr(10)},
+			{Value: "gpt-5.6", Name: "GPT-5.6", LoadPercent: intPtr(47)},
 		},
 	})), &card); err != nil {
 		t.Fatalf("newModelSelectionCardJSON() is not valid JSON: %v", err)
@@ -1104,7 +1104,7 @@ func TestNewModelSelectionCardJSONContainsDropdownAndCallbackContext(t *testing.
 	for _, want := range []string{
 		"select_static",
 		"gpt-5.5",
-		"GPT-5.6（gpt-5.6）",
+		"GPT-5.6 - 负载 47%",
 		modelSelectionCardAction,
 		"session-1",
 		"ou_requester",
@@ -1281,7 +1281,7 @@ func TestNewConfigDetailCardJSONContainsConfigFieldsAndOptions(t *testing.T) {
 		CurrentValue: "gpt-5.5",
 		Options: []ConfigOptionValue{
 			{Value: "Doubao-Seed-2.1-Pro", Name: "Doubao-Seed-2.1-Pro", Description: "184K context window, support reasoning."},
-			{Value: "gpt-5.5", Name: "GPT-5.5", Description: "support reasoning, beta.", Current: true},
+			{Value: "gpt-5.5", Name: "GPT-5.5", Description: "support reasoning, beta.", Current: true, LoadPercent: intPtr(10)},
 		},
 		SetCommand: "/config model <value>",
 	})), &card); err != nil {
@@ -1294,6 +1294,7 @@ func TestNewConfigDetailCardJSONContainsConfigFieldsAndOptions(t *testing.T) {
 		"Choose which model TRAE CLI should use",
 		"GPT-5.5（gpt-5.5）",
 		"**当前**",
+		"负载 10%",
 		"/config model <value>",
 	} {
 		if !jsonContainsSubstring(card, want) {
@@ -2198,4 +2199,8 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func intPtr(value int) *int {
+	return &value
 }

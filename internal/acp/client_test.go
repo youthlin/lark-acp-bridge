@@ -662,7 +662,7 @@ func TestSessionInfoTrimsModelStateFields(t *testing.T) {
 		"sessionId":"session-1",
 		"models":{
 			"currentModelId":" gpt-5.5 ",
-			"availableModels":[{"modelId":" gpt-5.5 ","name":" GPT-5.5 ","description":" default model "}]
+			"availableModels":[{"modelId":" gpt-5.5 ","name":" GPT-5.5 ","description":" default model ","_meta":{"trae":{"load":{"percent":10}}}}]
 		}
 	}`), &info); err != nil {
 		t.Fatalf("Unmarshal model state error = %v", err)
@@ -676,6 +676,9 @@ func TestSessionInfoTrimsModelStateFields(t *testing.T) {
 	got := info.Models.AvailableModels[0]
 	if got.ModelID != "gpt-5.5" || got.Name != "GPT-5.5" || got.Description != "default model" {
 		t.Fatalf("model = %+v, want trimmed fields", got)
+	}
+	if percent, ok := TraeModelLoadPercent(got.Meta); !ok || percent != 10 {
+		t.Fatalf("model meta = %+v, want load percent 10", got.Meta)
 	}
 }
 
@@ -1291,7 +1294,7 @@ func TestConfigOptionsTrimStructuredFields(t *testing.T) {
 				"type": " select ",
 				"currentValue": " gpt-5.6 ",
 				"options": [
-					{"value": " gpt-5.6 ", "name": " GPT-5.6 "}
+					{"value": " gpt-5.6 ", "name": " GPT-5.6 ", "_meta": {"trae": {"load": {"percent": 47}}}}
 				]
 			}
 		]
@@ -1307,6 +1310,9 @@ func TestConfigOptionsTrimStructuredFields(t *testing.T) {
 	}
 	if len(option.Options) != 1 || option.Options[0].Value != "gpt-5.6" || option.Options[0].Name != "GPT-5.6" {
 		t.Fatalf("option values = %+v, want trimmed value/name", option.Options)
+	}
+	if percent, ok := TraeModelLoadPercent(option.Options[0].Meta); !ok || percent != 47 {
+		t.Fatalf("option meta = %+v, want load percent 47", option.Options[0].Meta)
 	}
 }
 

@@ -18,17 +18,22 @@ func formatModelStatus(session Session) string {
 	modelOpt, hasModelOpt := findModelConfigOption(session)
 	if hasModelOpt && len(modelOpt.Options) > 0 {
 		lines = append(lines, "", "可用模型：")
+		modelLoads := modelLoadPercentByID(session.Models)
 		for _, opt := range modelOpt.Options {
-			if strings.TrimSpace(opt.Value) == "" {
+			value := strings.TrimSpace(opt.Value)
+			if value == "" {
 				continue
 			}
 			marker := ""
-			if opt.Value == modelValueString(modelOpt.CurrentValue) {
+			if value == modelValueString(modelOpt.CurrentValue) {
 				marker = " *"
 			}
-			label := opt.Value
+			label := value
 			if strings.TrimSpace(opt.Name) != "" && opt.Name != opt.Value {
 				label += " - " + strings.TrimSpace(opt.Name)
+			}
+			if load := formatModelOptionLoad(opt, modelLoads); load != "" {
+				label += " - " + load
 			}
 			lines = append(lines, marker+" "+label)
 		}
@@ -45,6 +50,9 @@ func formatModelStatus(session Session) string {
 			label := model.ModelID
 			if strings.TrimSpace(model.Name) != "" && model.Name != model.ModelID {
 				label += " - " + strings.TrimSpace(model.Name)
+			}
+			if load := formatModelLoad(model.Meta); load != "" {
+				label += " - " + load
 			}
 			lines = append(lines, marker+" "+label)
 		}
@@ -112,7 +120,7 @@ func formatConfigStatus(session Session) string {
 		if strings.TrimSpace(opt.ID) == "" {
 			continue
 		}
-		lines = append(lines, " "+formatConfigOptionSummary(opt))
+		lines = append(lines, " "+formatConfigOptionSummaryWithModelState(opt, session.Models))
 	}
 	if len(lines) == 1 {
 		lines = append(lines, "当前 ACP server 还没有上报可配置项。")
@@ -123,6 +131,10 @@ func formatConfigStatus(session Session) string {
 }
 
 func formatConfigOptionSummary(opt acp.SessionConfigOption) string {
+	return formatConfigOptionSummaryWithModelState(opt, nil)
+}
+
+func formatConfigOptionSummaryWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
 	label := strings.TrimSpace(opt.ID)
 	name := strings.TrimSpace(opt.Name)
 	if name != "" && name != label {
@@ -136,10 +148,17 @@ func formatConfigOptionSummary(opt acp.SessionConfigOption) string {
 	if optionType == "" {
 		optionType = "unknown"
 	}
+	if load := formatCurrentConfigOptionLoad(opt, models); load != "" {
+		current += " (" + load + ")"
+	}
 	return fmt.Sprintf("%s [%s] = %s", label, optionType, current)
 }
 
 func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
+	return formatConfigOptionDetailWithModelState(opt, nil)
+}
+
+func formatConfigOptionDetailWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
 	id := strings.TrimSpace(opt.ID)
 	lines := []string{"ACP 配置项：" + id}
 	if name := strings.TrimSpace(opt.Name); name != "" && name != id {
@@ -163,6 +182,7 @@ func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
 	lines = append(lines, "当前值："+current)
 	if len(opt.Options) > 0 {
 		lines = append(lines, "", "可选值：")
+		modelLoads := modelLoadPercentByID(models)
 		for _, option := range opt.Options {
 			value := strings.TrimSpace(option.Value)
 			if value == "" {
@@ -180,6 +200,9 @@ func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
 			if description := cleanConfigOptionDescription(option.Description); description != "" {
 				line += " - " + description
 			}
+			if load := formatModelOptionLoad(option, modelLoads); load != "" {
+				line += " - " + load
+			}
 			lines = append(lines, line)
 		}
 	}
@@ -188,6 +211,10 @@ func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
 }
 
 func configDetailCard(opt acp.SessionConfigOption) feishu.ConfigDetailCard {
+	return configDetailCardWithModelState(opt, nil)
+}
+
+func configDetailCardWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) feishu.ConfigDetailCard {
 	id := strings.TrimSpace(opt.ID)
 	optionType := strings.TrimSpace(opt.Type)
 	if optionType == "" {
@@ -198,16 +225,22 @@ func configDetailCard(opt acp.SessionConfigOption) feishu.ConfigDetailCard {
 		current = "未知"
 	}
 	options := make([]feishu.ConfigOptionValue, 0, len(opt.Options))
+	modelLoads := modelLoadPercentByID(models)
 	for _, option := range opt.Options {
 		value := strings.TrimSpace(option.Value)
 		if value == "" {
 			continue
+		}
+		load := modelLoadPercentPtr(option.Meta)
+		if load == nil {
+			load = modelLoads[value]
 		}
 		options = append(options, feishu.ConfigOptionValue{
 			Value:       value,
 			Name:        strings.TrimSpace(option.Name),
 			Description: cleanConfigOptionDescription(option.Description),
 			Current:     value == configOptionValueString(opt.CurrentValue),
+			LoadPercent: load,
 		})
 	}
 	return feishu.ConfigDetailCard{
@@ -220,6 +253,38 @@ func configDetailCard(opt acp.SessionConfigOption) feishu.ConfigDetailCard {
 		Options:      options,
 		SetCommand:   "/config " + id + " <value>",
 	}
+}
+
+func formatModelLoad(meta map[string]any) string {
+	percent, ok := acp.TraeModelLoadPercent(meta)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("负载 %d%%", percent)
+}
+
+func formatModelOptionLoad(option acp.SessionConfigOptionValue, modelLoads map[string]*int) string {
+	if load := formatModelLoad(option.Meta); load != "" {
+		return load
+	}
+	if percent := modelLoads[strings.TrimSpace(option.Value)]; percent != nil {
+		return fmt.Sprintf("负载 %d%%", *percent)
+	}
+	return ""
+}
+
+func formatCurrentConfigOptionLoad(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
+	current := configOptionValueString(opt.CurrentValue)
+	if current == "" {
+		return ""
+	}
+	modelLoads := modelLoadPercentByID(models)
+	for _, option := range opt.Options {
+		if strings.TrimSpace(option.Value) == current {
+			return formatModelOptionLoad(option, modelLoads)
+		}
+	}
+	return ""
 }
 
 func cleanConfigOptionDescription(description string) string {

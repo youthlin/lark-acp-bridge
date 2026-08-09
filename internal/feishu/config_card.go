@@ -104,6 +104,9 @@ func configDetailOptionsElement(options []ConfigOptionValue) cardJSON {
 		if option.Current {
 			line += "  **当前**"
 		}
+		if load := modelLoadDisplay(option.LoadPercent); load != "" {
+			line += "  " + configCardInline(load)
+		}
 		if description := strings.TrimSpace(option.Description); description != "" {
 			line += "\n  " + configCardBlockText(description)
 		}

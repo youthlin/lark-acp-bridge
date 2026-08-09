@@ -820,6 +820,9 @@ func cloneSession(session Session) Session {
 	if session.Models != nil {
 		models := *session.Models
 		models.AvailableModels = append([]acp.SessionModel(nil), session.Models.AvailableModels...)
+		for i := range models.AvailableModels {
+			models.AvailableModels[i].Meta = cloneJSONMap(models.AvailableModels[i].Meta)
+		}
 		session.Models = &models
 	}
 	if session.Mode != nil {
@@ -877,6 +880,9 @@ func cloneConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOp
 	cloned := append([]acp.SessionConfigOption(nil), options...)
 	for i := range cloned {
 		cloned[i].Options = append([]acp.SessionConfigOptionValue(nil), cloned[i].Options...)
+		for j := range cloned[i].Options {
+			cloned[i].Options[j].Meta = cloneJSONMap(cloned[i].Options[j].Meta)
+		}
 	}
 	return cloned
 }

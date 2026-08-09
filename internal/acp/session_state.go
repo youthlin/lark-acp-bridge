@@ -72,9 +72,10 @@ type SessionConfigOption struct {
 }
 
 type SessionConfigOptionValue struct {
-	Value       string `json:"value"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Value       string         `json:"value"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 func filterSupportedConfigOptions(options []SessionConfigOption) []SessionConfigOption {
@@ -133,16 +134,18 @@ func (s *SessionModelState) UnmarshalJSON(data []byte) error {
 }
 
 type SessionModel struct {
-	ModelID     string `json:"modelId"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	ModelID     string         `json:"modelId"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 func (m *SessionModel) UnmarshalJSON(data []byte) error {
 	var parsed struct {
-		ModelID     string `json:"modelId"`
-		Name        string `json:"name"`
-		Description string `json:"description,omitempty"`
+		ModelID     string         `json:"modelId"`
+		Name        string         `json:"name"`
+		Description string         `json:"description,omitempty"`
+		Meta        map[string]any `json:"_meta,omitempty"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return err
@@ -150,7 +153,49 @@ func (m *SessionModel) UnmarshalJSON(data []byte) error {
 	m.ModelID = strings.TrimSpace(parsed.ModelID)
 	m.Name = strings.TrimSpace(parsed.Name)
 	m.Description = strings.TrimSpace(parsed.Description)
+	m.Meta = parsed.Meta
 	return nil
+}
+
+func TraeModelLoadPercent(meta map[string]any) (int, bool) {
+	if len(meta) == 0 {
+		return 0, false
+	}
+	trae, ok := meta["trae"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	load, ok := trae["load"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	percent, ok := numberToInt(load["percent"])
+	if !ok || percent < 0 || percent > 100 {
+		return 0, false
+	}
+	return percent, true
+}
+
+func numberToInt(value any) (int, bool) {
+	switch value := value.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		if value != float64(int(value)) {
+			return 0, false
+		}
+		return int(value), true
+	case json.Number:
+		parsed, err := value.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
 }
 
 type SessionModeState struct {

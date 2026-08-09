@@ -527,6 +527,12 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	session.Models = &acp.SessionModelState{
+		CurrentModelID: "gpt-5.5/high",
+		AvailableModels: []acp.SessionModel{
+			{ModelID: "gpt-5.5", Name: "GPT-5.5", Meta: traeLoadMeta(10)},
+		},
+	}
 	session.ConfigOptions = []acp.SessionConfigOption{
 		{
 			ID:           "model",
@@ -1764,6 +1770,12 @@ func TestHandleFeishuMessageAutoCompactRequiresCommand(t *testing.T) {
 func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	session.Models = &acp.SessionModelState{
+		CurrentModelID: "gpt-5.5/high",
+		AvailableModels: []acp.SessionModel{
+			{ModelID: "gpt-5.5", Name: "GPT-5.5", Meta: traeLoadMeta(10)},
+		},
+	}
 	session.ConfigOptions = []acp.SessionConfigOption{
 		{
 			ID:           "model",
@@ -1835,7 +1847,7 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/config) error = %v", err)
 	}
-	for _, want := range []string{"当前 ACP 配置项", "model - Model [select] = gpt-5.5", "brave_mode - Brave Mode [boolean] = false", "reasoning - Reasoning Effort [select] = medium", "/config <id> <value>"} {
+	for _, want := range []string{"当前 ACP 配置项", "model - Model [select] = gpt-5.5 (负载 10%)", "brave_mode - Brave Mode [boolean] = false", "reasoning - Reasoning Effort [select] = medium", "/config <id> <value>"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
@@ -1852,7 +1864,7 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/config model) error = %v", err)
 	}
-	for _, want := range []string{"ACP 配置项：model", "名称：Model", "说明：Choose which model TRAE CLI should use", "当前值：gpt-5.5", "- [ ] Doubao-Seed-2.1-Pro - 184K context window, support reasoning.", "- [x] GPT-5.5（gpt-5.5） - support reasoning, beta.", "- [ ] Doubao-Seed-Code（Doubao_1_6）", "/config model <value>"} {
+	for _, want := range []string{"ACP 配置项：model", "名称：Model", "说明：Choose which model TRAE CLI should use", "当前值：gpt-5.5", "- [ ] Doubao-Seed-2.1-Pro - 184K context window, support reasoning.", "- [x] GPT-5.5（gpt-5.5） - support reasoning, beta. - 负载 10%", "- [ ] Doubao-Seed-Code（Doubao_1_6）", "/config model <value>"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
@@ -1891,6 +1903,12 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
+	session.Models = &acp.SessionModelState{
+		CurrentModelID: "gpt-5.5/high",
+		AvailableModels: []acp.SessionModel{
+			{ModelID: "gpt-5.5", Name: "GPT-5.5", Meta: traeLoadMeta(10)},
+		},
+	}
 	session.ConfigOptions = []acp.SessionConfigOption{
 		{
 			ID:           "model",
@@ -1944,6 +1962,9 @@ func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
 	}
 	if got.Options[1].Value != "gpt-5.5" || got.Options[1].Name != "GPT-5.5" || !got.Options[1].Current {
 		t.Fatalf("current option = %+v, want GPT-5.5 current", got.Options[1])
+	}
+	if got.Options[1].LoadPercent == nil || *got.Options[1].LoadPercent != 10 {
+		t.Fatalf("current option = %+v, want load percent 10", got.Options[1])
 	}
 	if got.Options[2].Description != "" {
 		t.Fatalf("dot-only description = %q, want empty", got.Options[2].Description)

@@ -71,8 +71,9 @@ type streamCardStatusBarKey struct{}
 type streamCardMetaKey struct{}
 
 type ModelOption struct {
-	Value string
-	Name  string
+	Value       string
+	Name        string
+	LoadPercent *int
 }
 
 type ModeOption struct {
@@ -91,6 +92,7 @@ type ConfigOptionValue struct {
 	Name        string
 	Description string
 	Current     bool
+	LoadPercent *int
 }
 
 type ConfigDetailCard struct {

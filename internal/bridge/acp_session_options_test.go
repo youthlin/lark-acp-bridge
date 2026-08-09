@@ -17,13 +17,70 @@ func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
 			CurrentModelID: "gpt-5.5",
 			AvailableModels: []acp.SessionModel{
 				{ModelID: "gpt-5.5", Name: "GPT-5.5"},
-				{ModelID: "gpt-5.6", Name: "GPT-5.6"},
+				{ModelID: "gpt-5.6", Name: "GPT-5.6", Meta: traeLoadMeta(47)},
 			},
 		},
 	}
 	options := modelSelectionOptions(session, acp.SessionConfigOption{ID: "model", Category: "model"})
 	if len(options) != 2 || options[1].Value != "gpt-5.6" || options[1].Name != "GPT-5.6" {
 		t.Fatalf("options = %+v, want models fallback", options)
+	}
+	if options[1].LoadPercent == nil || *options[1].LoadPercent != 47 {
+		t.Fatalf("options = %+v, want load percent 47", options)
+	}
+}
+
+func TestModelSelectionOptionsIncludesTraeLoadFromConfigOptions(t *testing.T) {
+	options := modelSelectionOptions(Session{}, acp.SessionConfigOption{
+		ID:       "model",
+		Category: "model",
+		Options: []acp.SessionConfigOptionValue{
+			{Value: "gpt-5.5", Name: "GPT-5.5", Meta: traeLoadMeta(10)},
+		},
+	})
+	if len(options) != 1 || options[0].LoadPercent == nil || *options[0].LoadPercent != 10 {
+		t.Fatalf("options = %+v, want config option load percent 10", options)
+	}
+}
+
+func TestModelSelectionOptionsMergesTraeLoadFromModels(t *testing.T) {
+	session := Session{
+		Models: &acp.SessionModelState{
+			CurrentModelID: "gpt-5.5/high",
+			AvailableModels: []acp.SessionModel{
+				{ModelID: "gpt-5.5", Name: "GPT-5.5", Meta: traeLoadMeta(10)},
+				{ModelID: "gpt-5.6", Name: "GPT-5.6", Meta: traeLoadMeta(47)},
+			},
+		},
+	}
+	options := modelSelectionOptions(session, acp.SessionConfigOption{
+		ID:           "model",
+		Category:     "model",
+		Type:         "select",
+		CurrentValue: "gpt-5.5",
+		Options: []acp.SessionConfigOptionValue{
+			{Value: "gpt-5.5", Name: "GPT-5.5"},
+			{Value: "gpt-5.6", Name: "GPT-5.6"},
+		},
+	})
+	if len(options) != 2 {
+		t.Fatalf("options = %+v, want 2 options", options)
+	}
+	if options[0].LoadPercent == nil || *options[0].LoadPercent != 10 {
+		t.Fatalf("options = %+v, want gpt-5.5 load from models", options)
+	}
+	if options[1].LoadPercent == nil || *options[1].LoadPercent != 47 {
+		t.Fatalf("options = %+v, want gpt-5.6 load from models", options)
+	}
+}
+
+func traeLoadMeta(percent int) map[string]any {
+	return map[string]any{
+		"trae": map[string]any{
+			"load": map[string]any{
+				"percent": percent,
+			},
+		},
 	}
 }
 

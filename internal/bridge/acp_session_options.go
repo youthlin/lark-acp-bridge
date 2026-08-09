@@ -27,7 +27,7 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 		return "未知配置项：" + configID + "\n\n" + formatConfigStatus(session)
 	}
 	if len(fields) == 2 {
-		return s.sendConfigDetailCard(ctx, msg, opt)
+		return s.sendConfigDetailCard(ctx, msg, session, opt)
 	}
 	target := commandRemainder(text, 2)
 	if target == "" {
@@ -36,7 +36,7 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 	value, display, err := s.setSessionConfigOption(ctx, msg, session, opt, target)
 	if err != nil {
 		if errors.Is(err, errUnknownConfigValue) {
-			return "配置项 " + opt.ID + " 不支持该值：" + target + "\n\n" + formatConfigOptionDetail(opt)
+			return "配置项 " + opt.ID + " 不支持该值：" + target + "\n\n" + formatConfigOptionDetailWithModelState(opt, session.Models)
 		}
 		return err.Error()
 	}
@@ -46,14 +46,14 @@ func (s *Service) handleConfigCommand(ctx context.Context, text string, msg feis
 	return "已设置配置项 " + opt.ID + "：" + display
 }
 
-func (s *Service) sendConfigDetailCard(ctx context.Context, msg feishu.Message, opt acp.SessionConfigOption) string {
-	sent, err := s.sendConfigDetailCardOutbound(ctx, msg, configDetailCard(opt))
+func (s *Service) sendConfigDetailCard(ctx context.Context, msg feishu.Message, session Session, opt acp.SessionConfigOption) string {
+	sent, err := s.sendConfigDetailCardOutbound(ctx, msg, configDetailCardWithModelState(opt, session.Models))
 	if err != nil {
 		slog.ErrorContext(ctx, "发送配置项详情卡片失败", "错误", err)
 		return "发送配置项详情卡片失败：" + err.Error()
 	}
 	if !sent {
-		return formatConfigOptionDetail(opt)
+		return formatConfigOptionDetailWithModelState(opt, session.Models)
 	}
 	return ""
 }
@@ -163,12 +163,22 @@ func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message
 }
 
 func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []feishu.ModelOption {
+	modelLoads := modelLoadPercentByID(session.Models)
 	options := make([]feishu.ModelOption, 0, len(modelOpt.Options))
 	for _, option := range modelOpt.Options {
-		if strings.TrimSpace(option.Value) == "" {
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
 			continue
 		}
-		options = append(options, feishu.ModelOption{Value: option.Value, Name: option.Name})
+		load := modelLoadPercentPtr(option.Meta)
+		if load == nil {
+			load = modelLoads[value]
+		}
+		options = append(options, feishu.ModelOption{
+			Value:       option.Value,
+			Name:        option.Name,
+			LoadPercent: load,
+		})
 	}
 	if len(options) > 0 || session.Models == nil {
 		return options
@@ -178,9 +188,38 @@ func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []
 		if strings.TrimSpace(model.ModelID) == "" {
 			continue
 		}
-		options = append(options, feishu.ModelOption{Value: model.ModelID, Name: model.Name})
+		options = append(options, feishu.ModelOption{
+			Value:       model.ModelID,
+			Name:        model.Name,
+			LoadPercent: modelLoadPercentPtr(model.Meta),
+		})
 	}
 	return options
+}
+
+func modelLoadPercentByID(state *acp.SessionModelState) map[string]*int {
+	if state == nil || len(state.AvailableModels) == 0 {
+		return nil
+	}
+	loads := make(map[string]*int)
+	for _, model := range state.AvailableModels {
+		modelID := strings.TrimSpace(model.ModelID)
+		if modelID == "" {
+			continue
+		}
+		if load := modelLoadPercentPtr(model.Meta); load != nil {
+			loads[modelID] = load
+		}
+	}
+	return loads
+}
+
+func modelLoadPercentPtr(meta map[string]any) *int {
+	percent, ok := acp.TraeModelLoadPercent(meta)
+	if !ok {
+		return nil
+	}
+	return &percent
 }
 
 func (s *Service) handleModeCommand(ctx context.Context, text string, msg feishu.Message) string {

@@ -192,10 +192,22 @@ func completedModelSelectionCard(model string) map[string]any {
 func modelOptionDisplayName(option ModelOption) string {
 	name := strings.TrimSpace(option.Name)
 	value := strings.TrimSpace(option.Value)
-	if name == "" || name == value {
-		return value
+	load := modelLoadDisplay(option.LoadPercent)
+	label := name
+	if label == "" {
+		label = value
 	}
-	return name + "（" + value + "）"
+	if load != "" {
+		label += " - " + load
+	}
+	return label
+}
+
+func modelLoadDisplay(percent *int) string {
+	if percent == nil {
+		return ""
+	}
+	return fmt.Sprintf("负载 %d%%", *percent)
 }
 
 func modelCardInline(text string) string {
