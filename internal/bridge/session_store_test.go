@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -661,8 +662,39 @@ func TestSessionStoreUpdateChatAppliesUpdateToLatestState(t *testing.T) {
 	}
 
 	persisted, ok := store.GetChat(key)
-	if !ok || persisted != updated {
+	if !ok || !reflect.DeepEqual(persisted, updated) {
 		t.Fatalf("GetChat() = %+v, %v; want persisted update %+v", persisted, ok, updated)
+	}
+}
+
+func TestSessionStoreGetChatClonesAgentConfigs(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.UpsertChat(ChatConfig{
+		Key: key,
+		AgentConfigs: map[string]ChatAgentConfig{
+			"traex": {Mode: "plan", Model: "gpt-5.6"},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+
+	chat, ok := store.GetChat(key)
+	if !ok {
+		t.Fatal("GetChat() ok = false, want true")
+	}
+	chat.AgentConfigs["traex"] = ChatAgentConfig{Mode: "default", Model: "gpt-5.5"}
+	chat.AgentConfigs["hermes"] = ChatAgentConfig{Mode: "plan", Model: "claude"}
+
+	persisted, ok := store.GetChat(key)
+	if !ok {
+		t.Fatal("GetChat(second) ok = false, want true")
+	}
+	if got := persisted.AgentConfigs["traex"]; got.Mode != "plan" || got.Model != "gpt-5.6" {
+		t.Fatalf("persisted traex config = %+v, want original", got)
+	}
+	if _, ok := persisted.AgentConfigs["hermes"]; ok {
+		t.Fatalf("persisted configs = %+v, want no hermes mutation", persisted.AgentConfigs)
 	}
 }
 

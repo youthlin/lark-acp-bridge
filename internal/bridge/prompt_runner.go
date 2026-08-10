@@ -366,7 +366,7 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 	if cwd == "" {
 		return Session{}, fmt.Errorf("当前会话缺少工作目录，无法重建 ACP session")
 	}
-	inheritConfig := inheritedSessionConfigForNewSession(session, true, session.AgentName)
+	inheritConfig := inheritedSessionConfigFromPreviousSession(session, true, session.AgentName)
 	previousACPSessionID := session.ACPSessionID
 	slog.WarnContext(ctx, "持久化 ACP session 不可恢复，准备重建", "session", session.ACPSessionID, "cwd", cwd)
 	candidate, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, filepath.Clean(cwd), sessionWorkspace(session, msg))

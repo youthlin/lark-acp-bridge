@@ -53,8 +53,7 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	if errText != "" {
 		return Session{}, config.AgentConfig{}, "", errText
 	}
-	previous, hasPrevious := s.findSession(msg)
-	inheritConfig := inheritedSessionConfigForNewSession(previous, hasPrevious, plan.AgentName)
+	inheritConfig := s.inheritedSessionConfigForNewSession(msg, plan.AgentName)
 	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
@@ -163,7 +162,35 @@ type inheritedSessionConfig struct {
 	Model string
 }
 
-func inheritedSessionConfigForNewSession(previous Session, ok bool, agentName string) inheritedSessionConfig {
+func (s *Service) inheritedSessionConfigForNewSession(msg feishu.Message, agentName string) inheritedSessionConfig {
+	chat := s.chatConfigForMessage(msg)
+	if cfg, ok := chatAgentSessionConfig(chat, agentName); ok {
+		return inheritedSessionConfig{
+			Mode:  cfg.Mode,
+			Model: cfg.Model,
+		}
+	}
+	previous, ok := s.findSession(msg)
+	return inheritedSessionConfigFromPreviousSession(previous, ok, agentName)
+}
+
+func chatAgentSessionConfig(chat ChatConfig, agentName string) (ChatAgentConfig, bool) {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" || len(chat.AgentConfigs) == 0 {
+		return ChatAgentConfig{}, false
+	}
+	cfg := chat.AgentConfigs[agentName]
+	config := inheritedSessionConfig{
+		Mode:  strings.TrimSpace(cfg.Mode),
+		Model: strings.TrimSpace(cfg.Model),
+	}
+	if config.empty() {
+		return ChatAgentConfig{}, false
+	}
+	return ChatAgentConfig{Mode: config.Mode, Model: config.Model}, true
+}
+
+func inheritedSessionConfigFromPreviousSession(previous Session, ok bool, agentName string) inheritedSessionConfig {
 	if !ok || strings.TrimSpace(previous.AgentName) != strings.TrimSpace(agentName) {
 		return inheritedSessionConfig{}
 	}

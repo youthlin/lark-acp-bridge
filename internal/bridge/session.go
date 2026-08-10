@@ -80,22 +80,28 @@ func (k ChatKey) Valid() bool {
 }
 
 type ChatConfig struct {
-	Key              ChatKey   `json:"key"`
-	AgentName        string    `json:"agent_name,omitempty"`
-	AtMode           string    `json:"at_mode,omitempty"`
-	MentionOptional  bool      `json:"mention_optional,omitempty"`
-	WikiDisabled     bool      `json:"wiki_disabled,omitempty"`
-	WikiIntervalSec  int       `json:"wiki_interval_sec,omitempty"`
-	HideStepMessages bool      `json:"hide_step_messages,omitempty"`
-	HidePlans        bool      `json:"hide_plans,omitempty"`
-	ShowThoughts     bool      `json:"show_thoughts,omitempty"`
-	HideThoughts     bool      `json:"hide_thoughts,omitempty"`
-	HideTools        bool      `json:"hide_tools,omitempty"`
-	HideStatusBar    bool      `json:"hide_status_bar,omitempty"`
-	HideUsageDetail  bool      `json:"hide_usage_detail,omitempty"`
-	NextSessionSeq   int       `json:"next_session_seq,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Key              ChatKey                    `json:"key"`
+	AgentName        string                     `json:"agent_name,omitempty"`
+	AgentConfigs     map[string]ChatAgentConfig `json:"agent_configs,omitempty"`
+	AtMode           string                     `json:"at_mode,omitempty"`
+	MentionOptional  bool                       `json:"mention_optional,omitempty"`
+	WikiDisabled     bool                       `json:"wiki_disabled,omitempty"`
+	WikiIntervalSec  int                        `json:"wiki_interval_sec,omitempty"`
+	HideStepMessages bool                       `json:"hide_step_messages,omitempty"`
+	HidePlans        bool                       `json:"hide_plans,omitempty"`
+	ShowThoughts     bool                       `json:"show_thoughts,omitempty"`
+	HideThoughts     bool                       `json:"hide_thoughts,omitempty"`
+	HideTools        bool                       `json:"hide_tools,omitempty"`
+	HideStatusBar    bool                       `json:"hide_status_bar,omitempty"`
+	HideUsageDetail  bool                       `json:"hide_usage_detail,omitempty"`
+	NextSessionSeq   int                        `json:"next_session_seq,omitempty"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	UpdatedAt        time.Time                  `json:"updated_at"`
+}
+
+type ChatAgentConfig struct {
+	Mode  string `json:"mode,omitempty"`
+	Model string `json:"model,omitempty"`
 }
 
 type MessageSessionBinding struct {

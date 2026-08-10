@@ -102,7 +102,57 @@ func (s *Service) setSessionConfigOption(ctx context.Context, msg feishu.Message
 	s.updateSessionState(ctx, msg, session, func(current *Session) {
 		current.ConfigOptions = append([]acp.SessionConfigOption(nil), options...)
 	})
+	updatedConfigValue := configOptionValueString(value)
+	if updated, ok := findConfigOption(updatedSession, opt.ID); ok {
+		updatedConfigValue = configOptionValueString(updated.CurrentValue)
+	}
+	if isModelConfigOption(opt) && updatedConfigValue != "" {
+		s.updateChatAgentSessionConfig(ctx, msg, session.AgentName, func(current *ChatAgentConfig) {
+			current.Model = updatedConfigValue
+		})
+	}
+	if isModeConfigOption(opt) && updatedConfigValue != "" {
+		s.updateChatAgentSessionConfig(ctx, msg, session.AgentName, func(current *ChatAgentConfig) {
+			current.Mode = updatedConfigValue
+		})
+	}
 	return value, display, nil
+}
+
+func (s *Service) updateChatAgentSessionConfig(ctx context.Context, msg feishu.Message, agentName string, update func(*ChatAgentConfig)) {
+	store := s.storeForMessage(msg)
+	if store == nil || update == nil {
+		return
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return
+	}
+	chat := s.chatConfigForMessage(msg)
+	if _, err := store.UpdateChat(chat, func(current *ChatConfig) {
+		if current.AgentConfigs == nil {
+			current.AgentConfigs = make(map[string]ChatAgentConfig)
+		}
+		cfg := current.AgentConfigs[agentName]
+		update(&cfg)
+		if cfg.empty() {
+			delete(current.AgentConfigs, agentName)
+		} else {
+			current.AgentConfigs[agentName] = cfg
+		}
+	}); err != nil {
+		slog.WarnContext(ctx, "保存聊天 agent 会话默认配置失败", "chat", msg.ChatID, "agent", agentName, "错误", err)
+	}
+}
+
+func isModelConfigOption(opt acp.SessionConfigOption) bool {
+	return strings.EqualFold(strings.TrimSpace(opt.ID), "model") ||
+		strings.EqualFold(strings.TrimSpace(opt.Category), "model")
+}
+
+func isModeConfigOption(opt acp.SessionConfigOption) bool {
+	return strings.EqualFold(strings.TrimSpace(opt.ID), "mode") ||
+		strings.EqualFold(strings.TrimSpace(opt.Category), "mode")
 }
 
 func (s *Service) handleModelCommand(ctx context.Context, text string, msg feishu.Message) string {
@@ -350,6 +400,9 @@ func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, sessio
 			}
 			current.Mode.CurrentModeID = value
 		})
+		s.updateChatAgentSessionConfig(ctx, msg, session.AgentName, func(current *ChatAgentConfig) {
+			current.Mode = value
+		})
 		return value, legacyModeDisplayName(session.Mode, value), nil
 	}
 	value, ok := resolveModeValue(modeOpt, target)
@@ -377,6 +430,9 @@ func (s *Service) setSessionMode(ctx context.Context, msg feishu.Message, sessio
 			}
 			current.Mode.CurrentModeID = currentModeID
 		}
+	})
+	s.updateChatAgentSessionConfig(ctx, msg, session.AgentName, func(current *ChatAgentConfig) {
+		current.Mode = value
 	})
 	return value, configOptionDisplayName(modeOpt, value), nil
 }
@@ -440,6 +496,9 @@ func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, sessi
 			}
 			current.Models.CurrentModelID = currentModelID
 		}
+	})
+	s.updateChatAgentSessionConfig(ctx, msg, session.AgentName, func(current *ChatAgentConfig) {
+		current.Model = value
 	})
 	return value, modelOptionName(modelOpt, value), nil
 }

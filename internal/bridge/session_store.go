@@ -460,7 +460,7 @@ func (s *SessionStore) GetChat(key ChatKey) (ChatConfig, bool) {
 	defer s.mu.Unlock()
 	key = normalizeChatKey(key)
 	chat, ok := s.chats[key]
-	return chat, ok
+	return cloneChatConfig(chat), ok
 }
 
 func (s *SessionStore) UpsertChat(chat ChatConfig) error {
@@ -501,15 +501,15 @@ func (s *SessionStore) UpdateChat(chat ChatConfig, update func(*ChatConfig)) (Ch
 		return ChatConfig{}, fmt.Errorf("chat key 不能为空")
 	}
 	if latest, ok := s.chats[chat.Key]; ok {
-		chat = latest
+		chat = cloneChatConfig(latest)
 	}
 	if update == nil {
-		return chat, nil
+		return cloneChatConfig(chat), nil
 	}
 	update(&chat)
 	snapshot := s.snapshotLocked()
 	chat = s.upsertChatLocked(chat, time.Now())
-	return chat, s.writeOrRestoreLocked(snapshot)
+	return cloneChatConfig(chat), s.writeOrRestoreLocked(snapshot)
 }
 
 func (s *SessionStore) upsertChatLocked(chat ChatConfig, now time.Time) ChatConfig {
@@ -521,7 +521,8 @@ func (s *SessionStore) upsertChatLocked(chat ChatConfig, now time.Time) ChatConf
 		}
 	}
 	chat.UpdatedAt = now
-	s.chats[chat.Key] = chat
+	chat = normalizeChatForStore(chat)
+	s.chats[chat.Key] = cloneChatConfig(chat)
 	return chat
 }
 
@@ -621,7 +622,7 @@ func (s *SessionStore) snapshotLocked() sessionStoreSnapshot {
 		snapshot.history[i] = cloneSession(session)
 	}
 	for key, chat := range s.chats {
-		snapshot.chats[key] = chat
+		snapshot.chats[key] = cloneChatConfig(chat)
 	}
 	for key, binding := range s.messages {
 		snapshot.messages[key] = binding
@@ -658,7 +659,7 @@ func (s *SessionStore) writeLocked() error {
 		file.History = append(file.History, persistedSession(session))
 	}
 	for _, chat := range s.chats {
-		file.Chats = append(file.Chats, chat)
+		file.Chats = append(file.Chats, persistedChatConfig(chat))
 	}
 	for _, binding := range s.messages {
 		file.Messages = append(file.Messages, binding)
@@ -890,7 +891,47 @@ func cloneConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOp
 func normalizeChatForStore(chat ChatConfig) ChatConfig {
 	chat.Key = normalizeChatKey(chat.Key)
 	chat.AgentName = strings.TrimSpace(chat.AgentName)
+	chat.AgentConfigs = normalizeChatAgentConfigs(chat.AgentConfigs)
 	return chat
+}
+
+func normalizeChatAgentConfigs(configs map[string]ChatAgentConfig) map[string]ChatAgentConfig {
+	if len(configs) == 0 {
+		return nil
+	}
+	normalized := make(map[string]ChatAgentConfig, len(configs))
+	for agentName, cfg := range configs {
+		agentName = strings.TrimSpace(agentName)
+		cfg.Mode = strings.TrimSpace(cfg.Mode)
+		cfg.Model = strings.TrimSpace(cfg.Model)
+		if agentName == "" || cfg.empty() {
+			continue
+		}
+		normalized[agentName] = cfg
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func (c ChatAgentConfig) empty() bool {
+	return c.Mode == "" && c.Model == ""
+}
+
+func cloneChatConfig(chat ChatConfig) ChatConfig {
+	if chat.AgentConfigs != nil {
+		configs := make(map[string]ChatAgentConfig, len(chat.AgentConfigs))
+		for agentName, cfg := range chat.AgentConfigs {
+			configs[agentName] = cfg
+		}
+		chat.AgentConfigs = configs
+	}
+	return chat
+}
+
+func persistedChatConfig(chat ChatConfig) ChatConfig {
+	return normalizeChatForStore(chat)
 }
 
 type messageBindingKey struct {

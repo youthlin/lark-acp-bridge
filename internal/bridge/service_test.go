@@ -2174,6 +2174,11 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 	if !ok || modelValueString(modelOpt.CurrentValue) != "gpt-5.6" {
 		t.Fatalf("updated config options = %+v, want gpt-5.6", updated.ConfigOptions)
 	}
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
+	if !ok || !hasAgentConfig || agentConfig.Model != "gpt-5.6" {
+		t.Fatalf("chat config = %+v, %v; want default model gpt-5.6", chat, ok)
+	}
 }
 
 func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
@@ -2310,6 +2315,11 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 	modeOpt, ok := findModeConfigOption(updated)
 	if !ok || configOptionValueString(modeOpt.CurrentValue) != "plan" {
 		t.Fatalf("updated config options = %+v, want plan", updated.ConfigOptions)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
+	if !ok || !hasAgentConfig || agentConfig.Mode != "plan" {
+		t.Fatalf("chat config = %+v, %v; want default mode plan", chat, ok)
 	}
 }
 
@@ -2802,6 +2812,11 @@ func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
 	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "model" || rt.configCalls[0].Value != "gpt-5.6" {
 		t.Fatalf("configCalls = %+v, want model set_config_option", rt.configCalls)
 	}
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
+	if !ok || !hasAgentConfig || agentConfig.Model != "gpt-5.6" {
+		t.Fatalf("chat config = %+v, %v; want default model gpt-5.6", chat, ok)
+	}
 
 	modeAction := action
 	modeAction.Action = overviewActionSetMode
@@ -2815,6 +2830,11 @@ func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
 	}
 	if len(rt.configCalls) != 2 || rt.configCalls[1].ConfigID != "mode" || rt.configCalls[1].Value != "plan" {
 		t.Fatalf("configCalls = %+v, want mode set_config_option", rt.configCalls)
+	}
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	agentConfig, hasAgentConfig = chat.AgentConfigs[session.AgentName]
+	if !ok || !hasAgentConfig || agentConfig.Mode != "plan" || agentConfig.Model != "gpt-5.6" {
+		t.Fatalf("chat config = %+v, %v; want default mode plan and model gpt-5.6", chat, ok)
 	}
 }
 
@@ -5981,6 +6001,175 @@ func TestHandleFeishuNewSessionDoesNotInheritModeAndModelForDifferentAgent(t *te
 	}
 	if currentModeDisplay(session) != "default" || currentModelDisplay(session) != "gpt-5.5" {
 		t.Fatalf("session config = %+v, want new agent defaults", session.ConfigOptions)
+	}
+}
+
+func TestHandleFeishuNewTopicInheritsChatDefaultModeAndModel(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	cfg.AgentList = append(cfg.AgentList, config.NamedAgentConfig{
+		Name: "hermes",
+		AgentConfig: config.AgentConfig{
+			Command:    "hermes",
+			DefaultCwd: workDir,
+		},
+	})
+	rt := &fakeRuntime{
+		promptReply: "ACP 回复",
+		newSessionInfo: acp.SessionInfo{
+			ConfigOptions: []acp.SessionConfigOption{
+				{
+					ID:           "mode",
+					Name:         "Mode",
+					Category:     "mode",
+					Type:         "select",
+					CurrentValue: "default",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "default", Name: "Default"},
+						{Value: "plan", Name: "Plan"},
+					},
+				},
+				{
+					ID:           "model",
+					Name:         "Model",
+					Category:     "model",
+					Type:         "select",
+					CurrentValue: "gpt-5.5",
+					Options: []acp.SessionConfigOptionValue{
+						{Value: "gpt-5.5", Name: "GPT-5.5"},
+						{Value: "gpt-5.6", Name: "GPT-5.6"},
+					},
+				},
+			},
+		},
+	}
+	rt.newSessionIDs = []string{"acp-session-topic-1", "acp-session-topic-2", "acp-session-topic-3"}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	first := feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_topic_1",
+		ChatID:           "oc_group",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic_1",
+		Text:             "@智能助手 话题一",
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
+		SenderID:         testOwnerOpenID,
+	}
+	if _, err := handleFeishuMessage(t, svc, context.Background(), first); err != nil {
+		t.Fatalf("HandleFeishuMessage(first topic) error = %v", err)
+	}
+	firstSession, ok := store.Get(imSessionKey(first.BotID, first.ChatID, first.ThreadID))
+	if !ok {
+		t.Fatalf("first topic session not found")
+	}
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            first.BotID,
+		MessageID:        "om_topic_1_mode",
+		ChatID:           first.ChatID,
+		ChatType:         first.ChatType,
+		GroupMessageType: first.GroupMessageType,
+		ThreadID:         first.ThreadID,
+		Text:             "@智能助手 /config mode plan",
+		Mentions:         first.Mentions,
+		SenderID:         first.SenderID,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config mode plan) error = %v", err)
+	}
+	if reply != "已设置配置项 mode：Plan（plan）" {
+		t.Fatalf("reply = %q, want mode config confirmation", reply)
+	}
+	firstSession, ok = store.Get(imSessionKey(first.BotID, first.ChatID, first.ThreadID))
+	if !ok {
+		t.Fatalf("first topic session not found after setting mode")
+	}
+	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            first.BotID,
+		MessageID:        "om_topic_1_model",
+		ChatID:           first.ChatID,
+		ChatType:         first.ChatType,
+		GroupMessageType: first.GroupMessageType,
+		ThreadID:         first.ThreadID,
+		Text:             "@智能助手 /config model gpt-5.6",
+		Mentions:         first.Mentions,
+		SenderID:         first.SenderID,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/config model gpt-5.6) error = %v", err)
+	}
+	if reply != "已设置配置项 model：GPT-5.6（gpt-5.6）" {
+		t.Fatalf("reply = %q, want model config confirmation", reply)
+	}
+	chat, ok := store.GetChat(ChatKey{BotID: first.BotID, ChatID: first.ChatID})
+	if !ok {
+		t.Fatalf("chat config not found after /config model/mode")
+	}
+	if agentConfig := chat.AgentConfigs[firstSession.AgentName]; agentConfig.Mode != "plan" || agentConfig.Model != "gpt-5.6" {
+		t.Fatalf("chat agent config = %+v, want /config persisted mode/model", agentConfig)
+	}
+
+	second := first
+	second.MessageID = "om_topic_2"
+	second.ThreadID = "omt_topic_2"
+	second.Text = "@智能助手 话题二"
+	reply, err = handleFeishuMessage(t, svc, context.Background(), second)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second topic) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.configCalls) != 4 {
+		t.Fatalf("configCalls = %+v, want first topic manual set and second topic inherited set", rt.configCalls)
+	}
+	if rt.configCalls[2].Session.ACPSessionID != "acp-session-topic-2" || rt.configCalls[2].ConfigID != "mode" || rt.configCalls[2].Value != "plan" {
+		t.Fatalf("third config call = %+v, want second topic mode inheritance", rt.configCalls[2])
+	}
+	if rt.configCalls[3].Session.ACPSessionID != "acp-session-topic-2" || rt.configCalls[3].ConfigID != "model" || rt.configCalls[3].Value != "gpt-5.6" {
+		t.Fatalf("fourth config call = %+v, want second topic model inheritance", rt.configCalls[3])
+	}
+	session, ok := store.Get(imSessionKey(second.BotID, second.ChatID, second.ThreadID))
+	if !ok {
+		t.Fatalf("second topic session not found")
+	}
+	if currentModeDisplay(session) != "plan" || currentModelDisplay(session) != "gpt-5.6" {
+		t.Fatalf("second topic session config = %+v, want chat defaults", session.ConfigOptions)
+	}
+
+	if err := store.UpsertChat(ChatConfig{
+		Key:       ChatKey{BotID: first.BotID, ChatID: first.ChatID},
+		AgentName: "hermes",
+		AgentConfigs: map[string]ChatAgentConfig{
+			"traex": {Mode: "plan", Model: "gpt-5.6"},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertChat(hermes) error = %v", err)
+	}
+	third := first
+	third.MessageID = "om_topic_3"
+	third.ThreadID = "omt_topic_3"
+	third.Text = "@智能助手 话题三"
+	if _, err := handleFeishuMessage(t, svc, context.Background(), third); err != nil {
+		t.Fatalf("HandleFeishuMessage(third topic) error = %v", err)
+	}
+	if len(rt.configCalls) != 4 {
+		t.Fatalf("configCalls = %+v, want no traex defaults applied to hermes", rt.configCalls)
+	}
+	session, ok = store.Get(imSessionKey(third.BotID, third.ChatID, third.ThreadID))
+	if !ok {
+		t.Fatalf("third topic session not found")
+	}
+	if session.AgentName != "hermes" {
+		t.Fatalf("third topic agent = %q, want hermes", session.AgentName)
+	}
+	if currentModeDisplay(session) != "default" || currentModelDisplay(session) != "gpt-5.5" {
+		t.Fatalf("third topic session config = %+v, want hermes defaults without traex inheritance", session.ConfigOptions)
 	}
 }
 
