@@ -70,7 +70,7 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		Status:        "in_progress",
 	}})
 	result := acp.PromptResult{
-		Text:       "changed: yes\nfiles:\n- knowledge/index.md\nsummary: 修复索引\nreason: 保持一致性",
+		Text:       "changed: yes\n\nfiles:\n- knowledge/index.md\n\nsummary: 修复索引\n\nreason: 保持一致性",
 		StopReason: "end_turn",
 	}
 	observer.complete(context.Background(), result, nil)
@@ -78,7 +78,7 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	if target.ChatID != "oc_trace" || target.MessageID != "" || target.ThreadID != "" {
 		t.Fatalf("stream target = %+v, want new root card in trace chat", target)
 	}
-	if initialMeta.Title != wikiTraceCardRunning || !initialMeta.HideHeaderIcon || !strings.Contains(initialMeta.Metadata, "**来源会话：**来源会话标题") || !strings.Contains(initialMeta.Metadata, "**来源聊天：**oc_source") || !strings.Contains(initialMeta.Metadata, "**来源话题：**omt_source") {
+	if initialMeta.Title != wikiTraceCardRunning || !initialMeta.HideHeaderIcon || !strings.Contains(initialMeta.Metadata, "**来源会话：** 来源会话标题") || !strings.Contains(initialMeta.Metadata, "**来源聊天：** oc_source") || !strings.Contains(initialMeta.Metadata, "**来源话题：** omt_source") {
 		t.Fatalf("initial meta = %+v, want source metadata", initialMeta)
 	}
 	process := strings.Join(card.processUpdatesSnapshot(), "\n")

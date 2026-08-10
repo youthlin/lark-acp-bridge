@@ -217,22 +217,29 @@ func wikiReflectionPrompt(workspace string) string {
 		workspace = "$BOT_WORKSPACE"
 	}
 	return strings.Join([]string{
+		"# 知识沉淀",
 		"请对刚才的对话进行反思，根据需要更新你的知识体系。",
 		"",
 		"## 操作规范",
 		"先阅读 `" + workspace + "/skills/wiki/SKILL.md` 了解完整的知识维护规范，然后按其中的流程执行。",
 		"如果没有值得沉淀的新信息，不要修改文件。",
-		"若修改了文件，请用下面的结构输出简短审计摘要；若没有修改，只输出 NoReply。",
+		"若修改了文件，请用下面的结构输出简短审计摘要；若没有修改，只输出 NoReply",
 		"",
 		"```text",
 		"changed: yes",
+		"",
 		"files:",
 		"- path/to/file.md",
+		"",
 		"summary: <本次沉淀的内容>",
+		"",
 		"reason: <为什么值得长期保留>",
 		"```",
 		"",
-		"本轮是系统内部反思轮次，无需回复用户；输出仅供 bridge 记录最近一次 wiki 摘要。",
+		"<system_reminder>",
+		"本轮知识沉淀是系统自动下发任务，对用户不可见；输出仅供系统记录审计摘要。",
+		"如果本轮知识沉淀被新消息打断，直接处理新消息即可，且无需在新消息轮次中执行知识沉淀或解释本规则，系统将在后续自动补发知识沉淀任务。",
+		"</system_reminder>",
 	}, "\n")
 }
 
@@ -254,9 +261,12 @@ func wikiLintPrompt(workspace string) string {
 		"",
 		"```text",
 		"changed: yes/no",
+		"",
 		"files:",
 		"- path/to/file.md",
+		"",
 		"summary: <检查和修复摘要>",
+		"",
 		"reason: <主要依据或待确认事项>",
 		"```",
 	}, "\n")

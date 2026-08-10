@@ -164,13 +164,13 @@ func wikiTraceMetadata(session Session) string {
 	key := normalizeSessionKey(session.Key)
 	lines := make([]string, 0, 3)
 	if title := strings.TrimSpace(session.Title); title != "" {
-		lines = append(lines, "**来源会话：**"+truncateRunes(title, 80))
+		lines = append(lines, "**来源会话：** "+truncateRunes(title, 80))
 	}
 	if mainID := strings.TrimSpace(sessionKeyMainID(key)); mainID != "" {
-		lines = append(lines, "**来源聊天：**"+mainID)
+		lines = append(lines, "**来源聊天：** "+mainID)
 	}
 	if subID := strings.TrimSpace(key.SubID); subID != "" {
-		lines = append(lines, "**来源话题：**"+subID)
+		lines = append(lines, "**来源话题：** "+subID)
 	}
 	return strings.Join(lines, "\n")
 }

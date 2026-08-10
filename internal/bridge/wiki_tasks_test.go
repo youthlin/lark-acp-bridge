@@ -1102,7 +1102,7 @@ func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
 		{
 			name: "markWikiFinished nil error 视为成功",
 			run: func(svc *Service) {
-				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, acp.PromptResult{Text: "changed: yes\nsummary: ok"}, nil)
+				svc.markWikiFinished(key, Session{ACPSessionID: "acp-a"}, acp.PromptResult{Text: "changed: yes\n\nsummary: ok"}, nil)
 			},
 			wantRunning:   false,
 			wantSuccess:   true,
