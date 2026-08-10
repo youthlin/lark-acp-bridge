@@ -14,7 +14,11 @@ import (
 
 var (
 	errSessionTaskBusy      = errors.New("session task busy")
-	replacedTaskDoneTimeout = 2 * time.Minute
+	// 抢占旧任务时，发送 session/cancel 后等待旧 session/prompt response 返回的兜底超时。
+	// 超时后强制关闭旧 ACP runtime 并重建连接，避免在可能仍忙的旧连接上抢发新 prompt。
+	// 取 10s：用户主动发新消息就是要立即中断，agent 若未在该窗口内自行结束 cancel，
+	// 直接强杀重建比长时间干等更符合体感。
+	replacedTaskDoneTimeout = 10 * time.Second
 )
 
 var closedRunningTaskDone = makeClosedTaskDone()
@@ -274,12 +278,21 @@ func (s *Service) waitForReplacedTaskCompleted(ctx context.Context, previous *ru
 	defer timer.Stop()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	waitStart := time.Now()
 	for {
 		select {
 		case <-completed:
 			if opts.replacementWait != nil {
 				opts.replacementWait.ReplacementWaitFinished(ctx)
 			}
+			sessionID := ""
+			var kind taskKind
+			if previous != nil {
+				sessionID = previous.session.ACPSessionID
+				kind = previous.kind
+			}
+			slog.InfoContext(ctx, "旧任务已结束，继续执行抢占的新任务",
+				"session", sessionID, "kind", kind, "waited", time.Since(waitStart))
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -537,8 +550,14 @@ func (s *Service) cancelRuntimeTask(ctx context.Context, task *runningTask) {
 	if task == nil || strings.TrimSpace(task.session.ACPSessionID) == "" {
 		return
 	}
+	start := time.Now()
+	slog.InfoContext(ctx, "抢占旧任务：发送 session/cancel",
+		"session", task.session.ACPSessionID, "kind", task.kind)
 	if err := s.runtime.CancelSession(ctx, task.runtime, task.session, task.agent); err != nil {
 		slog.WarnContext(ctx, "取消 ACP session 失败", "session", task.session.ACPSessionID, "kind", task.kind, "错误", err)
+	} else {
+		slog.InfoContext(ctx, "session/cancel 已发送", "session", task.session.ACPSessionID,
+			"kind", task.kind, "elapsed", time.Since(start))
 	}
 }
 
