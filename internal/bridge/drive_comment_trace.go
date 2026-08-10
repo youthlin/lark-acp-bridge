@@ -101,13 +101,13 @@ func (s *driveCommentTraceSink) ensureStream(ctx context.Context, result Trigger
 	if s.starter == nil || strings.TrimSpace(s.message.ChatID) == "" {
 		return nil
 	}
-	ctx = feishu.WithStreamCardMeta(ctx, s.streamCardMeta())
 	session := result.Session
 	if strings.TrimSpace(session.Cwd) == "" {
 		session.Cwd = s.cwd
 	}
 	message := s.traceMessage(result.Session.Key)
 	stream := newPromptCardStream(ctx, message, session, s.show, streamCardStarterFunc(s.starter))
+	stream.setInitialMeta(s.streamCardMeta())
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
 		return nil

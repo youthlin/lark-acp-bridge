@@ -28,9 +28,9 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	var target feishu.Message
 	var initialMeta feishu.StreamCardMeta
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		target = msg
-		initialMeta = feishu.StreamCardMetaFromContext(ctx)
+		initialMeta = options.Meta
 		return card, nil
 	}
 	session := Session{
@@ -141,7 +141,7 @@ func TestWikiTraceUsesTraceChatShowConfig(t *testing.T) {
 			}
 			svc := NewService(cfg, store)
 			card := &fakeStreamCard{}
-			svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+			svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 				return card, nil
 			}
 			observer := svc.wikiTraceObserver(Session{
@@ -176,7 +176,7 @@ func TestWikiTraceNoReplyShowsNoChangesSummary(t *testing.T) {
 	}}}
 	svc := NewService(cfg, NewSessionStore(""))
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
 	}
 	observer := svc.wikiTraceObserver(Session{

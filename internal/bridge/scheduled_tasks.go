@@ -95,7 +95,7 @@ type scheduledTaskActiveRun struct {
 
 type scheduledTaskIMSender func(context.Context, feishu.Message, string, feishu.OutboundRenderContext) error
 type scheduledTaskMessageSender func(context.Context, feishu.Message, string) (feishu.SentMessage, error)
-type scheduledTaskStreamStarter func(context.Context, feishu.Message) (feishu.StreamCard, error)
+type scheduledTaskStreamStarter func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error)
 
 type scheduledTaskIMSink struct {
 	message       feishu.Message

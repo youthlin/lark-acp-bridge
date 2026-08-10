@@ -341,9 +341,9 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
 	outbound := &fakeSentMessageClient{}
 	outbound.driveCommentReplySender = replies.ReplyDriveComment
-	outbound.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	outbound.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
-		streamMetas = append(streamMetas, feishu.StreamCardMetaFromContext(ctx))
+		streamMetas = append(streamMetas, options.Meta)
 		return streamCard, nil
 	}
 	svc.setOutbound("bot-a", outbound)
@@ -424,7 +424,7 @@ func TestDriveCommentTraceUsesFinalTextAfterBoundary(t *testing.T) {
 	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
 	outbound := &fakeSentMessageClient{}
 	outbound.driveCommentReplySender = replies.ReplyDriveComment
-	outbound.streamStarter = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+	outbound.streamStarter = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return streamCard, nil
 	}
 	svc.setOutbound("bot-a", outbound)
@@ -508,7 +508,7 @@ func TestDriveCommentTraceUsesTraceChatShowConfig(t *testing.T) {
 			streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
 			outbound := &fakeSentMessageClient{}
 			outbound.driveCommentReplySender = replies.ReplyDriveComment
-			outbound.streamStarter = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+			outbound.streamStarter = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 				return streamCard, nil
 			}
 			svc.setOutbound("bot-a", outbound)
@@ -550,7 +550,7 @@ func TestDriveCommentTraceSuppressesExplicitEmptyFinalText(t *testing.T) {
 		message: feishu.Message{BotID: "bot-a", ChatID: "oc_trace"},
 		cwd:     t.TempDir(),
 		comment: comment,
-		starter: func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+		starter: func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 			return card, nil
 		},
 	}
@@ -633,7 +633,7 @@ func TestDriveCommentTraceReusesFirstCardTopicForSameComment(t *testing.T) {
 	newOutbound := func() *fakeSentMessageClient {
 		outbound := &fakeSentMessageClient{}
 		outbound.driveCommentReplySender = replies.ReplyDriveComment
-		outbound.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		outbound.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 			streamTargets = append(streamTargets, msg)
 			messageID := "om_trace_root"
 			threadID := ""

@@ -102,6 +102,7 @@ go run ./cmd/lark-acp-bridge update
 
 - 本仓库代码注释、文档、日志、commit message 均使用中文。
 - 日志使用 `log/slog`，通过 `internal/logging` 的 context handler 输出结构化 JSON；需要上下文时用 `slog.*Context`。
+- `context.Context` 只用于取消、超时、trace/logging 等请求生命周期信息；不要用 `context.WithValue` 隐式传递业务数据、回调函数或展示配置。需要跨层传递时优先定义显式参数、options 结构体或小接口。
 - 错误信息面向用户/运维，保持中文、具体、可操作；不要打印 secret。
 - 改动保持小而聚焦，遵循既有包边界和命名；不要为了局部便利跨层耦合。
 - 优先补充或更新相邻的 `_test.go`；bug 修复尽量加回归测试。不要提交 `config.json`、`*.appsecret`、`*.key`、`.local/` 等本地运行产物。

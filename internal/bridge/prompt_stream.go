@@ -16,6 +16,7 @@ type promptCardStream struct {
 	msg     feishu.Message
 	session Session
 	starter streamCardStarter
+	options feishu.StreamCardOptions
 
 	mu                sync.Mutex
 	card              feishu.StreamCard
@@ -51,11 +52,13 @@ func newPromptCardStream(ctx context.Context, msg feishu.Message, session Sessio
 }
 
 func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message, session Session, show ChatConfig, statusPrefix string, starter streamCardStarter) *promptCardStream {
+	options := feishu.DefaultStreamCardOptions()
 	return &promptCardStream{
 		ctx:              ctx,
 		msg:              msg,
 		session:          session,
 		starter:          starter,
+		options:          options,
 		available:        true,
 		showStepMessages: !show.HideStepMessages,
 		showPlans:        !show.HidePlans,
@@ -66,6 +69,13 @@ func newPromptCardStreamWithStatusPrefix(ctx context.Context, msg feishu.Message
 		processUpdates:   promptProcessUpdateThrottler{interval: promptProcessFlushInterval},
 		status:           promptStatusBar{state: promptStatusRunning, prefix: strings.TrimSpace(statusPrefix), startedAt: time.Now()},
 	}
+}
+
+func (s *promptCardStream) setInitialMeta(meta feishu.StreamCardMeta) {
+	if s == nil {
+		return
+	}
+	s.options.Meta = meta
 }
 
 func (s *promptCardStream) delayCardCreation() {
@@ -901,9 +911,10 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 	s.ready = ready
 	s.mu.Unlock()
 
-	cardCtx := feishu.WithStreamCardProcessPanel(ctx, s.showStepMessages || s.showThoughts || s.showTools)
-	cardCtx = feishu.WithStreamCardStatusBar(cardCtx, s.showStatusBar)
-	cardCtx = feishu.WithStreamCardProcessTitle(cardCtx, promptStreamProcessTitle(s.session))
+	options := s.options
+	options.ProcessPanelEnabled = s.showStepMessages || s.showThoughts || s.showTools
+	options.StatusBarEnabled = s.showStatusBar
+	options.ProcessTitle = promptStreamProcessTitle(s.session)
 	starter := s.starter
 	if starter == nil {
 		s.mu.Lock()
@@ -916,7 +927,7 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 		s.mu.Unlock()
 		return nil
 	}
-	card, err := starter.StartStreamCard(cardCtx, s.msg)
+	card, err := starter.StartStreamCard(ctx, s.msg, options)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.creating = false

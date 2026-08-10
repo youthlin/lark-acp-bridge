@@ -831,7 +831,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 		return append([]*fakeStreamCard(nil), cards...)
 	}
 	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{failOnCanceledContext: true}
 		cardsMu.Lock()
 		cards = append(cards, card)

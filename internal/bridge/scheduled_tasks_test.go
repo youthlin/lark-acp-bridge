@@ -295,7 +295,7 @@ func TestScheduledTaskIMSinkSuppressesExplicitEmptyFinalText(t *testing.T) {
 	sink := &scheduledTaskIMSink{
 		message: feishu.Message{BotID: "bot-a", ChatID: "oc_schedule"},
 		cwd:     t.TempDir(),
-		starter: func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+		starter: func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 			return card, nil
 		},
 		messageSender: func(_ context.Context, _ feishu.Message, text string) (feishu.SentMessage, error) {
@@ -1148,9 +1148,9 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	var streamTargets []feishu.Message
 	var streamMetas []feishu.StreamCardMeta
 	var streamCard *fakeStreamCard
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
-		streamMetas = append(streamMetas, feishu.StreamCardMetaFromContext(ctx))
+		streamMetas = append(streamMetas, options.Meta)
 		streamCard = &fakeStreamCard{message: feishu.SentMessage{
 			MessageID: "om_schedule_result",
 			ChatID:    msg.ChatID,

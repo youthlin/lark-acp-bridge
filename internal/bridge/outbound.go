@@ -22,16 +22,16 @@ type loopStatusCardSender interface {
 }
 
 type streamCardStarter interface {
-	StartStreamCard(context.Context, feishu.Message) (feishu.StreamCard, error)
+	StartStreamCard(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error)
 }
 
-type streamCardStarterFunc func(context.Context, feishu.Message) (feishu.StreamCard, error)
+type streamCardStarterFunc func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error)
 
-func (f streamCardStarterFunc) StartStreamCard(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+func (f streamCardStarterFunc) StartStreamCard(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 	if f == nil {
 		return nil, nil
 	}
-	return f(ctx, msg)
+	return f(ctx, msg, options)
 }
 
 type permissionRequester interface {

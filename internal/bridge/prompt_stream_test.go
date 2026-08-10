@@ -17,7 +17,7 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 	var mu sync.Mutex
 	var cards []*fakeStreamCard
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		started <- struct{}{}
 		<-release
 		card := &fakeStreamCard{}
@@ -78,8 +78,8 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 func TestPromptCardStreamSetsProcessTitleFromSessionAgentAndModel(t *testing.T) {
 	var gotTitle string
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		gotTitle = feishu.StreamCardProcessTitleFromContext(ctx)
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		gotTitle = options.ProcessTitle
 		return &fakeStreamCard{}, nil
 	})
 	stream := newPromptCardStream(ctx, feishu.Message{
@@ -104,7 +104,7 @@ func TestPromptCardStreamSetsProcessTitleFromSessionAgentAndModel(t *testing.T) 
 func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -138,7 +138,7 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -167,7 +167,7 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 func TestPromptCardStreamRefreshesStatusWhenProcessUpdates(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -253,7 +253,7 @@ func TestPromptChunkAccumulatorDebouncesShortTextChunks(t *testing.T) {
 	var cardsMu sync.Mutex
 	var cards []*fakeStreamCard
 	ctx := context.Background()
-	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cardsMu.Lock()
 		cards = append(cards, card)

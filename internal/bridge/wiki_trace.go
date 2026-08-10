@@ -141,8 +141,8 @@ func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream 
 	if o.starter == nil || strings.TrimSpace(o.message.ChatID) == "" {
 		return nil
 	}
-	ctx = feishu.WithStreamCardMeta(ctx, o.streamCardMeta(wikiTraceCardRunning))
 	stream := newPromptCardStream(ctx, o.message, o.session, o.show, streamCardStarterFunc(o.starter))
+	stream.setInitialMeta(o.streamCardMeta(wikiTraceCardRunning))
 	if stream.ensureCardWithContext(ctx) == nil {
 		return nil
 	}

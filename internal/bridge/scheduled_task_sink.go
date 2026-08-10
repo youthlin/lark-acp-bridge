@@ -143,12 +143,12 @@ func (s *scheduledTaskIMSink) ensureStream(ctx context.Context, result TriggerRe
 	if s.starter == nil || strings.TrimSpace(s.message.ChatID) == "" {
 		return nil
 	}
-	ctx = feishu.WithStreamCardMeta(ctx, s.streamCardMeta(result))
 	session := result.Session
 	if strings.TrimSpace(session.Cwd) == "" {
 		session.Cwd = s.cwd
 	}
 	stream := newPromptCardStream(ctx, s.message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
+	stream.setInitialMeta(s.streamCardMeta(result))
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
 		return nil

@@ -29,6 +29,20 @@ type StreamCardMeta struct {
 	HideHeaderIcon bool
 }
 
+type StreamCardOptions struct {
+	ProcessPanelEnabled bool
+	StatusBarEnabled    bool
+	ProcessTitle        string
+	Meta                StreamCardMeta
+}
+
+func DefaultStreamCardOptions() StreamCardOptions {
+	return StreamCardOptions{
+		ProcessPanelEnabled: true,
+		StatusBarEnabled:    true,
+	}
+}
+
 // LoopStatusCard 表示 /loop 启动后用于展示整体状态的卡片。
 type LoopStatusCard interface {
 	Message() SentMessage
@@ -63,14 +77,6 @@ type StreamCard interface {
 	UpdateMeta(context.Context, StreamCardMeta) error
 	Close(context.Context) error
 }
-
-type streamCardProcessPanelKey struct{}
-
-type streamCardStatusBarKey struct{}
-
-type streamCardProcessTitleKey struct{}
-
-type streamCardMetaKey struct{}
 
 type ModelOption struct {
 	Value       string
@@ -210,46 +216,4 @@ type OverviewActionResult struct {
 	Model     *ModelSelectionCard
 	Mode      *ModeSelectionCard
 	Session   *SessionSelectionCard
-}
-
-func WithStreamCardProcessPanel(ctx context.Context, enabled bool) context.Context {
-	return context.WithValue(ctx, streamCardProcessPanelKey{}, enabled)
-}
-
-func StreamCardProcessPanelEnabled(ctx context.Context) bool {
-	enabled, ok := ctx.Value(streamCardProcessPanelKey{}).(bool)
-	if !ok {
-		return true
-	}
-	return enabled
-}
-
-func WithStreamCardStatusBar(ctx context.Context, enabled bool) context.Context {
-	return context.WithValue(ctx, streamCardStatusBarKey{}, enabled)
-}
-
-func StreamCardStatusBarEnabled(ctx context.Context) bool {
-	enabled, ok := ctx.Value(streamCardStatusBarKey{}).(bool)
-	if !ok {
-		return true
-	}
-	return enabled
-}
-
-func WithStreamCardProcessTitle(ctx context.Context, title string) context.Context {
-	return context.WithValue(ctx, streamCardProcessTitleKey{}, title)
-}
-
-func StreamCardProcessTitleFromContext(ctx context.Context) string {
-	title, _ := ctx.Value(streamCardProcessTitleKey{}).(string)
-	return title
-}
-
-func WithStreamCardMeta(ctx context.Context, meta StreamCardMeta) context.Context {
-	return context.WithValue(ctx, streamCardMetaKey{}, meta)
-}
-
-func StreamCardMetaFromContext(ctx context.Context) StreamCardMeta {
-	meta, _ := ctx.Value(streamCardMetaKey{}).(StreamCardMeta)
-	return meta
 }

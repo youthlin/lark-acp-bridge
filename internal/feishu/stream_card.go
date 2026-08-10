@@ -276,14 +276,14 @@ type sdkStreamCard struct {
 	meta             StreamCardMeta
 }
 
-func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard, error) {
+func (a *Adapter) StartStreamCard(ctx context.Context, msg Message, options StreamCardOptions) (StreamCard, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("飞书客户端未初始化")
 	}
-	processPanelEnabled := StreamCardProcessPanelEnabled(ctx)
-	statusBarEnabled := StreamCardStatusBarEnabled(ctx)
-	processTitle := normalizedStreamCardProcessTitle(StreamCardProcessTitleFromContext(ctx))
-	meta := normalizeStreamCardMeta(StreamCardMetaFromContext(ctx))
+	processPanelEnabled := options.ProcessPanelEnabled
+	statusBarEnabled := options.StatusBarEnabled
+	processTitle := normalizedStreamCardProcessTitle(options.ProcessTitle)
+	meta := normalizeStreamCardMeta(options.Meta)
 	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromBlocksWithProcessTitle([]outboundBlock{{Kind: outboundBlockMarkdown}}, "", streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta, processTitle), "流式")
 	if err != nil {
 		return nil, err

@@ -90,7 +90,7 @@ type fakeSentMessageClient struct {
 	mu                      sync.Mutex
 	nextID                  string
 	replySender             func(context.Context, feishu.Message, string) error
-	streamStarter           func(context.Context, feishu.Message) (feishu.StreamCard, error)
+	streamStarter           func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error)
 	reactionStarter         func(context.Context, feishu.Message) func()
 	modelSelectionSender    func(context.Context, feishu.Message, feishu.ModelSelectionCard) error
 	modeSelectionSender     func(context.Context, feishu.Message, feishu.ModeSelectionCard) error
@@ -171,11 +171,11 @@ func (f *fakeSentMessageClient) SendLoopStatusCard(ctx context.Context, msg feis
 	return &fakeLoopStatusCard{client: f, message: sent}, nil
 }
 
-func (f *fakeSentMessageClient) StartStreamCard(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+func (f *fakeSentMessageClient) StartStreamCard(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 	if f == nil || f.streamStarter == nil {
 		return nil, nil
 	}
-	return f.streamStarter(ctx, msg)
+	return f.streamStarter(ctx, msg, options)
 }
 
 func (f *fakeSentMessageClient) StartProcessingReaction(ctx context.Context, msg feishu.Message) func() {
@@ -1569,7 +1569,7 @@ func TestHandleFeishuMessageAutoCompactRunsSilently(t *testing.T) {
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -3023,8 +3023,8 @@ func TestHandleFeishuMessageShowCommandSurvivesNewSession(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		enabled := feishu.StreamCardStatusBarEnabled(ctx)
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		enabled := options.StatusBarEnabled
 		statusBarEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
@@ -4382,7 +4382,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -4863,7 +4863,7 @@ func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCar
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -4937,7 +4937,7 @@ func TestHandleFeishuGroupChatAtAutoSuppressesExplicitEmptyFinalText(t *testing.
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6418,7 +6418,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6476,7 +6476,7 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6550,7 +6550,7 @@ func TestHandleFeishuMessageFinalStreamCardUsesMarkdownImageRenderContext(t *tes
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6610,7 +6610,7 @@ func TestHandleFeishuMessageFinalStreamCardRendersMarkdownImageAfterTool(t *test
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6702,7 +6702,7 @@ func TestHandleFeishuMessageKeepsOnlyAgentTextAfterLastToolAsFinal(t *testing.T)
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6782,7 +6782,7 @@ func TestHandleFeishuMessageKeepsTextBeforeSingleFinalBoundaryAsFallback(t *test
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6844,7 +6844,7 @@ func TestHandleFeishuMessageDoesNotFallbackToRawResultAfterFinalBoundary(t *test
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -6919,7 +6919,7 @@ func TestHandleFeishuMessageKeepsTextBetweenFinalBoundariesAsFallback(t *testing
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7017,7 +7017,7 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7188,8 +7188,8 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		enabled := feishu.StreamCardStatusBarEnabled(ctx)
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		enabled := options.StatusBarEnabled
 		statusBarEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
@@ -7257,7 +7257,7 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7311,7 +7311,7 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7377,7 +7377,7 @@ func TestHandleFeishuMessageMarksCancelledStopReasonInStreamCardStatus(t *testin
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7458,7 +7458,7 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7527,7 +7527,7 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7600,7 +7600,7 @@ func TestHandleFeishuMessageUsesFinalTextAfterPlanBoundary(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7690,7 +7690,7 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7774,7 +7774,7 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7845,7 +7845,7 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -7980,7 +7980,7 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 			var cards []*fakeStreamCard
 			ctx := context.Background()
 			client := newFakeSentMessageClient("")
-			client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+			client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 				card := &fakeStreamCard{}
 				cards = append(cards, card)
 				return card, nil
@@ -8059,8 +8059,8 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
-		enabled := feishu.StreamCardProcessPanelEnabled(ctx)
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		enabled := options.ProcessPanelEnabled
 		processPanelEnabled = &enabled
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
@@ -8118,7 +8118,7 @@ func TestHandleFeishuMessageRefreshesRunningStreamCardStatus(t *testing.T) {
 	svc.setRuntime(rt)
 	var cards []*fakeStreamCard
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -8230,7 +8230,7 @@ func TestPromptRuntimeWaitsForInFlightDebouncedCardFlush(t *testing.T) {
 	var cards []*fakeStreamCard
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		close(started)
 		<-release
 		card := &fakeStreamCard{}
@@ -9758,7 +9758,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	ctx := context.Background()
 	var cards []*fakeStreamCard
 	client := newFakeSentMessageClient("")
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -10377,7 +10377,7 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 		intermediate = append(intermediate, text)
 		return nil
 	}
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamMsgs = append(streamMsgs, msg)
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
@@ -10469,7 +10469,7 @@ func TestLoopCommandStopsWhenFinalCardTextIsDoneAfterProcessMessages(t *testing.
 	client := newFakeSentMessageClient("om_loop_start")
 	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
 	var cards []*fakeStreamCard
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cards = append(cards, card)
 		return card, nil
@@ -10539,7 +10539,7 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 		return append([]feishu.Message(nil), streamMsgs...)
 	}
 	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamMsgsMu.Lock()
 		streamMsgs = append(streamMsgs, msg)
 		streamMsgsMu.Unlock()

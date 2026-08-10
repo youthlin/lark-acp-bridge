@@ -72,7 +72,7 @@ func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
 	}
 	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
@@ -119,7 +119,7 @@ func TestPendingWikiTraceKeepsIndependentRuntimeKey(t *testing.T) {
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
 	}
 	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
@@ -190,7 +190,7 @@ func TestWikiLintRunsPromptRecordsSummaryAndKeepsTimer(t *testing.T) {
 		defer cardsMu.Unlock()
 		return append([]*fakeStreamCard(nil), cards...)
 	}
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cardsMu.Lock()
 		cards = append(cards, card)
@@ -316,7 +316,7 @@ func TestWikiLintReturnsImmediatelyWhenPromptIsStillRunning(t *testing.T) {
 		defer cardsMu.Unlock()
 		return append([]*fakeStreamCard(nil), cards...)
 	}
-	client.streamStarter = func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
 		cardsMu.Lock()
 		cards = append(cards, card)
