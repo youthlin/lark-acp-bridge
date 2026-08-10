@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,11 @@ const imageDownloadTimeout = 30 * time.Second
 
 // maxConcurrentImageDownloads 限制单条消息的图片并发下载数。
 const maxConcurrentImageDownloads = 4
+
+const (
+	messageImageCacheRetention = 7 * 24 * time.Hour
+	messageImageCacheMaxBytes  = 200 * 1024 * 1024
+)
 
 type larkMessageClient struct {
 	client *lark.Client
@@ -212,6 +218,9 @@ func (c larkMessageClient) DownloadImage(ctx context.Context, messageID string, 
 	if err := resp.WriteFile(path); err != nil {
 		return "", fmt.Errorf("写入飞书图片缓存: %w", err)
 	}
+	if err := cleanupMessageImageCache(ctx, workspace, time.Now(), messageImageCacheRetention, messageImageCacheMaxBytes); err != nil {
+		slog.WarnContext(ctx, "清理飞书图片缓存失败", "workspace", workspace, "错误", err)
+	}
 	return path, nil
 }
 
@@ -289,6 +298,85 @@ func setMessagePrimaryImage(msg *Message) {
 
 func messageImageCachePath(workspace string, imageKey string) string {
 	return filepath.Join(workspace, ".local", "cache", safeImageCacheName(imageKey)+".png")
+}
+
+func CleanupImageCache(ctx context.Context, workspace string) error {
+	return cleanupMessageImageCache(ctx, workspace, time.Now(), messageImageCacheRetention, messageImageCacheMaxBytes)
+}
+
+func cleanupMessageImageCache(ctx context.Context, workspace string, now time.Time, retention time.Duration, maxBytes int64) error {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil
+	}
+	cacheDir := filepath.Join(workspace, ".local", "cache")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取飞书图片缓存目录: %w", err)
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	type cacheFile struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]cacheFile, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("读取飞书图片缓存文件信息: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		item := cacheFile{
+			path:    filepath.Join(cacheDir, entry.Name()),
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		}
+		if retention > 0 && item.modTime.Before(now.Add(-retention)) {
+			if err := os.Remove(item.path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("删除过期飞书图片缓存: %w", err)
+			}
+			slog.DebugContext(ctx, "已删除过期飞书图片缓存", "path", item.path, "size", item.size)
+			continue
+		}
+		files = append(files, item)
+		total += item.size
+	}
+	if maxBytes <= 0 || total <= maxBytes {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].modTime.Equal(files[j].modTime) {
+			return files[i].modTime.Before(files[j].modTime)
+		}
+		return files[i].path < files[j].path
+	})
+	for _, item := range files {
+		if total <= maxBytes {
+			break
+		}
+		if err := os.Remove(item.path); err != nil {
+			if os.IsNotExist(err) {
+				total -= item.size
+				continue
+			}
+			return fmt.Errorf("删除超量飞书图片缓存: %w", err)
+		}
+		total -= item.size
+		slog.DebugContext(ctx, "已删除超量飞书图片缓存", "path", item.path, "size", item.size, "remaining_bytes", total)
+	}
+	return nil
 }
 
 func safeImageCacheName(imageKey string) string {

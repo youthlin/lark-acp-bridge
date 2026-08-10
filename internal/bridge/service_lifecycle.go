@@ -27,6 +27,9 @@ func (s *Service) Start(ctx context.Context) error {
 		if _, err := prepareWorkspaceLocalState(workspace); err != nil {
 			return fmt.Errorf("准备 bot %q 的 workspace 本地状态: %w", bot.ID, err)
 		}
+		if err := feishu.CleanupImageCache(ctx, workspace); err != nil {
+			slog.WarnContext(ctx, "清理 bot workspace 图片缓存失败", "bot", displayBotID(bot.ID), "workspace", workspace, "错误", err)
+		}
 	}
 
 	// 从文件加载历史会话

@@ -14,7 +14,7 @@ import (
 func TestTokenUsageStoreAppendPersistsAndReportsByAgentAndModel(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "token_usage.json")
 	store := NewTokenUsageStore(storePath)
-	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)
+	now := testTokenUsageNow()
 
 	if _, err := store.Append(TokenUsageRecord{
 		Timestamp: now.Add(-time.Hour),
@@ -89,7 +89,7 @@ func TestTokenUsageStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
 	workspace := t.TempDir()
 	legacyPath := filepath.Join(workspace, "token_usage.json")
 	localPath := filepath.Join(workspace, ".local", "token_usage.json")
-	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)
+	now := testTokenUsageNow()
 	legacy := NewTokenUsageStore(legacyPath)
 	if _, err := legacy.Append(TokenUsageRecord{
 		Timestamp: now,
@@ -130,7 +130,7 @@ func TestTokenUsageStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
 
 func TestTokenUsageStoreAppendLoadsExistingFileBeforeWriting(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "token_usage.json")
-	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)
+	now := testTokenUsageNow()
 	first := NewTokenUsageStore(storePath)
 	if _, err := first.Append(TokenUsageRecord{
 		Timestamp: now.Add(-time.Hour),
@@ -169,6 +169,27 @@ func TestTokenUsageStoreAppendLoadsExistingFileBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestPruneTokenUsageRecordsDropsExpiredAndKeepsNewestCap(t *testing.T) {
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.Local)
+	records := []TokenUsageRecord{
+		{Timestamp: now.Add(-10 * time.Hour), AgentName: "traex", Usage: acp.TokenUsage{InputTokens: 1}},
+		{Timestamp: now.Add(-4 * time.Hour), AgentName: "traex", Usage: acp.TokenUsage{InputTokens: 2}},
+		{Timestamp: now.Add(-3 * time.Hour), AgentName: "traex", Usage: acp.TokenUsage{InputTokens: 3}},
+		{Timestamp: now.Add(-2 * time.Hour), AgentName: "traex", Usage: acp.TokenUsage{InputTokens: 4}},
+		{Timestamp: now.Add(-1 * time.Hour), AgentName: "traex", Usage: acp.TokenUsage{InputTokens: 5}},
+	}
+
+	got := pruneTokenUsageRecords(records, now, 5*time.Hour, 3)
+	if len(got) != 3 {
+		t.Fatalf("len(pruned) = %d, want 3", len(got))
+	}
+	for i, wantInput := range []int64{3, 4, 5} {
+		if got[i].Usage.InputTokens != wantInput {
+			t.Fatalf("pruned[%d] = %+v, want input %d", i, got[i], wantInput)
+		}
+	}
+}
+
 func TestFormatTokenUsageReport(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 20, 30, 0, time.Local)
 	start, end := tokenUsagePeriodRange(tokenUsagePeriodDay, now)
@@ -199,4 +220,9 @@ func TestFormatTokenUsageReport(t *testing.T) {
 			t.Fatalf("report = %q, want %q", text, want)
 		}
 	}
+}
+
+func testTokenUsageNow() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
 }

@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -244,5 +245,43 @@ func TestExpandMergedForwardMessagePropagatesChildImages(t *testing.T) {
 	}
 	if len(client.downloaded) != 1 || client.downloaded[0] != "img_forwarded" {
 		t.Fatalf("downloaded = %+v, want forwarded child image downloaded", client.downloaded)
+	}
+}
+
+func TestCleanupMessageImageCacheRemovesExpiredAndOldestOverLimit(t *testing.T) {
+	workspace := t.TempDir()
+	cacheDir := filepath.Join(workspace, ".local", "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cache) error = %v", err)
+	}
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.Local)
+	files := map[string]struct {
+		size    int
+		modTime time.Time
+	}{
+		"expired.png": {size: 3, modTime: now.Add(-48 * time.Hour)},
+		"old.png":     {size: 4, modTime: now.Add(-4 * time.Hour)},
+		"new.png":     {size: 4, modTime: now.Add(-2 * time.Hour)},
+	}
+	for name, file := range files {
+		path := filepath.Join(cacheDir, name)
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", file.size)), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+		if err := os.Chtimes(path, file.modTime, file.modTime); err != nil {
+			t.Fatalf("Chtimes(%s) error = %v", name, err)
+		}
+	}
+
+	if err := cleanupMessageImageCache(context.Background(), workspace, now, 24*time.Hour, 5); err != nil {
+		t.Fatalf("cleanupMessageImageCache() error = %v", err)
+	}
+	for _, name := range []string{"expired.png", "old.png"} {
+		if _, err := os.Stat(filepath.Join(cacheDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s stat err = %v, want removed", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "new.png")); err != nil {
+		t.Fatalf("new.png stat err = %v, want kept", err)
 	}
 }

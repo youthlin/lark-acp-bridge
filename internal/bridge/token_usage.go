@@ -26,6 +26,11 @@ const (
 	tokenUsagePeriodYear  tokenUsagePeriod = "year"
 )
 
+const (
+	tokenUsageRetention  = 400 * 24 * time.Hour
+	tokenUsageMaxRecords = 100000
+)
+
 type TokenUsageRecord struct {
 	Timestamp    time.Time      `json:"timestamp"`
 	BotID        string         `json:"bot_id,omitempty"`
@@ -108,6 +113,7 @@ func (s *TokenUsageStore) Append(record TokenUsageRecord) (TokenUsageRecord, err
 
 	snapshot := s.snapshotLocked()
 	s.records = append(s.records, record)
+	s.records = pruneTokenUsageRecords(s.records, time.Now(), tokenUsageRetention, tokenUsageMaxRecords)
 	sortTokenUsageRecords(s.records)
 	if err := s.writeOrRestoreLocked(snapshot); err != nil {
 		return TokenUsageRecord{}, err
@@ -183,9 +189,16 @@ func (s *TokenUsageStore) loadLocked() error {
 			records = append(records, record)
 		}
 	}
+	originalLen := len(records)
+	records = pruneTokenUsageRecords(records, time.Now(), tokenUsageRetention, tokenUsageMaxRecords)
 	sortTokenUsageRecords(records)
 	s.records = records
 	s.loaded = true
+	if originalLen != len(records) {
+		if err := s.writeLocked(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -342,6 +355,34 @@ func sortTokenUsageRecords(records []TokenUsageRecord) {
 	sort.SliceStable(records, func(i, j int) bool {
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
+}
+
+func pruneTokenUsageRecords(records []TokenUsageRecord, now time.Time, retention time.Duration, maxRecords int) []TokenUsageRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pruned := records[:0]
+	if retention > 0 {
+		cutoff := now.Add(-retention)
+		for _, record := range records {
+			if record.Timestamp.IsZero() || record.Timestamp.Before(cutoff) {
+				continue
+			}
+			pruned = append(pruned, record)
+		}
+	} else {
+		pruned = records
+	}
+	sortTokenUsageRecords(pruned)
+	if maxRecords > 0 && len(pruned) > maxRecords {
+		pruned = pruned[len(pruned)-maxRecords:]
+	}
+	out := make([]TokenUsageRecord, len(pruned))
+	copy(out, pruned)
+	return out
 }
 
 func tokenUsagePeriodRange(period tokenUsagePeriod, now time.Time) (time.Time, time.Time) {
