@@ -147,7 +147,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 
 自动知识沉淀默认开启。每次 bot 完整回复普通消息后，bridge 会为当前 ACP session 启动一个分钟级定时器；默认 5 分钟后向同一个 ACP session 发送内部 wiki 反思 prompt，要求 agent 读取 `skills/wiki/SKILL.md` 并按规范更新 L0/L1/L2 文件。该反思轮次是 internal/silent，不把 agent 输出转发给来源聊天；prompt 中仍要求如果必须输出文本只输出 `NoReply` 作为兜底。等待期间如果同一会话有新普通消息进入，会取消旧定时器并在新消息完成后重新计时；如果用户发送 `/new` 重开会话，bridge 会取出尚未触发的上一轮 wiki 反思并用独立 wiki runtime key 在后台执行，不阻塞新会话创建和后续消息处理。这个后台 wiki 轮次属于上一轮会话收尾，不会被新会话里的后续普通消息取消；它仍纳入 service/runtime 生命周期，可随 `/wiki off`、会话关闭或服务退出取消并关闭对应 ACP client。
 
-自动知识沉淀过程卡片默认关闭。bot owner 可以在目标群执行 `/wiki trace on`，把当前群设置为过程卡片目的地；也可以使用 `/wiki trace new` 新建专用话题群。该能力面向个人 bot 使用场景，过程卡片完整展示自动反思的 agent 正文、思考、计划、工具状态和最终审计摘要；它只是旁路观察，不改变自动反思的 silent 语义、runtime 隔离、取消规则或 workspace 写锁。使用 `/wiki trace off` 可关闭展示。
+自动知识沉淀过程卡片默认关闭。bot owner 可以在目标群执行 `/wiki trace on`，把当前群设置为过程卡片目的地；也可以使用 `/wiki trace new` 新建专用话题群。该能力面向个人 bot 使用场景，过程卡片按目的群的 `/show` 配置展示自动反思的 agent 正文、思考、计划、工具状态和最终审计摘要；它只是旁路观察，不改变自动反思的 silent 语义、runtime 隔离、取消规则或 workspace 写锁。使用 `/wiki trace off` 可关闭展示。
 
 bridge 不在本地实现多轮 onboarding 状态机，也不做旧记忆文件名迁移；本地开发阶段只使用 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md` 这些大写文件名作为 L0 记忆入口。
 
@@ -314,7 +314,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session resume <index>`：把 `/session list` 中第 `index` 项恢复为当前会话；普通群和私聊恢复到当前 chat，话题群恢复到当前话题。
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki lint`、`/wiki upgrade`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀；可主动检查 workspace 知识库一致性，也可把当前内置 wiki 维护规则同步到已有 workspace。`/wiki lint` 会异步执行，并像普通 prompt 一样用流式卡片展示处理过程和结果。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
-- `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会完整展示后台反思执行过程。
+- `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会按目的群 `/show` 配置展示后台反思执行过程。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。

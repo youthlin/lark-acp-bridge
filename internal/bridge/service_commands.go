@@ -61,7 +61,7 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		name: "/drive_comment",
 		helpLines: []string{
 			"/drive_comment on|off|status - 管理当前 bot 的云文档评论监听处理（owner only）",
-			"/drive_comment trace on|off|new - 设置评论处理过程卡片目的地，trace new 会新建话题群",
+			"/drive_comment trace on|off|new - 设置评论处理过程卡片目的地，按目的群 /show 配置展示，trace new 会新建话题群",
 		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleDriveCommentCommand(ctx, text, msg)

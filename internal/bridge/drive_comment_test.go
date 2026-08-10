@@ -452,6 +452,90 @@ func TestDriveCommentTraceUsesFinalTextAfterBoundary(t *testing.T) {
 	}
 }
 
+func TestDriveCommentTraceUsesTraceChatShowConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		chat        ChatConfig
+		wantThought bool
+	}{
+		{
+			name: "default hides thoughts",
+			chat: ChatConfig{Key: ChatKey{BotID: "bot-a", ChatID: "oc_trace"}},
+		},
+		{
+			name: "explicit hide thoughts",
+			chat: ChatConfig{
+				Key:          ChatKey{BotID: "bot-a", ChatID: "oc_trace"},
+				ShowThoughts: false,
+				HideThoughts: true,
+			},
+		},
+		{
+			name: "explicit show thoughts",
+			chat: ChatConfig{
+				Key:          ChatKey{BotID: "bot-a", ChatID: "oc_trace"},
+				ShowThoughts: true,
+			},
+			wantThought: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			cwd := t.TempDir()
+			store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+			if err := store.UpsertChat(tt.chat); err != nil {
+				t.Fatalf("UpsertChat(trace show config) error = %v", err)
+			}
+			bots := driveCommentEnabledBotConfig(workspace)
+			bots[0].DriveComment.TraceEnabled = true
+			bots[0].DriveComment.TraceChatID = "oc_trace"
+			svc := NewService(config.Config{
+				AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+				Bots:      bots,
+			}, store)
+			rt := &fakeRuntime{
+				promptResults: []acp.PromptResult{{Text: "NoReply", StopReason: "end_turn"}},
+				promptUpdates: []acp.PromptUpdate{{
+					Update: acp.SessionUpdate{
+						SessionUpdate: "thought_chunk",
+						Content:       &acp.ContentBlock{Type: "text", Text: "分析评论上下文。"},
+					},
+				}},
+			}
+			svc.setRuntime(rt)
+			replies := &driveCommentReplyRecorder{}
+			streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
+			outbound := &fakeSentMessageClient{}
+			outbound.driveCommentReplySender = replies.ReplyDriveComment
+			outbound.streamStarter = func(context.Context, feishu.Message) (feishu.StreamCard, error) {
+				return streamCard, nil
+			}
+			svc.setOutbound("bot-a", outbound)
+
+			comment := feishu.DriveComment{
+				BotID:       "bot-a",
+				Workspace:   workspace,
+				FileToken:   "doc-token",
+				FileType:    "docx",
+				CommentID:   "comment-1",
+				IsMentioned: true,
+				CommentText: "please handle",
+			}
+			if err := svc.HandleDriveComment(context.Background(), comment); err != nil {
+				t.Fatalf("HandleDriveComment() error = %v", err)
+			}
+			process := strings.Join(streamCard.processUpdatesSnapshot(), "\n")
+			if tt.wantThought && !strings.Contains(process, "分析评论上下文") {
+				t.Fatalf("process updates = %q, want thought from trace chat show config", process)
+			}
+			if !tt.wantThought && strings.Contains(process, "分析评论上下文") {
+				t.Fatalf("process updates = %q, should hide thought by trace chat show config", process)
+			}
+		})
+	}
+}
+
 func TestDriveCommentTraceSuppressesExplicitEmptyFinalText(t *testing.T) {
 	comment := feishu.DriveComment{
 		BotID:       "bot-a",

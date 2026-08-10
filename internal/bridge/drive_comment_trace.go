@@ -21,6 +21,7 @@ type driveCommentTraceSink struct {
 	message feishu.Message
 	cwd     string
 	comment feishu.DriveComment
+	show    ChatConfig
 	store   *SessionStore
 	starter scheduledTaskStreamStarter
 
@@ -106,7 +107,7 @@ func (s *driveCommentTraceSink) ensureStream(ctx context.Context, result Trigger
 		session.Cwd = s.cwd
 	}
 	message := s.traceMessage(result.Session.Key)
-	stream := newPromptCardStream(ctx, message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
+	stream := newPromptCardStream(ctx, message, session, s.show, streamCardStarterFunc(s.starter))
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
 		return nil

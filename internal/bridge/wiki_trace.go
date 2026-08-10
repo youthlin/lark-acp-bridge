@@ -18,6 +18,7 @@ const (
 type wikiTraceObserver struct {
 	message feishu.Message
 	session Session
+	show    ChatConfig
 	starter scheduledTaskStreamStarter
 
 	stream *promptCardStream
@@ -38,13 +39,15 @@ func (s *Service) wikiTraceObserver(session Session) *wikiTraceObserver {
 	if !ok || !bot.WikiTrace.Enabled || strings.TrimSpace(bot.WikiTrace.ChatID) == "" {
 		return nil
 	}
+	msg := feishu.Message{
+		BotID:     session.Key.BotID,
+		ChatID:    strings.TrimSpace(bot.WikiTrace.ChatID),
+		Workspace: strings.TrimSpace(session.Workspace),
+	}
 	return &wikiTraceObserver{
-		message: feishu.Message{
-			BotID:     session.Key.BotID,
-			ChatID:    strings.TrimSpace(bot.WikiTrace.ChatID),
-			Workspace: strings.TrimSpace(session.Workspace),
-		},
+		message: msg,
 		session: session,
+		show:    s.chatConfigForMessage(msg),
 		starter: s.scheduleStreamStarter(session.Key.BotID),
 	}
 }
@@ -139,10 +142,7 @@ func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream 
 		return nil
 	}
 	ctx = feishu.WithStreamCardMeta(ctx, o.streamCardMeta(wikiTraceCardRunning))
-	// bridge 当前按个人使用场景设计，wiki trace 目的群由 owner 显式配置。
-	// 因此前提是不做私聊/来源内容脱敏，过程卡片完整展示自动反思执行过程。
-	show := ChatConfig{ShowThoughts: true}
-	stream := newPromptCardStream(ctx, o.message, o.session, show, streamCardStarterFunc(o.starter))
+	stream := newPromptCardStream(ctx, o.message, o.session, o.show, streamCardStarterFunc(o.starter))
 	if stream.ensureCardWithContext(ctx) == nil {
 		return nil
 	}

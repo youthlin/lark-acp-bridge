@@ -140,6 +140,7 @@ func (s *Service) driveCommentTraceSink(comment feishu.DriveComment, cwd string)
 		message: message,
 		cwd:     cwd,
 		comment: comment.Normalized(),
+		show:    s.chatConfigForMessage(message),
 		store:   store,
 		starter: s.scheduleStreamStarter(comment.BotID),
 	}
