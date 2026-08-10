@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
@@ -71,6 +72,32 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 1 || got[0] != "process" {
 		t.Fatalf("processUpdates = %+v, want process update on single card", got)
+	}
+}
+
+func TestPromptCardStreamSetsProcessTitleFromSessionAgentAndModel(t *testing.T) {
+	var gotTitle string
+	ctx := context.Background()
+	starter := streamCardStarterFunc(func(ctx context.Context, msg feishu.Message) (feishu.StreamCard, error) {
+		gotTitle = feishu.StreamCardProcessTitleFromContext(ctx)
+		return &fakeStreamCard{}, nil
+	})
+	stream := newPromptCardStream(ctx, feishu.Message{
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+	}, Session{
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Category: "model", CurrentValue: "gpt-5.5"},
+		},
+	}, ChatConfig{}, starter)
+
+	stream.updateText("hello")
+
+	if gotTitle != "执行过程(traex gpt-5.5)" {
+		t.Fatalf("process title = %q, want agent and model", gotTitle)
 	}
 }
 

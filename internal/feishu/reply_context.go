@@ -68,6 +68,8 @@ type streamCardProcessPanelKey struct{}
 
 type streamCardStatusBarKey struct{}
 
+type streamCardProcessTitleKey struct{}
+
 type streamCardMetaKey struct{}
 
 type ModelOption struct {
@@ -232,6 +234,15 @@ func StreamCardStatusBarEnabled(ctx context.Context) bool {
 		return true
 	}
 	return enabled
+}
+
+func WithStreamCardProcessTitle(ctx context.Context, title string) context.Context {
+	return context.WithValue(ctx, streamCardProcessTitleKey{}, title)
+}
+
+func StreamCardProcessTitleFromContext(ctx context.Context) string {
+	title, _ := ctx.Value(streamCardProcessTitleKey{}).(string)
+	return title
 }
 
 func WithStreamCardMeta(ctx context.Context, meta StreamCardMeta) context.Context {

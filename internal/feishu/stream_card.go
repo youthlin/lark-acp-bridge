@@ -30,6 +30,7 @@ const (
 	streamCardNormalUpdateMinInterval = 5 * time.Second
 	streamCardEmptyContent            = "\u200b"
 	streamCardInitialStatus           = "⏳ 0s"
+	streamCardDefaultProcessTitle     = "执行过程"
 )
 
 var streamCardNow = time.Now
@@ -51,6 +52,10 @@ func newStreamCardJSONFromState(text, process, status, usage string, includeProc
 }
 
 func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool, meta StreamCardMeta) string {
+	return newStreamCardJSONFromBlocksWithProcessTitle(blocks, process, status, usage, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode, meta, "")
+}
+
+func newStreamCardJSONFromBlocksWithProcessTitle(blocks []outboundBlock, process, status, usage string, includeProcessPanel, includeStatusBar, includeUsagePanel, streamingMode bool, meta StreamCardMeta, processTitle string) string {
 	elements := outboundBlocksStreamCardElements(blocks)
 	meta = normalizeStreamCardMeta(meta)
 	if meta.SourceURL != "" {
@@ -60,7 +65,7 @@ func newStreamCardJSONFromBlocks(blocks []outboundBlock, process, status, usage 
 		elements = append([]any{streamCardMetadata(meta.Metadata)}, elements...)
 	}
 	if includeProcessPanel {
-		elements = append(elements, streamCardProcessPanelWithContent(process))
+		elements = append(elements, streamCardProcessPanelWithTitle(process, processTitle))
 	}
 	if includeUsagePanel {
 		elements = append(elements, streamCardUsagePanel(usage))
@@ -106,7 +111,11 @@ func streamCardImageElementID(index int) string {
 }
 
 func newStreamCardProcessPanelJSON() string {
-	data, _ := json.Marshal([]any{streamCardProcessPanel()})
+	return newStreamCardProcessPanelJSONWithTitle("")
+}
+
+func newStreamCardProcessPanelJSONWithTitle(title string) string {
+	data, _ := json.Marshal([]any{streamCardProcessPanelWithTitle("", title)})
 	return string(data)
 }
 
@@ -116,17 +125,22 @@ func newStreamCardUsagePanelJSON(content string) string {
 }
 
 func streamCardProcessPanel() cardJSON {
-	return streamCardProcessPanelWithContent("")
+	return streamCardProcessPanelWithTitle("", "")
 }
 
 func streamCardProcessPanelWithContent(content string) cardJSON {
+	return streamCardProcessPanelWithTitle(content, "")
+}
+
+func streamCardProcessPanelWithTitle(content string, title string) cardJSON {
+	title = normalizedStreamCardProcessTitle(title)
 	return cardJSON{
 		"tag":              "collapsible_panel",
 		"expanded":         false,
 		"element_id":       streamCardProcessPanelID,
 		"background_color": "grey",
 		"header": cardJSON{
-			"title": cardJSON{"tag": "plain_text", "content": "执行过程"},
+			"title": cardJSON{"tag": "plain_text", "content": title},
 		},
 		"border":           cardJSON{"color": "grey", "corner_radius": "8px"},
 		"vertical_spacing": "4px",
@@ -135,6 +149,14 @@ func streamCardProcessPanelWithContent(content string) cardJSON {
 			cardJSON{"tag": "markdown", "content": content, "element_id": streamCardProcessElementID},
 		},
 	}
+}
+
+func normalizedStreamCardProcessTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return streamCardDefaultProcessTitle
+	}
+	return title
 }
 
 func streamCardStatusMarkdown(status string) cardJSON {
@@ -248,6 +270,7 @@ type sdkStreamCard struct {
 	text             string
 	finalBlocks      []outboundBlock
 	process          string
+	processTitle     string
 	status           string
 	usageDetail      string
 	meta             StreamCardMeta
@@ -259,8 +282,9 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 	}
 	processPanelEnabled := StreamCardProcessPanelEnabled(ctx)
 	statusBarEnabled := StreamCardStatusBarEnabled(ctx)
+	processTitle := normalizedStreamCardProcessTitle(StreamCardProcessTitleFromContext(ctx))
 	meta := normalizeStreamCardMeta(StreamCardMetaFromContext(ctx))
-	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromState("", "", streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta), "流式")
+	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromBlocksWithProcessTitle([]outboundBlock{{Kind: outboundBlockMarkdown}}, "", streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta, processTitle), "流式")
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +303,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message) (StreamCard,
 		created:        streamCardNow(),
 		meta:           meta,
 		processCreated: processPanelEnabled,
+		processTitle:   processTitle,
 		statusCreated:  statusBarEnabled,
 		status:         initialStatus,
 		usageTargetID:  streamCardUsageTargetID(processPanelEnabled, statusBarEnabled),
@@ -418,7 +443,7 @@ func (c *sdkStreamCard) UpdateMeta(ctx context.Context, meta StreamCardMeta) err
 
 func (c *sdkStreamCard) createProcessPanelLocked(ctx context.Context) error {
 	seq := c.nextSequenceLocked()
-	elements := newStreamCardProcessPanelJSON()
+	elements := newStreamCardProcessPanelJSONWithTitle(c.processTitle)
 	return c.adapter.createCardElementsAfter(ctx, c.cardID, streamCardTextElementID, streamCardProcessPanelID, elements, seq, "创建飞书流式卡片过程组件")
 }
 
@@ -495,7 +520,7 @@ func (c *sdkStreamCard) fullCardJSONLocked() string {
 	if len(blocks) == 0 {
 		blocks = []outboundBlock{{Kind: outboundBlockMarkdown, Text: c.text}}
 	}
-	return newStreamCardJSONFromBlocks(blocks, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false, c.meta)
+	return newStreamCardJSONFromBlocksWithProcessTitle(blocks, c.process, c.status, c.usageDetail, includeProcess, includeStatus, includeUsage, false, c.meta, c.processTitle)
 }
 
 func (c *sdkStreamCard) nextSequenceLocked() int {

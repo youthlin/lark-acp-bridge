@@ -903,6 +903,7 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 
 	cardCtx := feishu.WithStreamCardProcessPanel(ctx, s.showStepMessages || s.showThoughts || s.showTools)
 	cardCtx = feishu.WithStreamCardStatusBar(cardCtx, s.showStatusBar)
+	cardCtx = feishu.WithStreamCardProcessTitle(cardCtx, promptStreamProcessTitle(s.session))
 	starter := s.starter
 	if starter == nil {
 		s.mu.Lock()
@@ -935,4 +936,18 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 	s.card = card
 	s.started = true
 	return s.card
+}
+
+func promptStreamProcessTitle(session Session) string {
+	parts := []string{}
+	if agentName := strings.TrimSpace(session.AgentName); agentName != "" {
+		parts = append(parts, agentName)
+	}
+	if model := strings.TrimSpace(currentModelDisplay(session)); model != "" {
+		parts = append(parts, model)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "执行过程(" + strings.Join(parts, " ") + ")"
 }
