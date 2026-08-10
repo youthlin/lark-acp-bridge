@@ -85,9 +85,6 @@ func (s *promptCardStream) delayCardCreation() {
 }
 
 func (s *promptCardStream) ReplacementWaitStarted(ctx context.Context) {
-	s.mu.Lock()
-	s.delayed = false
-	s.mu.Unlock()
 	s.updateWaitingForReplacementStatus(ctx)
 }
 
@@ -108,11 +105,15 @@ func (s *promptCardStream) updateWaitingForReplacementStatus(ctx context.Context
 		return
 	}
 	s.mu.Lock()
+	delayed := s.delayed
 	originalPrefix := s.status.prefix
 	s.status.prefix = strings.TrimSpace(strings.Join([]string{originalPrefix, "等待中断"}, " "))
 	statusText := s.status.text()
 	s.status.prefix = originalPrefix
 	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return
@@ -127,8 +128,12 @@ func (s *promptCardStream) updateRunningStatus(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
+	delayed := s.delayed
 	statusText := s.status.text()
 	s.mu.Unlock()
+	if delayed {
+		return
+	}
 	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return

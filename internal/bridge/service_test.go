@@ -4804,6 +4804,99 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuGroupChatAtAutoKeepsReplacementWaitDelayedWhenSilent(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID:   "acp-session-1",
+		promptResults:  []acp.PromptResult{{Text: "SILENT"}},
+		promptUpdates:  []acp.PromptUpdate{{Update: acp.SessionUpdate{SessionUpdate: "agent_message_chunk", Content: &acp.ContentBlock{Type: "text", Text: "SILENT"}}}},
+		blockCancel:    make(chan struct{}),
+		promptReply:    "SILENT",
+		noDefaultState: true,
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_group"})
+	chatKey := ChatKey{BotID: "bot-a", ChatID: key.ChatID}
+	if err := store.UpsertChat(ChatConfig{Key: chatKey, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          workDir,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	var previousDoneOnce sync.Once
+	previousDone := make(chan struct{})
+	svc.taskMu.Lock()
+	svc.tasks[key] = &runningTask{
+		kind:                taskKindWiki,
+		runtime:             currentRuntimeKey(key),
+		cancel:              func() { previousDoneOnce.Do(func() { close(previousDone) }) },
+		done:                previousDone,
+		predecessorDetached: make(chan struct{}),
+		session:             session,
+		agent:               agent,
+	}
+	svc.taskMu.Unlock()
+
+	var cards []*fakeStreamCard
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	done := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_auto_silent_wait",
+			ChatID:    key.ChatID,
+			ChatType:  "group",
+			SenderID:  "ou_a",
+			Text:      "路过闲聊",
+		})
+		done <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want replacement wait to stay delayed before auto decision", cards)
+	}
+	close(rt.blockCancel)
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "" {
+			t.Fatalf("reply = %q, want SILENT suppressed", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HandleFeishuMessage did not finish")
+	}
+	if len(cards) != 0 {
+		t.Fatalf("cards = %+v, want no stream card for SILENT auto prompt after replacement wait", cards)
+	}
+}
+
 func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
