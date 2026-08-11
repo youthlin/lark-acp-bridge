@@ -57,9 +57,9 @@ func TestLoopHowPrompt(t *testing.T) {
 		"请根据用户目标生成一条可直接执行的 /loop 命令。",
 		"不要默认生成无限循环",
 		"只有用户明确要求持续、长期、一直、守护、直到完成且无需轮次上限时，才使用 -t 0 -n 0",
-		"每轮只推进一个最小、可独立验证的步骤",
+		"每轮只推进一个可独立验证的步骤",
 		"不要执行 git commit",
-		"最终只返回一条 /loop 命令",
+		"最终只返回一条简短的 /loop 命令",
 		"只回复 DONE",
 	} {
 		if !strings.Contains(prompt, want) {

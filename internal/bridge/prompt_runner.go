@@ -433,11 +433,6 @@ func (s *Service) runUserPromptWithStreamOptionsDetailed(ctx context.Context, ms
 	return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, reply: out.reply, replySet: out.replySet, err: err}
 }
 
-func (s *Service) promptRuntimeWithProgress(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
-	result, sentProgress, _, _, err := s.promptRuntimeWithProgressRaw(ctx, msg, session, agent, text)
-	return result, sentProgress, err
-}
-
 func (s *Service) promptRuntimeWithProgressRaw(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, acp.PromptResult, string, error) {
 	run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, msg, session, agent, text, "")
 	return run.result, run.sentProgress, run.rawResult, run.reply, run.err

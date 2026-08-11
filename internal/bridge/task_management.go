@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	errSessionTaskBusy      = errors.New("session task busy")
+	errSessionTaskBusy = errors.New("session task busy")
 	// 抢占旧任务时，发送 session/cancel 后等待旧 session/prompt response 返回的兜底超时。
 	// 超时后强制关闭旧 ACP runtime 并重建连接，避免在可能仍忙的旧连接上抢发新 prompt。
 	// 取 10s：用户主动发新消息就是要立即中断，agent 若未在该窗口内自行结束 cancel，
@@ -32,21 +32,20 @@ const (
 )
 
 type runningTask struct {
-	kind                  taskKind
-	runtime               runtimeKey
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	doneOnce              sync.Once
-	predecessorDone       <-chan struct{}
-	predecessorDetached   chan struct{}
-	predecessorDetachOnce sync.Once
-	completed             chan struct{}
-	completedOnce         sync.Once
-	session               Session
-	agent                 config.AgentConfig
-	drainPendingAtAuto    bool
-	queuePendingAtAuto    bool
-	onCancel              func(context.Context, string)
+	kind                taskKind
+	runtime             runtimeKey
+	cancel              context.CancelFunc
+	done                chan struct{}
+	doneOnce            sync.Once
+	predecessorDone     <-chan struct{}
+	predecessorDetached chan struct{}
+	completed           chan struct{}
+	completedOnce       sync.Once
+	session             Session
+	agent               config.AgentConfig
+	drainPendingAtAuto  bool
+	queuePendingAtAuto  bool
+	onCancel            func(context.Context, string)
 }
 
 type runningTaskOptions struct {
@@ -213,15 +212,6 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 			s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
 		}
 	}, nil
-}
-
-func (task *runningTask) detachPredecessor() {
-	if task == nil || task.predecessorDetached == nil {
-		return
-	}
-	task.predecessorDetachOnce.Do(func() {
-		close(task.predecessorDetached)
-	})
 }
 
 func (task *runningTask) closeDone() {

@@ -92,7 +92,7 @@ func TestHandleLoopHowCommandReturnsRecommendedCommand(t *testing.T) {
 		"持续修复 todo.md 中的优化项",
 		"## /loop 命令格式",
 		"不要默认生成无限循环",
-		"最终只返回一条 /loop 命令",
+		"最终只返回一条简短的 /loop 命令",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)

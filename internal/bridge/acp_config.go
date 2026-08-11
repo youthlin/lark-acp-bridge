@@ -130,10 +130,6 @@ func formatConfigStatus(session Session) string {
 	return strings.Join(lines, "\n")
 }
 
-func formatConfigOptionSummary(opt acp.SessionConfigOption) string {
-	return formatConfigOptionSummaryWithModelState(opt, nil)
-}
-
 func formatConfigOptionSummaryWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
 	label := strings.TrimSpace(opt.ID)
 	name := strings.TrimSpace(opt.Name)
@@ -152,10 +148,6 @@ func formatConfigOptionSummaryWithModelState(opt acp.SessionConfigOption, models
 		current += " (" + load + ")"
 	}
 	return fmt.Sprintf("%s [%s] = %s", label, optionType, current)
-}
-
-func formatConfigOptionDetail(opt acp.SessionConfigOption) string {
-	return formatConfigOptionDetailWithModelState(opt, nil)
 }
 
 func formatConfigOptionDetailWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
@@ -208,10 +200,6 @@ func formatConfigOptionDetailWithModelState(opt acp.SessionConfigOption, models 
 	}
 	lines = append(lines, "", "设置配置项：/config "+id+" <value>")
 	return strings.Join(lines, "\n")
-}
-
-func configDetailCard(opt acp.SessionConfigOption) feishu.ConfigDetailCard {
-	return configDetailCardWithModelState(opt, nil)
 }
 
 func configDetailCardWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) feishu.ConfigDetailCard {

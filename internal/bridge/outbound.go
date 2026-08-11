@@ -42,6 +42,7 @@ type permissionRequester interface {
 type triggerPermissionRequester interface {
 	RequestPermissionForOpenID(ctx context.Context, targetOpenID string, source string, req acp.PermissionRequest) (acp.PermissionOutcome, error)
 }
+
 type processingReactionStarter interface {
 	StartProcessingReaction(context.Context, feishu.Message) func()
 }

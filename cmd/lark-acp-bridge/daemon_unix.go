@@ -32,18 +32,17 @@ func waitForDeadline(deadline time.Time, interval time.Duration, cond func() boo
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			if cond() {
-				return true
-			}
-			if !time.Now().Before(deadline) {
-				return false
-			}
+	for range ticker.C {
+		if cond() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
 		}
 	}
+	return false
 }
+
 func runMode(args []string) string {
 	if len(args) == 0 {
 		return modeRestart
