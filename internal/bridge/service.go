@@ -363,6 +363,8 @@ func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingProm
 			return "", nil
 		}
 		promptText = s.promptTextWithAtAuto(incoming.msg, promptText)
+	} else {
+		promptText = s.promptTextWithAtAutoMention(incoming.msg, promptText)
 	}
 	return s.prompt(ctx, incoming.msg, promptText)
 }

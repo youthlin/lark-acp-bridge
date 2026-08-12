@@ -347,6 +347,22 @@ func (s *Service) promptTextWithAtAuto(msg feishu.Message, promptText string) st
 	}, promptText)
 }
 
+func (s *Service) promptTextWithAtAutoMention(msg feishu.Message, promptText string) string {
+	if !s.shouldHandleAtAutoMentionMessage(msg) {
+		return promptText
+	}
+	promptText = strings.TrimSpace(promptText)
+	if promptText == "" {
+		return promptText
+	}
+	return promptWithUserMessage([]string{
+		"## 群聊明确提及\n" + strings.Join([]string{
+			"当前群聊已启用 /at off auto，但本轮用户明确 at 了你。",
+			"请按普通用户消息正常回复，不要输出 SILENT。",
+		}, "\n"),
+	}, promptText)
+}
+
 func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {
 	return s.shouldHandleAtAutoMessage(msg)
 }
@@ -432,6 +448,10 @@ func (s *Service) shouldDelayAtAutoProgress(msg feishu.Message) bool {
 
 func (s *Service) shouldHandleAtAutoMessage(msg feishu.Message) bool {
 	return isAtAutoMode(s.chatAtMode(msg)) && !messageMentionsBot(msg)
+}
+
+func (s *Service) shouldHandleAtAutoMentionMessage(msg feishu.Message) bool {
+	return isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg)
 }
 
 func (s *Service) shouldStartProcessingReaction(msg feishu.Message) bool {
