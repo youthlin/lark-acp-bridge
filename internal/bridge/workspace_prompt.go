@@ -90,7 +90,7 @@ func workspaceMemoryPolicyPrompt(workspace string) string {
 	return strings.Join([]string{
 		"## Workspace Memory Policy",
 		"",
-		"当用户要求“记住”、保存长期偏好、常用路径、领域知识、项目经验或可复用流程时，必须优先更新当前 bot workspace，而不是只写入 TraeX 自己的长期记忆。",
+		"当用户要求“记住”、保存长期偏好、常用路径、领域知识、项目经验或可复用流程时，必须优先更新当前 bot workspace，而不是只写入 agent 自己的长期记忆。",
 		"",
 		"写入位置按信息类型选择：",
 		"- L0 根目录：用户偏好、身份、人格、工具和工作规则写入 SOUL.md、MEMORY.md、AGENTS.md 或 TOOLS.md。",

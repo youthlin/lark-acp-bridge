@@ -154,10 +154,10 @@ func TestWikiReflectionPromptRequestsAuditSummary(t *testing.T) {
 	prompt := wikiReflectionPrompt("/workspace")
 	for _, want := range []string{
 		"/workspace/skills/wiki/SKILL.md",
-		"changed: yes",
-		"files:",
-		"summary:",
-		"reason:",
+		"**changed:** yes",
+		"**files:**",
+		"**summary:**",
+		"**reason:**",
 		"NoReply",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -267,7 +267,7 @@ func TestWikiLintRunsPromptRecordsSummaryAndKeepsTimer(t *testing.T) {
 	rt.mu.Lock()
 	call := rt.promptCalls[0]
 	rt.mu.Unlock()
-	for _, want := range []string{"请检查并修复", "/workspace/knowledge/lint.md", "changed: yes/no"} {
+	for _, want := range []string{"请检查并修复", "/workspace/knowledge/lint.md", "**changed:** yes/no"} {
 		if !strings.Contains(call.Text, want) {
 			t.Fatalf("lint prompt = %q, want %q", call.Text, want)
 		}

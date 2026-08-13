@@ -124,14 +124,6 @@ func newStreamCardUsagePanelJSON(content string) string {
 	return string(data)
 }
 
-func streamCardProcessPanel() cardJSON {
-	return streamCardProcessPanelWithTitle("", "")
-}
-
-func streamCardProcessPanelWithContent(content string) cardJSON {
-	return streamCardProcessPanelWithTitle(content, "")
-}
-
 func streamCardProcessPanelWithTitle(content string, title string) cardJSON {
 	title = normalizedStreamCardProcessTitle(title)
 	return cardJSON{
