@@ -149,13 +149,13 @@ func driveCommentStreamCardMetadata(comment feishu.DriveComment) string {
 	comment = comment.Normalized()
 	lines := make([]string, 0, 3)
 	if comment.Quote != "" {
-		lines = append(lines, "**引用文本：**"+truncateRunes(comment.Quote, driveCommentQuoteMaxRunes))
+		lines = append(lines, "**引用文本：** "+truncateRunes(comment.Quote, driveCommentQuoteMaxRunes))
 	}
 	if text := driveCommentUserText(comment); text != "" {
-		lines = append(lines, "**评论内容：**"+truncateRunes(text, driveCommentTextMaxRunes))
+		lines = append(lines, "**评论内容：** "+truncateRunes(text, driveCommentTextMaxRunes))
 	}
 	if comment.DocumentURL != "" {
-		lines = append(lines, "**文档链接：**"+comment.DocumentURL)
+		lines = append(lines, "**文档链接：** "+comment.DocumentURL)
 	}
 	return strings.Join(lines, "\n")
 }

@@ -108,7 +108,7 @@ func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
 	data := newStreamCardJSONFromState("", "", streamCardInitialStatus, "", true, true, false, true, StreamCardMeta{
 		Title:     "定时任务执行结果",
 		Subtitle:  "task-id: daily",
-		Metadata:  "**引用文本：**原文\n**评论内容：**请处理\n**文档链接：**https://feishu.cn/docx/doc-token",
+		Metadata:  "**引用文本：** 原文\n**评论内容：** 请处理\n**文档链接：** https://feishu.cn/docx/doc-token",
 		SourceURL: "https://feishu.cn/docx/doc-token",
 		Footer:    "本消息的回复链将在本次执行会话中处理。",
 	})
@@ -116,7 +116,7 @@ func TestNewStreamCardJSONCanIncludeHeaderAndFooter(t *testing.T) {
 		t.Fatalf("newStreamCardJSONFromState() is not valid JSON: %v", err)
 	}
 
-	for _, want := range []string{"定时任务执行结果", "task-id: daily", "**引用文本：**原文\n**评论内容：**请处理\n**文档链接：**https://feishu.cn/docx/doc-token", streamCardMetadataElementID, "📄 [查看原文](https://feishu.cn/docx/doc-token)", streamCardSourceElementID, "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
+	for _, want := range []string{"定时任务执行结果", "task-id: daily", "**引用文本：** 原文\n**评论内容：** 请处理\n**文档链接：** https://feishu.cn/docx/doc-token", streamCardMetadataElementID, "📄 [查看原文](https://feishu.cn/docx/doc-token)", streamCardSourceElementID, "本消息的回复链将在本次执行会话中处理。", streamCardFooterElementID} {
 		if !jsonContainsValue(card, want) {
 			t.Fatalf("stream card meta JSON does not contain %q: %#v", want, card)
 		}
