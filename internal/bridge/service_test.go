@@ -99,6 +99,8 @@ type fakeSentMessageClient struct {
 	configDetailSender      func(context.Context, feishu.Message, feishu.ConfigDetailCard) error
 	driveCommentReplySender func(context.Context, feishu.DriveComment, string) error
 	traceChatCreator        func(context.Context, feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error)
+	chatCreator             func(context.Context, feishu.CreateChatRequest) (feishu.CreatedChat, error)
+	chatMemberAdder         func(context.Context, feishu.AddChatMembersRequest) (feishu.AddChatMembersResult, error)
 	traceBotNameProvider    func(context.Context) (string, error)
 	sent                    []string
 	msgs                    []feishu.Message
@@ -232,6 +234,20 @@ func (f *fakeSentMessageClient) CreateDriveCommentTraceChat(ctx context.Context,
 		return feishu.CreatedChat{}, nil
 	}
 	return f.traceChatCreator(ctx, req)
+}
+
+func (f *fakeSentMessageClient) CreateChat(ctx context.Context, req feishu.CreateChatRequest) (feishu.CreatedChat, error) {
+	if f == nil || f.chatCreator == nil {
+		return feishu.CreatedChat{}, nil
+	}
+	return f.chatCreator(ctx, req)
+}
+
+func (f *fakeSentMessageClient) AddChatMembers(ctx context.Context, req feishu.AddChatMembersRequest) (feishu.AddChatMembersResult, error) {
+	if f == nil || f.chatMemberAdder == nil {
+		return feishu.AddChatMembersResult{}, nil
+	}
+	return f.chatMemberAdder(ctx, req)
 }
 
 func (f *fakeSentMessageClient) DriveCommentTraceBotName(ctx context.Context) (string, error) {

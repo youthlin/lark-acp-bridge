@@ -115,10 +115,34 @@ type CreateDriveCommentTraceChatRequest struct {
 	UserOpenIDs []string
 }
 
-type CreatedChat struct {
-	ChatID           string
+type CreateChatRequest struct {
+	Name             string
+	Mode             string
 	ChatType         string
 	GroupMessageType string
+	OwnerOpenID      string
+	UserOpenIDs      []string
+	SetBotManager    bool
+}
+
+type CreatedChat struct {
+	ChatID           string
+	Name             string
+	OwnerOpenID      string
+	ChatMode         string
+	ChatType         string
+	GroupMessageType string
+}
+
+type AddChatMembersRequest struct {
+	ChatID      string
+	UserOpenIDs []string
+}
+
+type AddChatMembersResult struct {
+	InvalidOpenIDs         []string
+	NotExistedOpenIDs      []string
+	PendingApprovalOpenIDs []string
 }
 
 // NewAdapter 创建飞书bot处理器

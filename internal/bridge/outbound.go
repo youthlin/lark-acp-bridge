@@ -75,6 +75,14 @@ type driveCommentTraceChatCreator interface {
 	CreateDriveCommentTraceChat(context.Context, feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error)
 }
 
+type chatCreator interface {
+	CreateChat(context.Context, feishu.CreateChatRequest) (feishu.CreatedChat, error)
+}
+
+type chatMemberAdder interface {
+	AddChatMembers(context.Context, feishu.AddChatMembersRequest) (feishu.AddChatMembersResult, error)
+}
+
 type driveCommentTraceBotNameProvider interface {
 	DriveCommentTraceBotName(context.Context) (string, error)
 }
@@ -213,6 +221,24 @@ func (s *Service) createDriveCommentTraceChat(ctx context.Context, msg feishu.Me
 	}
 	chat, err := creator.CreateDriveCommentTraceChat(ctx, req)
 	return chat, true, err
+}
+
+func (s *Service) createChat(ctx context.Context, msg feishu.Message, req feishu.CreateChatRequest) (feishu.CreatedChat, bool, error) {
+	creator, ok := s.outboundForBot(msg.BotID).(chatCreator)
+	if !ok || creator == nil {
+		return feishu.CreatedChat{}, false, nil
+	}
+	chat, err := creator.CreateChat(ctx, req)
+	return chat, true, err
+}
+
+func (s *Service) addChatMembers(ctx context.Context, msg feishu.Message, req feishu.AddChatMembersRequest) (feishu.AddChatMembersResult, bool, error) {
+	adder, ok := s.outboundForBot(msg.BotID).(chatMemberAdder)
+	if !ok || adder == nil {
+		return feishu.AddChatMembersResult{}, false, nil
+	}
+	result, err := adder.AddChatMembers(ctx, req)
+	return result, true, err
 }
 
 func (s *Service) driveCommentTraceBotName(ctx context.Context, botID string) (string, bool, error) {

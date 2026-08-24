@@ -107,6 +107,7 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		helpLines: []string{
 			"/loop [-t 0] [-n 0] [-i 10s] <prompt> - 循环执行提示词直到 DONE、超时或达到轮次",
 			"/loop add <补充消息>|status|stop - 补充下一轮 loop prompt、查看或停止当前会话的循环任务",
+			"/loop how <自然语言需求> - 生成可直接执行的 /loop 命令",
 		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleLoopCommand(ctx, text, msg)
@@ -133,10 +134,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
-		name:      "/new",
-		helpLines: []string{"/new [cwd] [title] - 为当前会话创建新的 ACP 会话映射"},
+		name: "/new",
+		helpLines: []string{
+			"/new [cwd] [title] - 为当前会话创建新的 ACP 会话映射",
+			"/new chat [group|topic] [群标题] [mentions...] - 新建普通群或话题群，群主为触发人",
+		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
-			return s.newSession(ctx, strings.Fields(text), msg)
+			return s.handleNewCommand(ctx, text, msg)
 		},
 	},
 	{
