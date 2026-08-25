@@ -6787,8 +6787,8 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 		t.Fatalf("textUpdates = %+v, want pre-tool text kept until final candidate replaces it", got)
 	}
 	if got := card.processUpdatesSnapshot(); len(got) != 2 ||
-		got[0] != "💬 收到。现在开始。" ||
-		got[1] != "💬 收到。现在开始。\n⏳ exec\\_command" {
+		got[0] != "sid: acp-session-1\n\n💬 收到。现在开始。" ||
+		got[1] != "sid: acp-session-1\n\n💬 收到。现在开始。\n⏳ exec\\_command" {
 		t.Fatalf("processUpdates = %+v, want immediate tool update without default thought display", got)
 	}
 	if !card.isClosed() {
@@ -7826,7 +7826,7 @@ func TestHandleFeishuMessageStreamsThoughtChunksAsOneProcessBlock(t *testing.T) 
 	if len(got) == 0 || len(got) > 2 {
 		t.Fatalf("processUpdates = %+v, want debounced thought block updates", got)
 	}
-	if got[len(got)-1] != "🧠 **Restating the request**\n\nThe user said" {
+	if got[len(got)-1] != "sid: acp-session-1\n\n🧠 **Restating the request**\n\nThe user said" {
 		t.Fatalf("last process update = %q, want folded thought chunk stream", got[len(got)-1])
 	}
 	if strings.Contains(got[len(got)-1], "The\nuser\nsaid") {
@@ -7895,7 +7895,7 @@ func TestHandleFeishuMessageStreamsPlanUpdatesAsProcessBlock(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("processUpdates = %+v, want plan process update", got)
 	}
-	want := "📌 计划\n• ✅ 读取现有实现\n• 🔄 补过程消息展示"
+	want := "sid: acp-session-1\n\n📌 计划\n• ✅ 读取现有实现\n• 🔄 补过程消息展示"
 	if got[len(got)-1] != want {
 		t.Fatalf("last process update = %q, want %q", got[len(got)-1], want)
 	}
@@ -8059,6 +8059,8 @@ func TestHandleFeishuMessageSeparatesPlanAndFollowingProcessRows(t *testing.T) {
 		t.Fatalf("processUpdates = %+v, want process updates", got)
 	}
 	want := strings.Join([]string{
+		"sid: acp-session-1",
+		"",
 		"📌 计划",
 		"• ✅ 确认依赖和实体定义",
 		"• 🔄 梳理仓库 Mongo 约定",
@@ -8142,7 +8144,7 @@ func TestHandleFeishuMessageStreamsGenericChunksAsOneProcessBlock(t *testing.T) 
 	if len(got) != 1 {
 		t.Fatalf("processUpdates = %+v, want generic chunk stream to update once within throttle window", got)
 	}
-	if got[0] != "line one line two" {
+	if got[0] != "sid: acp-session-1\n\nline one line two" {
 		t.Fatalf("process update = %q, want final accumulated generic chunk stream", got[0])
 	}
 }
@@ -8213,10 +8215,10 @@ func TestHandleFeishuMessageFormatsToolTitleAndStatus(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("processUpdates = %+v, want tool start and completion updates", got)
 	}
-	if got[0] != "⏳ Read AGENTS.md" {
+	if got[0] != "sid: acp-session-1\n\n⏳ Read AGENTS.md" {
 		t.Fatalf("first process update = %q, want tool title", got[0])
 	}
-	if got[1] != "✅ Read AGENTS.md" {
+	if got[1] != "sid: acp-session-1\n\n✅ Read AGENTS.md" {
 		t.Fatalf("second process update = %q, want completed status replacing tool row", got[1])
 	}
 }

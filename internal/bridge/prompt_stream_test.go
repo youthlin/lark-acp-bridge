@@ -70,7 +70,7 @@ func TestPromptCardStreamCreatesCardOnceConcurrently(t *testing.T) {
 	if got := card.textUpdatesSnapshot(); len(got) != 1 || got[0] != "hello" {
 		t.Fatalf("textUpdates = %+v, want text update on single card", got)
 	}
-	if got := card.processUpdatesSnapshot(); len(got) != 1 || got[0] != "process" {
+	if got := card.processUpdatesSnapshot(); len(got) != 1 || got[0] != "sid: acp-session-1\n\nprocess" {
 		t.Fatalf("processUpdates = %+v, want process update on single card", got)
 	}
 }
@@ -124,13 +124,13 @@ func TestPromptCardStreamTruncatesLongProcessText(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("processUpdates = %+v, want one process update", got)
 	}
-	if !strings.HasPrefix(got[0], "（前面过程内容已省略）\n") {
-		t.Fatalf("process update prefix = %q, want omission marker", got[0])
+	if !strings.HasPrefix(got[0], "sid: acp-session-1\n\n（前面过程内容已省略）\n") {
+		t.Fatalf("process update prefix = %q, want sid and omission marker", got[0])
 	}
 	if !strings.HasSuffix(got[0], "尾部") {
 		t.Fatalf("process update suffix = %q, want tail retained", got[0])
 	}
-	if len([]rune(got[0])) > maxPromptProcessRunes+20 {
+	if len([]rune(got[0])) > maxPromptProcessRunes+len([]rune("sid: acp-session-1\n\n（前面过程内容已省略）\n")) {
 		t.Fatalf("process update length = %d, want bounded text", len([]rune(got[0])))
 	}
 }
@@ -155,11 +155,11 @@ func TestPromptCardStreamThrottlesProcessUpdatesUntilClose(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "one" {
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "sid: acp-session-1\n\none" {
 		t.Fatalf("processUpdates = %+v, want second process update throttled", got)
 	}
 	stream.close()
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "one\ntwo" {
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 2 || got[1] != "sid: acp-session-1\n\none\ntwo" {
 		t.Fatalf("processUpdates = %+v, want pending process flushed on close", got)
 	}
 }
@@ -183,7 +183,7 @@ func TestPromptCardStreamRefreshesStatusWhenProcessUpdates(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("cards = %+v, want one stream card", cards)
 	}
-	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "tool started" {
+	if got := cards[0].processUpdatesSnapshot(); len(got) != 1 || got[0] != "sid: acp-session-1\n\ntool started" {
 		t.Fatalf("processUpdates = %+v, want process update", got)
 	}
 	status := cards[0].statusUpdatesSnapshot()
@@ -246,6 +246,29 @@ func TestProcessPanelTextKeepsProcessRowsCompact(t *testing.T) {
 	want := "📌 计划\n• ✅ 读取现有实现\n• 🔄 修复展示\n✅ go test ./...\n💬 继续处理"
 	if got != want {
 		t.Fatalf("processPanelText() = %q, want %q", got, want)
+	}
+}
+
+func TestPromptCardStreamProcessPanelTextAddsSessionIDPrefix(t *testing.T) {
+	stream := &promptCardStream{
+		session: Session{ACPSessionID: "acp-session-1"},
+		process: []string{
+			strings.Repeat("前", maxPromptProcessRunes+20) + "尾部",
+		},
+	}
+	got := stream.processPanelTextLocked()
+	if !strings.HasPrefix(got, "sid: acp-session-1\n\n（前面过程内容已省略）\n") {
+		t.Fatalf("process text = %q, want fixed sid before truncated process", got)
+	}
+	if !strings.HasSuffix(got, "尾部") {
+		t.Fatalf("process text = %q, want process tail retained", got)
+	}
+}
+
+func TestPromptCardStreamProcessPanelTextOmitsEmptySessionIDPrefix(t *testing.T) {
+	stream := &promptCardStream{process: []string{"one"}}
+	if got := stream.processPanelTextLocked(); got != "one" {
+		t.Fatalf("process text = %q, want no sid prefix", got)
 	}
 }
 

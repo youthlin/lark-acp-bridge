@@ -189,7 +189,7 @@ func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result a
 	s.mu.Lock()
 	s.delayed = false
 	text := s.text
-	processText := processPanelText(s.process)
+	processText := s.processPanelTextLocked()
 	showStatus := s.showStatusBar
 	status := s.status
 	showUsage := s.showUsageDetail
@@ -457,7 +457,7 @@ func (s *promptCardStream) updateProcessWithContext(ctx context.Context, text st
 	}
 	s.mu.Lock()
 	s.process = append(s.process, normalizeStreamMarkdown(text))
-	processText := processPanelText(s.process)
+	processText := s.processPanelTextLocked()
 	delayed := s.delayed
 	s.mu.Unlock()
 	if delayed {
@@ -538,7 +538,7 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 					s.process = append(s.process, line)
 					row.line = len(s.process) - 1
 				}
-				return processPanelText(s.process)
+				return s.processPanelTextLocked()
 			}
 		}
 		s.process = append(s.process, line)
@@ -548,7 +548,7 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 			line:   len(s.process) - 1,
 			active: true,
 		})
-		return processPanelText(s.process)
+		return s.processPanelTextLocked()
 	}
 	if idx := s.findToolRowLocked(id, title); idx >= 0 {
 		row := &s.tools[idx]
@@ -562,10 +562,10 @@ func (s *promptCardStream) applyToolProgressLineLocked(status toolProgressStatus
 			row.line = len(s.process) - 1
 		}
 		row.active = false
-		return processPanelText(s.process)
+		return s.processPanelTextLocked()
 	}
 	s.process = append(s.process, line)
-	return processPanelText(s.process)
+	return s.processPanelTextLocked()
 }
 
 func escapeInlineMarkdown(text string) string {
@@ -684,7 +684,7 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 		s.streaming = true
 		s.activeStreamClass = class
 	}
-	processText := processPanelText(s.process)
+	processText := s.processPanelTextLocked()
 	delayed := s.delayed
 	s.mu.Unlock()
 	if delayed {
@@ -699,6 +699,19 @@ func (s *promptCardStream) updateProcessStreamText(class promptProcessClass, tex
 
 func processPanelText(entries []string) string {
 	return truncateProcessText(strings.Join(entries, "\n"))
+}
+
+func (s *promptCardStream) processPanelTextLocked() string {
+	process := processPanelText(s.process)
+	if strings.TrimSpace(process) == "" {
+		return ""
+	}
+	sid := strings.TrimSpace(s.session.ACPSessionID)
+	if sid == "" {
+		return process
+	}
+	prefix := "sid: " + escapeInlineMarkdown(sid)
+	return prefix + "\n\n" + process
 }
 
 func (s *promptCardStream) finishProcessStream() {
