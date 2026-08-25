@@ -15,6 +15,7 @@ import (
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
 const traceDirName = "traces"
@@ -36,6 +37,7 @@ type traceRecord struct {
 	MainID        string                 `json:"main_id,omitempty"`
 	SubID         string                 `json:"sub_id,omitempty"`
 	SessionID     string                 `json:"session_id,omitempty"`
+	MessageID     string                 `json:"message_id,omitempty"`
 	AgentName     string                 `json:"agent_name,omitempty"`
 	Cwd           string                 `json:"cwd,omitempty"`
 	Content       string                 `json:"content,omitempty"`
@@ -206,6 +208,7 @@ func traceSafeFileName(value string) string {
 type traceRecorder struct {
 	store        *traceStore
 	session      Session
+	messageID    string
 	assistantMu  sync.Mutex
 	assistant    strings.Builder
 	assistantSet bool
@@ -233,13 +236,18 @@ type traceUpdateAggregate struct {
 }
 
 func newTraceRecorder(store *traceStore, session Session, prompt string) *traceRecorder {
+	return newTraceRecorderWithMessageID(store, session, prompt, "")
+}
+
+func newTraceRecorderWithMessageID(store *traceStore, session Session, prompt string, messageID string) *traceRecorder {
 	if store == nil {
 		return nil
 	}
 	recorder := &traceRecorder{
-		store:   store,
-		session: session,
-		tools:   make(map[string]*traceToolAggregate),
+		store:     store,
+		session:   session,
+		messageID: strings.TrimSpace(messageID),
+		tools:     make(map[string]*traceToolAggregate),
 	}
 	recorder.append(traceRecord{Type: "user", Content: prompt})
 	return recorder
@@ -275,6 +283,10 @@ func (s *Service) setTraceStore(botID string, store *traceStore) {
 
 func (s *Service) newTraceRecorder(session Session, prompt string) *traceRecorder {
 	return newTraceRecorder(s.traceStoreForSession(session), session, prompt)
+}
+
+func (s *Service) newTraceRecorderForMessage(session Session, msg feishu.Message, prompt string) *traceRecorder {
+	return newTraceRecorderWithMessageID(s.traceStoreForSession(session), session, prompt, msg.MessageID)
 }
 
 func tracePromptOptions(recorder *traceRecorder, opts acp.PromptOptions) acp.PromptOptions {
@@ -916,6 +928,9 @@ func marshalTraceValue(value any) json.RawMessage {
 func (r *traceRecorder) append(record traceRecord) {
 	if r == nil || r.store == nil {
 		return
+	}
+	if strings.TrimSpace(record.MessageID) == "" {
+		record.MessageID = r.messageID
 	}
 	if err := r.store.Append(r.session, record); err != nil {
 		slog.Warn("写入 ACP trace 失败", "session", r.session.ACPSessionID, "错误", err)

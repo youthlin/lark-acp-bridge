@@ -91,6 +91,7 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 	run := svc.runUserPromptWithOptionsDetailed(context.Background(), feishu.Message{
 		BotID:     "bot-a",
 		ChatID:    "oc_chat",
+		MessageID: "om_prompt_1",
 		SenderID:  testOwnerOpenID,
 		Workspace: workspace,
 	}, session, config.AgentConfig{}, "你好", runningTaskOptions{silentPrompt: true})
@@ -102,6 +103,11 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 	records := readTraceRecords(t, path)
 	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,thought,plan,usage,tool,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	for i, record := range records {
+		if record["message_id"] != "om_prompt_1" {
+			t.Fatalf("record[%d] message_id = %v, want om_prompt_1; record = %+v", i, record["message_id"], record)
+		}
 	}
 	if records[0]["type"] != "user" || records[0]["content"] == "" {
 		t.Fatalf("first record = %+v, want user prompt", records[0])
@@ -126,6 +132,47 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 	}
 	if records[6]["type"] != "turn_result" || records[6]["stop_reason"] != "end_turn" {
 		t.Fatalf("seventh record = %+v, want turn result", records[6])
+	}
+}
+
+func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, ".local", "sessions.json")))
+	svc.setRuntime(&fakeRuntime{promptResult: acp.PromptResult{Text: "ok"}})
+
+	for _, msgID := range []string{"om_first", "om_second"} {
+		run := svc.runUserPromptWithOptionsDetailed(context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			ChatID:    "oc_chat",
+			MessageID: msgID,
+			SenderID:  testOwnerOpenID,
+			Workspace: workspace,
+		}, session, config.AgentConfig{}, "hello "+msgID, runningTaskOptions{silentPrompt: true})
+		if run.err != nil {
+			t.Fatalf("runUserPromptWithOptionsDetailed(%s) error = %v", msgID, run.err)
+		}
+	}
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,user,assistant" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	for i, want := range []string{"om_first", "om_first", "om_second", "om_second"} {
+		if records[i]["message_id"] != want {
+			t.Fatalf("record[%d] message_id = %v, want %s; record = %+v", i, records[i]["message_id"], want, records[i])
+		}
 	}
 }
 

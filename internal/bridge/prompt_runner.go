@@ -419,7 +419,7 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 		return s.runUserPromptWithStreamOptionsDetailed(ctx, msg, session, agent, text, opts, stream, delayed)
 	}
 	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
-		recorder := s.newTraceRecorder(session, text)
+		recorder := s.newTraceRecorderForMessage(session, msg, text)
 		result, err := s.runtime.Prompt(taskCtx, session, agent, text, tracePromptOptions(recorder, acp.PromptOptions{}))
 		if recorder != nil {
 			recorder.Complete(result, err)
@@ -521,7 +521,7 @@ func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, s
 	if stream == nil {
 		stream = newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg), s.streamCardStarterForMessage(msg))
 	}
-	recorder := s.newTraceRecorder(session, text)
+	recorder := s.newTraceRecorderForMessage(session, msg, text)
 	chunks := newPromptChunkAccumulator(stream)
 	stopStatusRefresh := stream.startStatusRefresh(ctx)
 	result, err := s.runtime.Prompt(ctx, session, agent, text, tracePromptOptions(recorder, s.promptStreamOptions(msg, stream, chunks)))
