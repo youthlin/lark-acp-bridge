@@ -100,7 +100,7 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 
 	path := filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl")
 	records := readTraceRecords(t, path)
-	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,thought,plan,usage,tool,assistant,result" {
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,thought,plan,usage,tool,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
 	if records[0]["type"] != "user" || records[0]["content"] == "" {
@@ -124,8 +124,126 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 	if records[5]["type"] != "assistant" || records[5]["content"] != "完成" {
 		t.Fatalf("sixth record = %+v, want assistant content", records[5])
 	}
-	if records[6]["type"] != "result" || records[6]["stop_reason"] != "end_turn" {
-		t.Fatalf("seventh record = %+v, want result", records[6])
+	if records[6]["type"] != "turn_result" || records[6]["stop_reason"] != "end_turn" {
+		t.Fatalf("seventh record = %+v, want turn result", records[6])
+	}
+}
+
+func TestTraceToolOutputCompactsRepeatedFields(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, ".local", "sessions.json")))
+	recorder := svc.newTraceRecorder(session, "hello")
+	rawInput := json.RawMessage(`{"call_id":"call-1","process_id":"42","command":["zsh","-c","echo ok"],"cwd":"/tmp","parsed_cmd":[{"type":"unknown","cmd":"echo ok"}],"source":"unified_exec_startup"}`)
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call",
+		ToolCallID:    "call-1",
+		Title:         "echo ok",
+		Kind:          "execute",
+		Status:        "in_progress",
+		RawInput:      rawInput,
+		Raw:           json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"echo ok","kind":"execute","status":"in_progress","locations":[{"path":"/tmp"}],"rawInput":{"call_id":"call-1","process_id":"42","command":["zsh","-c","echo ok"],"cwd":"/tmp","parsed_cmd":[{"type":"unknown","cmd":"echo ok"}],"source":"unified_exec_startup"}}`),
+	}})
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call_update",
+		ToolCallID:    "call-1",
+		Status:        "completed",
+		RawOutput:     json.RawMessage(`{"call_id":"call-1","process_id":"42","command":["zsh","-c","echo ok"],"cwd":"/tmp","parsed_cmd":[{"type":"unknown","cmd":"echo ok"}],"source":"unified_exec_startup","stdout":"ok\n","stderr":"","aggregated_output":"ok\n","formatted_output":"ok\n","exit_code":0,"duration":{"secs":0,"nanos":1},"status":"completed"}`),
+		Raw:           json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","rawOutput":{"call_id":"call-1","process_id":"42","command":["zsh","-c","echo ok"],"cwd":"/tmp","parsed_cmd":[{"type":"unknown","cmd":"echo ok"}],"source":"unified_exec_startup","stdout":"ok\n","stderr":"","aggregated_output":"ok\n","formatted_output":"ok\n","exit_code":0,"duration":{"secs":0,"nanos":1},"status":"completed"}}`),
+	}})
+	recorder.Complete(acp.PromptResult{}, nil)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,tool" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	tool := records[1]
+	output, ok := tool["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool output = %#v, want object", tool["output"])
+	}
+	for _, key := range []string{"call_id", "process_id", "command", "cwd", "parsed_cmd", "source", "status", "stderr", "aggregated_output", "formatted_output"} {
+		if _, ok := output[key]; ok {
+			t.Fatalf("tool output = %+v, want no repeated %q field", output, key)
+		}
+	}
+	if output["stdout"] != "ok\n" || output["exit_code"].(float64) != 0 {
+		t.Fatalf("tool output = %+v, want compact command result", output)
+	}
+	rawUpdate, ok := tool["raw_update"].(map[string]any)
+	if !ok {
+		t.Fatalf("raw_update = %#v, want locations-only object", tool["raw_update"])
+	}
+	if _, ok := rawUpdate["rawInput"]; ok {
+		t.Fatalf("raw_update = %+v, want no rawInput", rawUpdate)
+	}
+	if _, ok := rawUpdate["rawOutput"]; ok {
+		t.Fatalf("raw_update = %+v, want no rawOutput", rawUpdate)
+	}
+	if _, ok := rawUpdate["locations"]; !ok {
+		t.Fatalf("raw_update = %+v, want non-promoted locations preserved", rawUpdate)
+	}
+}
+
+func TestTraceTurnResultCompactsRawResult(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, ".local", "sessions.json")))
+	recorder := svc.newTraceRecorder(session, "hello")
+	recorder.appendAssistant("answer")
+	recorder.Complete(acp.PromptResult{
+		Text:       "answer",
+		StopReason: "end_turn",
+		Usage:      acp.TokenUsage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+		Meta: acp.PromptResultMeta{TraeTokenUsage: &acp.TraeTokenUsage{
+			TurnDisplay:    acp.TokenUsage{InputTokens: 10, OutputTokens: 7, TotalTokens: 17},
+			SessionDisplay: acp.TokenUsage{InputTokens: 20, OutputTokens: 8, TotalTokens: 28},
+			ContextWindow:  acp.ContextWindowUsage{Used: 1024, Size: 8192},
+		}},
+		Raw: json.RawMessage(`{"stopReason":"end_turn","usage":{"inputTokens":11,"outputTokens":7,"totalTokens":18},"_meta":{"_trae/tokenUsage":{"turnDisplay":{"inputTokens":10,"outputTokens":7,"totalTokens":17},"sessionDisplay":{"inputTokens":20,"outputTokens":8,"totalTokens":28},"contextWindow":{"used":1024,"size":8192}}}}`),
+	}, nil)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,turn_result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	result := records[2]
+	if result["type"] != "turn_result" || result["stop_reason"] != "end_turn" {
+		t.Fatalf("turn result = %+v, want stop reason", result)
+	}
+	if _, ok := result["raw_result"]; ok {
+		t.Fatalf("turn result = %+v, want redundant raw_result omitted", result)
+	}
+	if _, ok := result["turn_usage"].(map[string]any); !ok {
+		t.Fatalf("turn result = %+v, want turn_usage", result)
+	}
+	if _, ok := result["session_usage"].(map[string]any); !ok {
+		t.Fatalf("turn result = %+v, want session_usage", result)
+	}
+	if _, ok := result["context_window"].(map[string]any); !ok {
+		t.Fatalf("turn result = %+v, want context_window", result)
 	}
 }
 
@@ -184,7 +302,7 @@ func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
 			}
 
 			records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", result.Session.ACPSessionID+".jsonl"))
-			if got := traceRecordTypes(records); strings.Join(got, ",") != "user,status,assistant,result" {
+			if got := traceRecordTypes(records); strings.Join(got, ",") != "user,status,assistant,turn_result" {
 				t.Fatalf("record types = %v, records = %+v", got, records)
 			}
 			if records[0]["source"] != tt.key.Source || records[0]["main_id"] != tt.key.MainID || records[0]["sub_id"] != tt.key.SubID {

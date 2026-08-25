@@ -29,34 +29,36 @@ type traceStore struct {
 }
 
 type traceRecord struct {
-	Timestamp   time.Time       `json:"timestamp"`
-	Type        string          `json:"type"`
-	BotID       string          `json:"bot_id,omitempty"`
-	Source      string          `json:"source,omitempty"`
-	MainID      string          `json:"main_id,omitempty"`
-	SubID       string          `json:"sub_id,omitempty"`
-	SessionID   string          `json:"session_id,omitempty"`
-	AgentName   string          `json:"agent_name,omitempty"`
-	Cwd         string          `json:"cwd,omitempty"`
-	Content     string          `json:"content,omitempty"`
-	ToolCallID  string          `json:"tool_call_id,omitempty"`
-	Name        string          `json:"name,omitempty"`
-	Kind        string          `json:"kind,omitempty"`
-	Status      string          `json:"status,omitempty"`
-	Input       json.RawMessage `json:"input,omitempty"`
-	Output      json.RawMessage `json:"output,omitempty"`
-	Entries     []acp.PlanEntry `json:"entries,omitempty"`
-	Used        int64           `json:"used,omitempty"`
-	Size        int64           `json:"size,omitempty"`
-	Cost        *acp.UsageCost  `json:"cost,omitempty"`
-	UpdateKind  string          `json:"update_kind,omitempty"`
-	StopReason  string          `json:"stop_reason,omitempty"`
-	Usage       acp.TokenUsage  `json:"usage,omitzero"`
-	TraeUsage   any             `json:"trae_usage,omitempty"`
-	RawUpdate   json.RawMessage `json:"raw_update,omitempty"`
-	RawResult   json.RawMessage `json:"raw_result,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Interrupted bool            `json:"interrupted,omitempty"`
+	Timestamp     time.Time              `json:"timestamp"`
+	Type          string                 `json:"type"`
+	BotID         string                 `json:"bot_id,omitempty"`
+	Source        string                 `json:"source,omitempty"`
+	MainID        string                 `json:"main_id,omitempty"`
+	SubID         string                 `json:"sub_id,omitempty"`
+	SessionID     string                 `json:"session_id,omitempty"`
+	AgentName     string                 `json:"agent_name,omitempty"`
+	Cwd           string                 `json:"cwd,omitempty"`
+	Content       string                 `json:"content,omitempty"`
+	ToolCallID    string                 `json:"tool_call_id,omitempty"`
+	Name          string                 `json:"name,omitempty"`
+	Kind          string                 `json:"kind,omitempty"`
+	Status        string                 `json:"status,omitempty"`
+	Input         json.RawMessage        `json:"input,omitempty"`
+	Output        json.RawMessage        `json:"output,omitempty"`
+	Entries       []acp.PlanEntry        `json:"entries,omitempty"`
+	Used          int64                  `json:"used,omitempty"`
+	Size          int64                  `json:"size,omitempty"`
+	Cost          *acp.UsageCost         `json:"cost,omitempty"`
+	UpdateKind    string                 `json:"update_kind,omitempty"`
+	StopReason    string                 `json:"stop_reason,omitempty"`
+	Usage         acp.TokenUsage         `json:"usage,omitzero"`
+	TurnUsage     acp.TokenUsage         `json:"turn_usage,omitzero"`
+	SessionUsage  acp.TokenUsage         `json:"session_usage,omitzero"`
+	ContextWindow acp.ContextWindowUsage `json:"context_window,omitzero"`
+	RawUpdate     json.RawMessage        `json:"raw_update,omitempty"`
+	RawResult     json.RawMessage        `json:"raw_result,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	Interrupted   bool                   `json:"interrupted,omitempty"`
 }
 
 func newTraceStore(workspace string, cfg config.TraceConfig) *traceStore {
@@ -368,16 +370,7 @@ func (r *traceRecorder) Complete(result acp.PromptResult, err error) {
 		r.append(traceRecord{Type: "error", Error: err.Error()})
 	}
 	if promptResultHasUsageDetail(result) || len(result.Raw) > 0 || strings.TrimSpace(result.StopReason) != "" {
-		record := traceRecord{
-			Type:       "result",
-			StopReason: result.StopReason,
-			Usage:      result.Usage,
-			RawResult:  append(json.RawMessage(nil), result.Raw...),
-		}
-		if result.Meta.TraeTokenUsage != nil {
-			record.TraeUsage = result.Meta.TraeTokenUsage
-		}
-		r.append(record)
+		r.append(traceTurnResultRecord(result))
 	}
 }
 
@@ -421,8 +414,10 @@ func (r *traceRecorder) recordToolChunk(kind string, u acp.SessionUpdate, text s
 		tool.output = appendJSONText(tool.output, text)
 	}
 	if len(u.Raw) > 0 {
-		tool.raw = append(json.RawMessage(nil), u.Raw...)
-		tool.rawSet = true
+		if raw := compactTraceToolRawUpdate(u.Raw, nil, nil); len(raw) > 0 {
+			tool.raw = raw
+			tool.rawSet = true
+		}
 	}
 	r.toolMu.Unlock()
 }
@@ -449,18 +444,16 @@ func (r *traceRecorder) recordToolUpdate(kind string, u acp.SessionUpdate) {
 		tool.status = u.Status
 	}
 	if len(u.RawInput) > 0 {
-		tool.input = append(json.RawMessage(nil), u.RawInput...)
+		tool.input = cloneTraceRaw(u.RawInput)
 	}
 	if len(u.RawOutput) > 0 {
-		tool.output = append(json.RawMessage(nil), u.RawOutput...)
+		tool.output = compactTraceToolOutput(tool.input, u.RawOutput, tool.status)
 	}
 	if len(u.Raw) > 0 {
-		raw := append(json.RawMessage(nil), u.Raw...)
-		if !rawUpdateIsRedundantToolUpdate(raw, tool.input, tool.output) {
+		raw := compactTraceToolRawUpdate(u.Raw, u.RawInput, u.RawOutput)
+		if len(raw) > 0 {
 			tool.raw = raw
 			tool.rawSet = true
-		} else if !tool.rawSet {
-			tool.raw = nil
 		}
 	}
 	if strings.Contains(kind, "output") && len(tool.output) == 0 {
@@ -506,7 +499,7 @@ func traceToolRecord(tool *traceToolAggregate) traceRecord {
 		Kind:       tool.kind,
 		Status:     tool.status,
 		Input:      append(json.RawMessage(nil), tool.input...),
-		Output:     append(json.RawMessage(nil), tool.output...),
+		Output:     compactTraceToolOutput(tool.input, tool.output, tool.status),
 	}
 	if tool.rawSet {
 		record.RawUpdate = append(json.RawMessage(nil), tool.raw...)
@@ -514,34 +507,170 @@ func traceToolRecord(tool *traceToolAggregate) traceRecord {
 	return record
 }
 
-func rawUpdateIsRedundantToolUpdate(raw json.RawMessage, input json.RawMessage, output json.RawMessage) bool {
+func traceTurnResultRecord(result acp.PromptResult) traceRecord {
+	record := traceRecord{
+		Type:       "turn_result",
+		StopReason: result.StopReason,
+		Usage:      result.Usage,
+	}
+	if tokenUsage := result.Meta.TraeTokenUsage; tokenUsage != nil {
+		record.TurnUsage = tokenUsage.TurnDisplay
+		record.SessionUsage = tokenUsage.SessionDisplay
+		record.ContextWindow = tokenUsage.ContextWindow
+	}
+	if raw := compactTracePromptRawResult(result.Raw); len(raw) > 0 {
+		record.RawResult = raw
+	}
+	return record
+}
+
+func compactTraceToolOutput(input json.RawMessage, output json.RawMessage, status string) json.RawMessage {
+	output = cloneTraceRaw(output)
+	if len(output) == 0 {
+		return nil
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(output, &out); err != nil {
+		return output
+	}
+	var in map[string]json.RawMessage
+	_ = json.Unmarshal(input, &in)
+	for key, value := range out {
+		if inValue, ok := in[key]; ok && rawMessageEqual(value, inValue) {
+			delete(out, key)
+		}
+	}
+	if outputStatus, ok := rawStringField(out, "status"); ok && outputStatus == strings.TrimSpace(status) {
+		delete(out, "status")
+	}
+	compactTraceToolOutputTextFields(out)
+	return marshalTraceRawObject(out)
+}
+
+func compactTraceToolOutputTextFields(out map[string]json.RawMessage) {
+	if len(out) == 0 {
+		return
+	}
+	stdout, stdoutOK := rawStringField(out, "stdout")
+	stderr, stderrOK := rawStringField(out, "stderr")
+	combined := ""
+	if stdoutOK {
+		combined += stdout
+	}
+	if stderrOK {
+		combined += stderr
+	}
+	aggregated, aggregatedOK := rawStringField(out, "aggregated_output")
+	if aggregatedOK && ((stdoutOK && stderrOK && aggregated == combined) || (stdoutOK && aggregated == stdout && (!stderrOK || stderr == "")) || (stderrOK && aggregated == stderr && (!stdoutOK || stdout == ""))) {
+		delete(out, "aggregated_output")
+	}
+	if formatted, ok := rawStringField(out, "formatted_output"); ok {
+		switch {
+		case aggregatedOK && formatted == aggregated:
+			delete(out, "formatted_output")
+		case (stdoutOK || stderrOK) && formatted == combined:
+			delete(out, "formatted_output")
+		case stdoutOK && formatted == stdout && (!stderrOK || stderr == ""):
+			delete(out, "formatted_output")
+		case stderrOK && formatted == stderr && (!stdoutOK || stdout == ""):
+			delete(out, "formatted_output")
+		}
+	}
+	dropEmptyRawStringField(out, "stdout")
+	dropEmptyRawStringField(out, "stderr")
+	dropEmptyRawStringField(out, "aggregated_output")
+	dropEmptyRawStringField(out, "formatted_output")
+}
+
+func compactTraceToolRawUpdate(raw json.RawMessage, rawInput json.RawMessage, rawOutput json.RawMessage) json.RawMessage {
+	raw = cloneTraceRaw(raw)
 	if len(raw) == 0 {
-		return true
+		return nil
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return false
+		return raw
 	}
-	for key, value := range fields {
-		if len(bytes.TrimSpace(value)) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			continue
-		}
-		switch key {
-		case "sessionUpdate", "toolCallId", "name", "title", "kind", "status":
-			continue
-		case "rawInput":
-			if !rawMessageEqual(value, input) {
-				return false
+	for _, key := range []string{"sessionUpdate", "toolCallId", "name", "title", "kind", "status"} {
+		delete(fields, key)
+	}
+	if value, ok := fields["rawInput"]; ok && (traceRawIsEmpty(value) || (len(rawInput) > 0 && rawMessageEqual(value, rawInput))) {
+		delete(fields, "rawInput")
+	}
+	if value, ok := fields["rawOutput"]; ok && (traceRawIsEmpty(value) || (len(rawOutput) > 0 && rawMessageEqual(value, rawOutput))) {
+		delete(fields, "rawOutput")
+	}
+	return marshalTraceRawObject(fields)
+}
+
+func compactTracePromptRawResult(raw json.RawMessage) json.RawMessage {
+	raw = cloneTraceRaw(raw)
+	if len(raw) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+	delete(fields, "stopReason")
+	delete(fields, "usage")
+	if metaRaw, ok := fields["_meta"]; ok {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(metaRaw, &meta); err == nil {
+			delete(meta, "_trae/tokenUsage")
+			if compacted := marshalTraceRawObject(meta); len(compacted) > 0 {
+				fields["_meta"] = compacted
+			} else {
+				delete(fields, "_meta")
 			}
-		case "rawOutput":
-			if !rawMessageEqual(value, output) {
-				return false
-			}
-		default:
-			return false
 		}
 	}
-	return true
+	return marshalTraceRawObject(fields)
+}
+
+func cloneTraceRaw(raw json.RawMessage) json.RawMessage {
+	raw = bytes.TrimSpace(raw)
+	if traceRawIsEmpty(raw) {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func traceRawIsEmpty(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) == 0 || bytes.Equal(raw, []byte("null"))
+}
+
+func marshalTraceRawObject(fields map[string]json.RawMessage) json.RawMessage {
+	if len(fields) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func rawStringField(fields map[string]json.RawMessage, key string) (string, bool) {
+	if fields == nil {
+		return "", false
+	}
+	raw, ok := fields[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func dropEmptyRawStringField(fields map[string]json.RawMessage, key string) {
+	if value, ok := rawStringField(fields, key); ok && value == "" {
+		delete(fields, key)
+	}
 }
 
 func rawMessageEqual(a json.RawMessage, b json.RawMessage) bool {
