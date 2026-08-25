@@ -1,0 +1,266 @@
+package bridge
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
+	"github.com/youthlin/lark-acp-bridge/internal/config"
+	"github.com/youthlin/lark-acp-bridge/internal/feishu"
+)
+
+func TestPromptWritesJSONLTrace(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptResult: acp.PromptResult{
+			Text:       "完成",
+			StopReason: "end_turn",
+			Usage:      acp.TokenUsage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_thought_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "先判断"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_thought_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "上下文"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "plan",
+				PlanEntries: []acp.PlanEntry{
+					{Content: "运行测试", Status: "in_progress"},
+				},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "usage_update",
+				Used:          1024,
+				Size:          8192,
+				Raw:           json.RawMessage(`{"sessionUpdate":"usage_update","used":1024,"size":8192}`),
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				ToolCallID:    "tool-1",
+				Title:         "Run tests",
+				Kind:          "execute",
+				Status:        "in_progress",
+				RawInput:      json.RawMessage(`{"cmd":"go test ./..."}`),
+				Raw:           json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Run tests","kind":"execute","status":"in_progress","rawInput":{"cmd":"go test ./..."}}`),
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call_update",
+				ToolCallID:    "tool-1",
+				Status:        "completed",
+				RawOutput:     json.RawMessage(`"ok"`),
+				Raw:           json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":"ok"}`),
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "完"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "成"},
+			}},
+		},
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+
+	run := svc.runUserPromptWithOptionsDetailed(context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+	}, session, config.AgentConfig{}, "你好", runningTaskOptions{silentPrompt: true})
+	if run.err != nil {
+		t.Fatalf("runUserPromptWithOptionsDetailed() error = %v", run.err)
+	}
+
+	path := filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl")
+	records := readTraceRecords(t, path)
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,thought,plan,usage,tool,assistant,result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	if records[0]["type"] != "user" || records[0]["content"] == "" {
+		t.Fatalf("first record = %+v, want user prompt", records[0])
+	}
+	if records[1]["type"] != "thought" || records[1]["content"] != "先判断上下文" {
+		t.Fatalf("second record = %+v, want thought chunks", records[1])
+	}
+	if records[2]["type"] != "plan" || len(records[2]["entries"].([]any)) != 1 {
+		t.Fatalf("third record = %+v, want plan entries", records[2])
+	}
+	if records[3]["type"] != "usage" || records[3]["used"].(float64) != 1024 || records[3]["size"].(float64) != 8192 {
+		t.Fatalf("fourth record = %+v, want usage update", records[3])
+	}
+	if records[4]["type"] != "tool" || records[4]["tool_call_id"] != "tool-1" || records[4]["name"] != "Run tests" {
+		t.Fatalf("fifth record = %+v, want tool call", records[4])
+	}
+	if _, ok := records[4]["raw_update"]; ok {
+		t.Fatalf("tool record = %+v, want redundant raw_update omitted", records[4])
+	}
+	if records[5]["type"] != "assistant" || records[5]["content"] != "完成" {
+		t.Fatalf("sixth record = %+v, want assistant content", records[5])
+	}
+	if records[6]["type"] != "result" || records[6]["stop_reason"] != "end_turn" {
+		t.Fatalf("seventh record = %+v, want result", records[6])
+	}
+}
+
+func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		key  SessionKey
+	}{
+		{
+			name: "schedule",
+			key:  SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"},
+		},
+		{
+			name: "drive_comment",
+			key:  SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+			cfg := config.Config{
+				Bots: []config.BotConfig{{
+					ID:        "bot-a",
+					Workspace: workspace,
+					Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+				}},
+				AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+			}
+			svc := NewService(cfg, store)
+			rt := &fakeRuntime{
+				newSessionInfo: acp.SessionInfo{SessionID: "acp-" + tt.name},
+				promptResult: acp.PromptResult{
+					Text:       "done",
+					StopReason: "end_turn",
+				},
+				promptUpdates: []acp.PromptUpdate{
+					{Update: acp.SessionUpdate{SessionUpdate: "status", Message: "preparing"}},
+					{Update: acp.SessionUpdate{
+						SessionUpdate: "agent_message_chunk",
+						Content:       &acp.ContentBlock{Type: "text", Text: "done"},
+					}},
+				},
+			}
+			svc.setRuntime(rt)
+
+			result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+				BotID:     "bot-a",
+				Key:       tt.key,
+				Workspace: workspace,
+				AgentName: "traex",
+				Cwd:       t.TempDir(),
+				Prompt:    "run " + tt.name,
+			})
+			if err != nil {
+				t.Fatalf("runTriggerPrompt() error = %v", err)
+			}
+
+			records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", result.Session.ACPSessionID+".jsonl"))
+			if got := traceRecordTypes(records); strings.Join(got, ",") != "user,status,assistant,result" {
+				t.Fatalf("record types = %v, records = %+v", got, records)
+			}
+			if records[0]["source"] != tt.key.Source || records[0]["main_id"] != tt.key.MainID || records[0]["sub_id"] != tt.key.SubID {
+				t.Fatalf("first record key fields = %+v, want trigger source key", records[0])
+			}
+			if records[1]["type"] != "status" || records[1]["content"] != "preparing" {
+				t.Fatalf("second record = %+v, want status update", records[1])
+			}
+			if records[2]["type"] != "assistant" || records[2]["content"] != "done" {
+				t.Fatalf("third record = %+v, want assistant update", records[2])
+			}
+		})
+	}
+}
+
+func TestAgentMessageUpdateWritesAssistantOnly(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, ".local", "sessions.json")))
+	recorder := svc.newTraceRecorder(session, "hello")
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "agent_message",
+		Message:       "  answer with spacing  ",
+		Raw:           json.RawMessage(`{"sessionUpdate":"agent_message","message":"  answer with spacing  "}`),
+	}})
+	recorder.Complete(acp.PromptResult{}, nil)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	if records[1]["content"] != "  answer with spacing  " {
+		t.Fatalf("assistant content = %q, want original spacing", records[1]["content"])
+	}
+	if _, ok := records[1]["raw_update"]; ok {
+		t.Fatalf("assistant record = %+v, want no duplicate raw_update", records[1])
+	}
+}
+
+func traceRecordTypes(records []map[string]any) []string {
+	types := make([]string, 0, len(records))
+	for _, record := range records {
+		types = append(types, record["type"].(string))
+	}
+	return types
+}
+
+func readTraceRecords(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open(%s) error = %v", path, err)
+	}
+	defer file.Close()
+	var records []map[string]any
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatalf("Unmarshal trace line %q error = %v", scanner.Text(), err)
+		}
+		records = append(records, record)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scan(%s) error = %v", path, err)
+	}
+	return records
+}

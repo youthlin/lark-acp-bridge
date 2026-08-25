@@ -376,7 +376,8 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	}
 	chunks := &triggerTextAccumulator{}
 	out, err := runPromptTask(s, ctx, session, agent, triggerPromptTaskOptions(), func(taskCtx context.Context) (acp.PromptResult, bool, error) {
-		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, acp.PromptOptions{
+		recorder := s.newTraceRecorder(session, req.Prompt)
+		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, tracePromptOptions(recorder, acp.PromptOptions{
 			OnUpdate: func(update acp.PromptUpdate) {
 				chunks.add(update)
 				if req.Sink != nil {
@@ -386,7 +387,8 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 			OnPermissionRequest: func(permCtx context.Context, permission acp.PermissionRequest) (acp.PermissionOutcome, error) {
 				return s.requestTriggerPermission(permCtx, req, session, permission), nil
 			},
-		})
+		}))
+		recorder.Complete(result, err)
 		return result, false, err
 	})
 	text, textSet := chunks.finalText()

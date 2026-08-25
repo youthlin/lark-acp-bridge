@@ -10,6 +10,10 @@
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
       "bot_open_id": "",
       "owner_open_ids": [],
+      "trace": {
+        "enabled": true,
+        "retention_days": 7
+      },
       "drive_comment": {
         "enabled": false,
         "trace_enabled": false,

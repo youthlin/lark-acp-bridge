@@ -51,10 +51,47 @@ type BotConfig struct {
 	Workspace    string   `json:"workspace"`
 	BotOpenID    string   `json:"bot_open_id,omitempty"`
 	OwnerOpenIDs []string `json:"owner_open_ids,omitempty"`
+	// ACP 会话执行路径本地 JSONL trace 配置
+	Trace TraceConfig `json:"trace,omitzero"`
 	// 云文档评论处理配置
 	DriveComment DriveCommentConfig `json:"drive_comment,omitzero"`
 	// 自动知识沉淀过程展示配置
 	WikiTrace WikiTraceConfig `json:"wiki_trace,omitzero"`
+}
+
+type TraceConfig struct {
+	Enabled       bool `json:"enabled,omitempty"`
+	RetentionDays int  `json:"retention_days,omitempty"`
+	Disabled      bool `json:"disabled,omitempty"`
+}
+
+func (c TraceConfig) MarshalJSON() ([]byte, error) {
+	type traceConfigJSON struct {
+		Enabled       bool `json:"enabled"`
+		RetentionDays int  `json:"retention_days,omitempty"`
+	}
+	c = normalizeTraceConfig(c)
+	return json.Marshal(traceConfigJSON{
+		Enabled:       c.Enabled,
+		RetentionDays: c.RetentionDays,
+	})
+}
+
+func (c *TraceConfig) UnmarshalJSON(data []byte) error {
+	type traceConfigAlias TraceConfig
+	var raw struct {
+		traceConfigAlias
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = TraceConfig(raw.traceConfigAlias)
+	if raw.Enabled != nil {
+		c.Enabled = *raw.Enabled
+		c.Disabled = !*raw.Enabled
+	}
+	return nil
 }
 
 type DriveCommentConfig struct {
@@ -253,6 +290,7 @@ func Default() Config {
 				AppID:     "",
 				AppSecret: FileSecret(DefaultBotSecretPath("default")),
 				Workspace: "$HOME/." + appName + "/bots/default",
+				Trace:     defaultTraceConfig(),
 			},
 		},
 		AgentList: []NamedAgentConfig{
@@ -277,6 +315,13 @@ func Default() Config {
 				DefaultCwd: "$HOME",
 			}},
 		},
+	}
+}
+
+func defaultTraceConfig() TraceConfig {
+	return TraceConfig{
+		Enabled:       true,
+		RetentionDays: 7,
 	}
 }
 
@@ -569,6 +614,18 @@ func UpdateBotWikiTrace(path, botID string, update func(*WikiTraceConfig)) (Wiki
 		}
 		updated.ChatID = strings.TrimSpace(updated.ChatID)
 		return updated.Enabled || updated.ChatID != ""
+	})
+	return updated, err
+}
+
+func UpdateBotTrace(path, botID string, update func(*TraceConfig)) (TraceConfig, error) {
+	updated := defaultTraceConfig()
+	err := updateBotSubConfig(path, botID, "trace", &updated, func() bool {
+		if update != nil {
+			update(&updated)
+		}
+		updated = normalizeTraceConfig(updated)
+		return true
 	})
 	return updated, err
 }
@@ -1019,6 +1076,7 @@ func normalize(cfg *Config) error {
 		}
 		bot.BotOpenID = strings.TrimSpace(bot.BotOpenID)
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
+		bot.Trace = normalizeTraceConfig(bot.Trace)
 		bot.DriveComment.TraceChatID = strings.TrimSpace(bot.DriveComment.TraceChatID)
 		bot.WikiTrace.ChatID = strings.TrimSpace(bot.WikiTrace.ChatID)
 		bot.AppSecret.normalize()
@@ -1046,6 +1104,20 @@ func normalize(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+func normalizeTraceConfig(cfg TraceConfig) TraceConfig {
+	if cfg.RetentionDays <= 0 {
+		cfg.RetentionDays = defaultTraceConfig().RetentionDays
+	}
+	if cfg.Disabled {
+		cfg.Enabled = false
+		return cfg
+	}
+	if !cfg.Enabled {
+		cfg.Enabled = true
+	}
+	return cfg
 }
 
 func normalizeAgentList(agentList []NamedAgentConfig) ([]NamedAgentConfig, error) {

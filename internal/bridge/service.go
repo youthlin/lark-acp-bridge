@@ -39,6 +39,8 @@ type serviceStores struct {
 	scheduleMessageSenders map[string]scheduledTaskMessageSender
 	scheduleStreams        map[string]scheduledTaskStreamStarter
 	usageStores            map[string]*TokenUsageStore
+	traceStoreMu           sync.RWMutex
+	traceStores            map[string]*traceStore
 }
 
 type serviceOutbounds struct {
@@ -88,6 +90,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
 			scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
 			usageStores:            make(map[string]*TokenUsageStore),
+			traceStores:            make(map[string]*traceStore),
 		},
 		serviceOutbounds: serviceOutbounds{
 			outbounds: make(map[string]feishu.Outbound),
@@ -138,6 +141,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 				workspaceLocalPath(bot.Workspace, "token_usage.json"),
 				workspaceLegacyPath(bot.Workspace, "token_usage.json"),
 			)
+			s.setTraceStore(bot.ID, newTraceStore(bot.Workspace, bot.Trace))
 		}
 	}
 	if store != nil {

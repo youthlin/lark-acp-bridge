@@ -627,9 +627,14 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		return
 	}
 	s.markWikiStarted(key)
+	prompt := wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{}))
 	trace := s.wikiTraceObserver(session)
 	trace.start(ctx)
-	result, err := s.runtime.Prompt(ctx, session, agent, wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{})), wikiTracePromptOptions(trace))
+	recorder := s.newTraceRecorder(session, prompt)
+	result, err := s.runtime.Prompt(ctx, session, agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
+	if recorder != nil {
+		recorder.Complete(result, err)
+	}
 	trace.complete(ctx, result, err)
 	finish()
 	s.markWikiFinished(key, session, result, err)
@@ -675,9 +680,14 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 		}
 	}()
 	s.markWikiStarted(key)
+	prompt := wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{}))
 	trace := s.wikiTraceObserver(pending.session)
 	trace.start(ctx)
-	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{})), wikiTracePromptOptions(trace))
+	recorder := s.newTraceRecorder(pending.session, prompt)
+	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
+	if recorder != nil {
+		recorder.Complete(result, err)
+	}
 	trace.complete(ctx, result, err)
 	s.markWikiFinished(key, pending.session, result, err)
 }

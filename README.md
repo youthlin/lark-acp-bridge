@@ -308,6 +308,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/help`：查看命令。
 - `/status`：查看服务和当前会话映射。
 - `/card`：打开当前聊天全览卡，在一张飞书 Card 2.0 中查看当前会话、运行状态、历史会话、agent/model/mode、at 响应策略、知识沉淀和展示配置，并提供新会话、用量、帮助等快捷按钮。
+- `/trace`、`/trace on [7d]`、`/trace off`：查看或设置本地 ACP JSONL trace。trace 默认开启，文件写入当前 bot workspace 的 `.local/traces/<acp_session_id>.jsonl`，每个 ACP session 一个文件，每行一条记录；`/trace on 14d` 可调整本地保留期。它覆盖普通 IM prompt、静默/队列/循环类 prompt、定时任务、云文档评论和自动知识沉淀等进入 `session/prompt` 的执行路径。记录类型包括 `user`（bridge 发给 ACP agent 的完整 prompt）、`assistant`（ACP 上报的 `agent_message`/`agent_message_chunk` 聚合结果）、`thought`、`plan`、`status`、`usage`、`tool`（按 `tool_call_id` 聚合输入/输出）以及 `result`/`error`。tool 记录会把常用字段提升到顶层；当原始 `session/update` 只重复这些字段时，会省略 `raw_update`。trace 是 bridge 侧旁路观察，只记录 ACP 协议可见内容；如果 ACP server 内部再改写真实模型请求、注入系统提示/工具 schema/上下文，或执行没有通过 `session/update` 上报的内部调用，bridge 无法还原 provider 级完整请求。已有旧 JSONL 文件不会迁移。
 - `/agent`：查看当前聊天默认使用的 ACP agent 和可用 agent 列表。
 - `/agent <name>`：把当前聊天默认 ACP agent 切换为 `agent_list[].name`。切换后 `/new` 会使用新的默认 agent；如果当前已有会话仍属于旧 agent，下一条普通消息也会自动基于当前 `cwd` 创建新 agent 的 ACP session。
 - `/session list`：列出当前聊天里的历史 ACP 会话，序号从 1 开始，`*` 表示当前会话。

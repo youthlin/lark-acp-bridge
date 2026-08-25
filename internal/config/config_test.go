@@ -100,6 +100,68 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if cfg.MessageReaction {
 		t.Fatal("config.example.json should keep message_reaction disabled by default")
 	}
+	if len(cfg.Bots) == 0 || !cfg.Bots[0].Trace.Enabled || cfg.Bots[0].Trace.RetentionDays != 7 {
+		t.Fatalf("config.example.json trace = %+v, want enabled with 7d retention", cfg.Bots[0].Trace)
+	}
+}
+
+func TestLoadDefaultTraceEnabledForOldConfig(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_xxx",
+      "app_secret": {"source": "file", "path": "$HOME/.lark-acp-bridge/secrets/default.appsecret"},
+      "workspace": "` + filepath.ToSlash(tmp) + `"
+    }
+  ],
+  "agent_list": [
+    {"name": "traex", "command": "traex", "args": ["acp", "serve"], "default_cwd": "` + filepath.ToSlash(tmp) + `"}
+  ]
+}
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Bots[0].Trace.Enabled || cfg.Bots[0].Trace.RetentionDays != 7 {
+		t.Fatalf("Trace = %+v, want default enabled 7d", cfg.Bots[0].Trace)
+	}
+}
+
+func TestLoadTraceExplicitDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.json")
+	data := []byte(`{
+  "bots": [
+    {
+      "id": "default",
+      "app_id": "cli_xxx",
+      "app_secret": {"source": "file", "path": "$HOME/.lark-acp-bridge/secrets/default.appsecret"},
+      "workspace": "` + filepath.ToSlash(tmp) + `",
+      "trace": {"enabled": false, "retention_days": 3}
+    }
+  ],
+  "agent_list": [
+    {"name": "traex", "command": "traex", "args": ["acp", "serve"], "default_cwd": "` + filepath.ToSlash(tmp) + `"}
+  ]
+}
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Bots[0].Trace.Enabled || !cfg.Bots[0].Trace.Disabled || cfg.Bots[0].Trace.RetentionDays != 3 {
+		t.Fatalf("Trace = %+v, want explicit disabled 3d", cfg.Bots[0].Trace)
+	}
 }
 
 func TestLoadExpandsHomePath(t *testing.T) {

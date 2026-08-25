@@ -1,0 +1,794 @@
+package bridge
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
+	"github.com/youthlin/lark-acp-bridge/internal/config"
+)
+
+const traceDirName = "traces"
+
+var traceFileSafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+type traceStore struct {
+	dir           string
+	retention     time.Duration
+	mu            sync.Mutex
+	lastPrunedDay string
+}
+
+type traceRecord struct {
+	Timestamp   time.Time       `json:"timestamp"`
+	Type        string          `json:"type"`
+	BotID       string          `json:"bot_id,omitempty"`
+	Source      string          `json:"source,omitempty"`
+	MainID      string          `json:"main_id,omitempty"`
+	SubID       string          `json:"sub_id,omitempty"`
+	SessionID   string          `json:"session_id,omitempty"`
+	AgentName   string          `json:"agent_name,omitempty"`
+	Cwd         string          `json:"cwd,omitempty"`
+	Content     string          `json:"content,omitempty"`
+	ToolCallID  string          `json:"tool_call_id,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Status      string          `json:"status,omitempty"`
+	Input       json.RawMessage `json:"input,omitempty"`
+	Output      json.RawMessage `json:"output,omitempty"`
+	Entries     []acp.PlanEntry `json:"entries,omitempty"`
+	Used        int64           `json:"used,omitempty"`
+	Size        int64           `json:"size,omitempty"`
+	Cost        *acp.UsageCost  `json:"cost,omitempty"`
+	UpdateKind  string          `json:"update_kind,omitempty"`
+	StopReason  string          `json:"stop_reason,omitempty"`
+	Usage       acp.TokenUsage  `json:"usage,omitzero"`
+	TraeUsage   any             `json:"trae_usage,omitempty"`
+	RawUpdate   json.RawMessage `json:"raw_update,omitempty"`
+	RawResult   json.RawMessage `json:"raw_result,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Interrupted bool            `json:"interrupted,omitempty"`
+}
+
+func newTraceStore(workspace string, cfg config.TraceConfig) *traceStore {
+	workspace = strings.TrimSpace(workspace)
+	cfg = effectiveTraceConfig(cfg)
+	if workspace == "" || !cfg.Enabled {
+		return nil
+	}
+	if expanded, err := config.ExpandPath(workspace); err == nil {
+		workspace = expanded
+	} else {
+		slog.Warn("展开 ACP trace workspace 失败", "workspace", workspace, "错误", err)
+	}
+	return &traceStore{
+		dir:       workspaceLocalPath(workspace, traceDirName),
+		retention: time.Duration(cfg.RetentionDays) * 24 * time.Hour,
+	}
+}
+
+func effectiveTraceConfig(cfg config.TraceConfig) config.TraceConfig {
+	if cfg.RetentionDays <= 0 {
+		cfg.RetentionDays = 7
+	}
+	if cfg.Disabled {
+		cfg.Enabled = false
+		return cfg
+	}
+	if !cfg.Enabled {
+		cfg.Enabled = true
+	}
+	return cfg
+}
+
+func (s *traceStore) Append(session Session, record traceRecord) error {
+	if s == nil {
+		return nil
+	}
+	record = normalizeTraceRecord(session, record)
+	if strings.TrimSpace(record.Type) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		return fmt.Errorf("创建 trace 目录: %w", err)
+	}
+	s.pruneLocked(time.Now())
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("编码 trace 记录: %w", err)
+	}
+	data = append(data, '\n')
+	file, err := os.OpenFile(s.sessionPath(session), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("打开 trace 文件: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("写入 trace 文件: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭 trace 文件: %w", err)
+	}
+	return nil
+}
+
+func (s *traceStore) pruneLocked(now time.Time) {
+	if s == nil || s.retention <= 0 || now.IsZero() {
+		return
+	}
+	day := now.Format("2006-01-02")
+	if s.lastPrunedDay == day {
+		return
+	}
+	s.lastPrunedDay = day
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return
+	}
+	cutoff := now.Add(-s.retention)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func (s *traceStore) sessionPath(session Session) string {
+	sessionID := strings.TrimSpace(session.ACPSessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(session.Title)
+	}
+	if sessionID == "" {
+		sessionID = session.Key.BotID + "-" + session.Key.MainID + "-" + session.Key.SubID
+	}
+	return filepath.Join(s.dir, traceSafeFileName(sessionID)+".jsonl")
+}
+
+func normalizeTraceRecord(session Session, record traceRecord) traceRecord {
+	if record.Timestamp.IsZero() {
+		record.Timestamp = time.Now()
+	}
+	record.Type = strings.TrimSpace(record.Type)
+	record.BotID = strings.TrimSpace(firstNonEmpty(record.BotID, session.Key.BotID))
+	record.Source = strings.TrimSpace(firstNonEmpty(record.Source, session.Key.Source))
+	record.MainID = strings.TrimSpace(firstNonEmpty(record.MainID, session.Key.MainID, session.Key.ChatID))
+	record.SubID = strings.TrimSpace(firstNonEmpty(record.SubID, session.Key.SubID))
+	record.SessionID = strings.TrimSpace(firstNonEmpty(record.SessionID, session.ACPSessionID))
+	record.AgentName = strings.TrimSpace(firstNonEmpty(record.AgentName, session.AgentName))
+	record.Cwd = strings.TrimSpace(firstNonEmpty(record.Cwd, session.Cwd))
+	record.ToolCallID = strings.TrimSpace(record.ToolCallID)
+	record.Name = strings.TrimSpace(record.Name)
+	record.Kind = strings.TrimSpace(record.Kind)
+	record.Status = strings.TrimSpace(record.Status)
+	record.UpdateKind = strings.TrimSpace(record.UpdateKind)
+	record.StopReason = strings.TrimSpace(record.StopReason)
+	record.Error = strings.TrimSpace(record.Error)
+	return record
+}
+
+func traceSafeFileName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown-session"
+	}
+	value = traceFileSafeChars.ReplaceAllString(value, "_")
+	value = strings.Trim(value, "._-")
+	if value == "" {
+		return "unknown-session"
+	}
+	if len(value) > 160 {
+		value = value[:160]
+	}
+	return value
+}
+
+type traceRecorder struct {
+	store        *traceStore
+	session      Session
+	assistantMu  sync.Mutex
+	assistant    strings.Builder
+	assistantSet bool
+	toolMu       sync.Mutex
+	tools        map[string]*traceToolAggregate
+	toolSequence int
+	updateMu     sync.Mutex
+	update       *traceUpdateAggregate
+}
+
+type traceToolAggregate struct {
+	id     string
+	name   string
+	kind   string
+	status string
+	input  json.RawMessage
+	output json.RawMessage
+	raw    json.RawMessage
+	rawSet bool
+}
+
+type traceUpdateAggregate struct {
+	key    string
+	record traceRecord
+}
+
+func newTraceRecorder(store *traceStore, session Session, prompt string) *traceRecorder {
+	if store == nil {
+		return nil
+	}
+	recorder := &traceRecorder{
+		store:   store,
+		session: session,
+		tools:   make(map[string]*traceToolAggregate),
+	}
+	recorder.append(traceRecord{Type: "user", Content: prompt})
+	return recorder
+}
+
+func (s *Service) traceStoreForSession(session Session) *traceStore {
+	if s == nil {
+		return nil
+	}
+	s.traceStoreMu.RLock()
+	defer s.traceStoreMu.RUnlock()
+	if s.traceStores == nil {
+		return nil
+	}
+	botID := strings.TrimSpace(session.Key.BotID)
+	if store, ok := s.traceStores[botID]; ok {
+		return store
+	}
+	return s.traceStores[""]
+}
+
+func (s *Service) setTraceStore(botID string, store *traceStore) {
+	if s == nil {
+		return
+	}
+	s.traceStoreMu.Lock()
+	defer s.traceStoreMu.Unlock()
+	if s.traceStores == nil {
+		s.traceStores = make(map[string]*traceStore)
+	}
+	s.traceStores[strings.TrimSpace(botID)] = store
+}
+
+func (s *Service) newTraceRecorder(session Session, prompt string) *traceRecorder {
+	return newTraceRecorder(s.traceStoreForSession(session), session, prompt)
+}
+
+func tracePromptOptions(recorder *traceRecorder, opts acp.PromptOptions) acp.PromptOptions {
+	if recorder == nil {
+		return opts
+	}
+	onUpdate := opts.OnUpdate
+	opts.OnUpdate = func(update acp.PromptUpdate) {
+		recorder.OnUpdate(update)
+		if onUpdate != nil {
+			onUpdate(update)
+		}
+	}
+	return opts
+}
+
+func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
+	if r == nil {
+		return
+	}
+	u := update.Update
+	kind := promptUpdateKind(update)
+	if chunk, ok := promptUpdateChunk(update); ok {
+		switch chunk.Target {
+		case promptChunkTargetText:
+			r.flushProcessUpdates()
+			r.appendAssistant(chunk.Text)
+		case promptChunkTargetThought:
+			r.flushAssistant()
+			r.recordProcessChunk("thought", kind, u, chunk.Text)
+		case promptChunkTargetPlan:
+			r.flushAssistant()
+			r.recordProcessChunk("plan", kind, u, chunk.Text)
+		case promptChunkTargetTool:
+			r.flushAssistant()
+			r.flushProcessUpdates()
+			r.recordToolChunk(kind, u, chunk.Text)
+		default:
+			r.flushAssistant()
+			r.recordProcessChunk(traceRecordTypeForUpdate(kind), kind, u, chunk.Text)
+		}
+		return
+	}
+	if isToolPromptUpdateKind(kind) {
+		r.flushAssistant()
+		r.flushProcessUpdates()
+		r.recordToolUpdate(kind, u)
+		return
+	}
+	switch kind {
+	case "agent_message", "assistant_message", "message":
+		text := traceFirstNonBlank(u.Message, traceContentText(u.Content), traceRawText(u.Raw))
+		if text != "" {
+			r.flushProcessUpdates()
+			r.appendAssistant(text)
+			r.flushAssistant()
+		}
+		if text == "" || traceContentIsNonText(u.Content) {
+			r.flushAssistant()
+			r.recordProcessUpdate("update", kind, u)
+		}
+	case "plan":
+		r.flushAssistant()
+		r.recordProcessUpdate("plan", kind, u)
+	case "thought", "reasoning":
+		r.flushAssistant()
+		r.recordProcessUpdate("thought", kind, u)
+	case "status", "progress":
+		r.flushAssistant()
+		r.recordProcessUpdate("status", kind, u)
+	case "usage_update":
+		r.flushAssistant()
+		r.recordProcessUpdate("usage", kind, u)
+	default:
+		if shouldTraceRawUpdate(kind, u) {
+			r.flushAssistant()
+			r.recordProcessUpdate(traceRecordTypeForUpdate(kind), kind, u)
+		}
+	}
+}
+
+func (r *traceRecorder) Complete(result acp.PromptResult, err error) {
+	if r == nil {
+		return
+	}
+	r.flushProcessUpdates()
+	r.flushTools()
+	r.flushAssistant()
+	if !r.hasAssistant() && strings.TrimSpace(result.Text) != "" {
+		r.append(traceRecord{Type: "assistant", Content: result.Text})
+	}
+	if err != nil {
+		r.append(traceRecord{Type: "error", Error: err.Error()})
+	}
+	if promptResultHasUsageDetail(result) || len(result.Raw) > 0 || strings.TrimSpace(result.StopReason) != "" {
+		record := traceRecord{
+			Type:       "result",
+			StopReason: result.StopReason,
+			Usage:      result.Usage,
+			RawResult:  append(json.RawMessage(nil), result.Raw...),
+		}
+		if result.Meta.TraeTokenUsage != nil {
+			record.TraeUsage = result.Meta.TraeTokenUsage
+		}
+		r.append(record)
+	}
+}
+
+func (r *traceRecorder) Interrupted(reason string) {
+	if r == nil {
+		return
+	}
+	r.flushProcessUpdates()
+	r.flushTools()
+	r.flushAssistant()
+	r.append(traceRecord{Type: "error", Error: reason, Interrupted: true})
+}
+
+func (r *traceRecorder) recordToolChunk(kind string, u acp.SessionUpdate, text string) {
+	if text == "" {
+		return
+	}
+	id := strings.TrimSpace(u.ToolCallID)
+	r.toolMu.Lock()
+	if id == "" {
+		r.toolSequence++
+		id = fmt.Sprintf("tool-%d", r.toolSequence)
+	}
+	tool := r.tools[id]
+	if tool == nil {
+		tool = &traceToolAggregate{id: id}
+		r.tools[id] = tool
+	}
+	if name := toolDisplayName(u); name != "" {
+		tool.name = name
+	}
+	if u.Kind != "" {
+		tool.kind = u.Kind
+	}
+	if u.Status != "" {
+		tool.status = u.Status
+	}
+	if len(tool.output) == 0 {
+		tool.output = marshalTraceValue(text)
+	} else {
+		tool.output = appendJSONText(tool.output, text)
+	}
+	if len(u.Raw) > 0 {
+		tool.raw = append(json.RawMessage(nil), u.Raw...)
+		tool.rawSet = true
+	}
+	r.toolMu.Unlock()
+}
+
+func (r *traceRecorder) recordToolUpdate(kind string, u acp.SessionUpdate) {
+	id := strings.TrimSpace(u.ToolCallID)
+	r.toolMu.Lock()
+	if id == "" {
+		r.toolSequence++
+		id = fmt.Sprintf("tool-%d", r.toolSequence)
+	}
+	tool := r.tools[id]
+	if tool == nil {
+		tool = &traceToolAggregate{id: id}
+		r.tools[id] = tool
+	}
+	if name := toolDisplayName(u); name != "" {
+		tool.name = name
+	}
+	if u.Kind != "" {
+		tool.kind = u.Kind
+	}
+	if u.Status != "" {
+		tool.status = u.Status
+	}
+	if len(u.RawInput) > 0 {
+		tool.input = append(json.RawMessage(nil), u.RawInput...)
+	}
+	if len(u.RawOutput) > 0 {
+		tool.output = append(json.RawMessage(nil), u.RawOutput...)
+	}
+	if len(u.Raw) > 0 {
+		raw := append(json.RawMessage(nil), u.Raw...)
+		if !rawUpdateIsRedundantToolUpdate(raw, tool.input, tool.output) {
+			tool.raw = raw
+			tool.rawSet = true
+		} else if !tool.rawSet {
+			tool.raw = nil
+		}
+	}
+	if strings.Contains(kind, "output") && len(tool.output) == 0 {
+		if text := traceFirstNonBlank(u.Message, traceContentText(u.Content), traceRawText(u.Raw)); text != "" {
+			tool.output = marshalTraceValue(text)
+		}
+	}
+	complete := toolTraceComplete(kind, tool.status)
+	if complete {
+		delete(r.tools, id)
+	}
+	record := traceToolRecord(tool)
+	r.toolMu.Unlock()
+	if complete {
+		r.append(record)
+	}
+}
+
+func (r *traceRecorder) flushTools() {
+	if r == nil {
+		return
+	}
+	r.toolMu.Lock()
+	tools := make([]*traceToolAggregate, 0, len(r.tools))
+	for _, tool := range r.tools {
+		tools = append(tools, tool)
+	}
+	r.tools = make(map[string]*traceToolAggregate)
+	r.toolMu.Unlock()
+	for _, tool := range tools {
+		r.append(traceToolRecord(tool))
+	}
+}
+
+func traceToolRecord(tool *traceToolAggregate) traceRecord {
+	if tool == nil {
+		return traceRecord{Type: "tool"}
+	}
+	record := traceRecord{
+		Type:       "tool",
+		ToolCallID: tool.id,
+		Name:       tool.name,
+		Kind:       tool.kind,
+		Status:     tool.status,
+		Input:      append(json.RawMessage(nil), tool.input...),
+		Output:     append(json.RawMessage(nil), tool.output...),
+	}
+	if tool.rawSet {
+		record.RawUpdate = append(json.RawMessage(nil), tool.raw...)
+	}
+	return record
+}
+
+func rawUpdateIsRedundantToolUpdate(raw json.RawMessage, input json.RawMessage, output json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	for key, value := range fields {
+		if len(bytes.TrimSpace(value)) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			continue
+		}
+		switch key {
+		case "sessionUpdate", "toolCallId", "name", "title", "kind", "status":
+			continue
+		case "rawInput":
+			if !rawMessageEqual(value, input) {
+				return false
+			}
+		case "rawOutput":
+			if !rawMessageEqual(value, output) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func rawMessageEqual(a json.RawMessage, b json.RawMessage) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	var av any
+	var bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		return string(a) == string(b)
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return string(a) == string(b)
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
+func (r *traceRecorder) recordProcessChunk(recordType string, kind string, u acp.SessionUpdate, text string) {
+	if text == "" {
+		return
+	}
+	key := traceUpdateKey(recordType, kind)
+	var previous *traceUpdateAggregate
+	r.updateMu.Lock()
+	if r.update == nil || r.update.key != key {
+		previous = r.update
+		record := traceProcessRecord(recordType, kind, u)
+		record.Content = ""
+		r.update = &traceUpdateAggregate{key: key, record: record}
+	}
+	r.update.record.Content += text
+	if r.update.record.RawUpdate == nil && len(u.Raw) > 0 && !isPromptChunkKind(kind) {
+		r.update.record.RawUpdate = append(json.RawMessage(nil), u.Raw...)
+	}
+	r.updateMu.Unlock()
+	r.appendProcessAggregate(previous)
+}
+
+func (r *traceRecorder) recordProcessUpdate(recordType string, kind string, u acp.SessionUpdate) {
+	r.flushProcessUpdates()
+	record := traceProcessRecord(recordType, kind, u)
+	if strings.TrimSpace(record.Content) == "" && len(record.Entries) == 0 && len(record.RawUpdate) == 0 && record.Status == "" && record.Used == 0 && record.Size == 0 && record.Cost == nil {
+		return
+	}
+	if isPromptChunkKind(kind) {
+		r.recordProcessChunk(recordType, kind, u, record.Content)
+		return
+	}
+	r.append(record)
+}
+
+func (r *traceRecorder) flushProcessUpdates() {
+	if r == nil {
+		return
+	}
+	var update *traceUpdateAggregate
+	r.updateMu.Lock()
+	update = r.update
+	r.update = nil
+	r.updateMu.Unlock()
+	r.appendProcessAggregate(update)
+}
+
+func (r *traceRecorder) appendProcessAggregate(update *traceUpdateAggregate) {
+	if update == nil {
+		return
+	}
+	record := update.record
+	if strings.TrimSpace(record.Content) == "" && len(record.Entries) == 0 && len(record.RawUpdate) == 0 && record.Status == "" && record.Used == 0 && record.Size == 0 && record.Cost == nil {
+		return
+	}
+	r.append(record)
+}
+
+func traceProcessRecord(recordType string, kind string, u acp.SessionUpdate) traceRecord {
+	record := traceRecord{
+		Type:       strings.TrimSpace(recordType),
+		UpdateKind: strings.TrimSpace(kind),
+		Name:       traceFirstNonBlank(u.Name, rawName(u.Raw)),
+		Status:     strings.TrimSpace(u.Status),
+		Content:    traceFirstNonBlank(u.Message, traceContentText(u.Content), tracePlanUpdateText(u), traceRawText(u.Raw)),
+		Used:       u.Used,
+		Size:       u.Size,
+		Cost:       u.Cost,
+	}
+	if len(u.PlanEntries) > 0 {
+		record.Entries = append([]acp.PlanEntry(nil), u.PlanEntries...)
+	}
+	if len(u.Raw) > 0 && !isPromptChunkKind(kind) {
+		record.RawUpdate = append(json.RawMessage(nil), u.Raw...)
+	}
+	return record
+}
+
+func traceRecordTypeForUpdate(kind string) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch {
+	case isThoughtUpdateKind(kind):
+		return "thought"
+	case isPlanUpdateKind(kind):
+		return "plan"
+	case kind == "status" || kind == "progress" || promptUpdateKindHasToken(kind, "status") || promptUpdateKindHasToken(kind, "progress"):
+		return "status"
+	case kind == "usage_update":
+		return "usage"
+	case kind == "agent_message" || kind == "assistant_message" || kind == "message" || strings.Contains(kind, "message"):
+		return "assistant"
+	default:
+		return "update"
+	}
+}
+
+func shouldTraceRawUpdate(kind string, u acp.SessionUpdate) bool {
+	if strings.TrimSpace(kind) == "" {
+		return len(u.Raw) > 0
+	}
+	if kind == "usage_update" {
+		return true
+	}
+	if isACPStateUpdate(u) {
+		return false
+	}
+	return len(u.Raw) > 0 || strings.TrimSpace(u.Message) != "" || u.Content != nil
+}
+
+func (r *traceRecorder) appendAssistant(text string) {
+	if r == nil || text == "" {
+		return
+	}
+	r.assistantMu.Lock()
+	r.assistant.WriteString(text)
+	r.assistantMu.Unlock()
+}
+
+func (r *traceRecorder) flushAssistant() {
+	if r == nil {
+		return
+	}
+	r.assistantMu.Lock()
+	content := r.assistant.String()
+	if strings.TrimSpace(content) != "" {
+		r.assistant.Reset()
+		r.assistantSet = true
+	} else {
+		r.assistant.Reset()
+		content = ""
+	}
+	r.assistantMu.Unlock()
+	if content != "" {
+		r.append(traceRecord{Type: "assistant", Content: content})
+	}
+}
+
+func (r *traceRecorder) hasAssistant() bool {
+	if r == nil {
+		return false
+	}
+	r.assistantMu.Lock()
+	defer r.assistantMu.Unlock()
+	return r.assistantSet || strings.TrimSpace(r.assistant.String()) != ""
+}
+
+func traceUpdateKey(recordType string, kind string) string {
+	return strings.TrimSpace(recordType) + ":" + strings.TrimSpace(kind)
+}
+
+func appendJSONText(raw json.RawMessage, text string) json.RawMessage {
+	var current string
+	if err := json.Unmarshal(raw, &current); err == nil {
+		return marshalTraceValue(current + text)
+	}
+	return raw
+}
+
+func traceFirstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func traceContentText(content *acp.ContentBlock) string {
+	if content == nil {
+		return ""
+	}
+	if content.Type != "" && content.Type != "text" && content.Type != "output_text" {
+		return ""
+	}
+	return content.Text
+}
+
+func traceContentIsNonText(content *acp.ContentBlock) bool {
+	if content == nil {
+		return false
+	}
+	return content.Type != "" && content.Type != "text" && content.Type != "output_text"
+}
+
+func tracePlanUpdateText(u acp.SessionUpdate) string {
+	if len(u.PlanEntries) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(u.PlanEntries))
+	for _, entry := range u.PlanEntries {
+		content := traceFirstNonBlank(entry.ActiveForm, metaString(entry.Meta, "activeForm"), entry.Content)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		lines = append(lines, "- "+planStatusIcon(entry.Status)+" "+content)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func traceRawText(raw json.RawMessage) string {
+	return rawTextValue(rawValue(raw))
+}
+
+func toolTraceComplete(kind string, status string) bool {
+	if strings.Contains(kind, "output") || strings.Contains(kind, "error") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "success", "succeeded", "done", "failed", "failure", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func marshalTraceValue(value any) json.RawMessage {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func (r *traceRecorder) append(record traceRecord) {
+	if r == nil || r.store == nil {
+		return
+	}
+	if err := r.store.Append(r.session, record); err != nil {
+		slog.Warn("写入 ACP trace 失败", "session", r.session.ACPSessionID, "错误", err)
+	}
+}

@@ -203,6 +203,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/trace",
+		helpLines: []string{"/trace [status]|on [7d]|off - 查看或设置本地 ACP JSONL trace"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleTraceCommand(ctx, text, msg)
+		},
+	},
+	{
 		name:      "/usage",
 		helpLines: []string{"/usage [day|week|month|year] - 查看按 agent 和模型聚合的 token 用量"},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
