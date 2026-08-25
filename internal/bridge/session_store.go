@@ -321,6 +321,44 @@ func (s *SessionStore) UpdateCurrentSession(key SessionKey, acpSessionID string,
 	return s.writeOrRestoreLocked(snapshot)
 }
 
+func (s *SessionStore) ResetWorkspacePromptedForAllSessions() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	changed := 0
+	for _, session := range s.sessions {
+		if session.WorkspacePrompted {
+			changed++
+		}
+	}
+	for _, session := range s.history {
+		if session.WorkspacePrompted {
+			changed++
+		}
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	snapshot := s.snapshotLocked()
+	for key, session := range s.sessions {
+		if !session.WorkspacePrompted {
+			continue
+		}
+		session = cloneSession(session)
+		session.WorkspacePrompted = false
+		s.sessions[key] = session
+	}
+	for i, session := range s.history {
+		if !session.WorkspacePrompted {
+			continue
+		}
+		session = cloneSession(session)
+		session.WorkspacePrompted = false
+		s.history[i] = session
+	}
+	return changed, s.writeOrRestoreLocked(snapshot)
+}
+
 func (s *SessionStore) BindMessageToSession(binding MessageSessionBinding) (MessageSessionBinding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

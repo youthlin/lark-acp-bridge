@@ -232,7 +232,7 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	if cleanup, ok := s.startIncomingProcessingReaction(ctx, incoming.msg); ok {
 		defer cleanup()
 	}
-	if errText := s.ensureIncomingWorkspace(ctx, incoming.msg); errText != "" {
+	if errText := s.ensureIncomingWorkspace(ctx, incoming.msg, incoming.text); errText != "" {
 		return errText, nil
 	}
 	if incoming.promptText == "" {
@@ -314,12 +314,32 @@ func (s *Service) startIncomingProcessingReaction(ctx context.Context, msg feish
 	return s.startProcessingReaction(ctx, msg)
 }
 
-func (s *Service) ensureIncomingWorkspace(ctx context.Context, msg feishu.Message) string {
-	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
+func (s *Service) ensureIncomingWorkspace(ctx context.Context, msg feishu.Message, text string) string {
+	if isWikiUpgradeCommand(text) {
+		return ""
+	}
+	status, err := ensureWorkspace(msg.Workspace, msg.BotID)
+	if err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
 		return "初始化 workspace 失败：" + err.Error()
 	}
+	if len(status.UpgradedFiles) > 0 {
+		s.resetWorkspacePromptedAfterUpgrade(ctx, msg, status.UpgradedFiles)
+	}
 	return ""
+}
+
+func (s *Service) resetWorkspacePromptedAfterUpgrade(ctx context.Context, msg feishu.Message, files []string) {
+	store := s.storeForMessage(msg)
+	if store == nil {
+		return
+	}
+	session, ok := store.Get(sessionKeyFromMessage(msg))
+	if !ok || !session.WorkspacePrompted {
+		return
+	}
+	s.resetWorkspacePrompted(ctx, msg, session)
+	slog.InfoContext(ctx, "workspace 已升级，重置当前会话 workspace prompt 状态", "session", session.ACPSessionID, "files", files)
 }
 
 func (s *Service) handleSlashCommandMessage(ctx context.Context, msg feishu.Message, text string) string {

@@ -118,6 +118,11 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	}
 }
 
+func isWikiUpgradeCommand(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) >= 2 && strings.EqualFold(fields[0], "/wiki") && strings.EqualFold(fields[1], "upgrade")
+}
+
 func wikiCommandUsage() string {
 	return "可用命令：/wiki on、/wiki off、/wiki status、/wiki lint、/wiki upgrade、/wiki interval <duration> 或 /wiki trace on|off|new。"
 }
@@ -342,7 +347,8 @@ func (s *Service) runWikiUpgrade(ctx context.Context, msg feishu.Message) string
 		return "当前会话正在忙碌，稍后再执行 /wiki upgrade。"
 	}
 	defer finish()
-	if _, err := ensureWorkspace(workspace, msg.BotID); err != nil {
+	workspaceStatus, err := ensureWorkspaceWithOptions(workspace, msg.BotID, ensureWorkspaceOptions{})
+	if err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", workspace, "错误", err)
 		return "初始化 workspace 失败：" + err.Error()
 	}
@@ -350,6 +356,9 @@ func (s *Service) runWikiUpgrade(ctx context.Context, msg feishu.Message) string
 	if err != nil {
 		slog.ErrorContext(ctx, "升级 workspace wiki 规则失败", "workspace", workspace, "错误", err)
 		return "wiki upgrade 失败：" + err.Error()
+	}
+	for _, name := range workspaceStatus.UpgradedFiles {
+		status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, name)
 	}
 	if err := appendWorkspaceUpgradeLog(workspace, status); err != nil {
 		slog.ErrorContext(ctx, "记录 workspace wiki upgrade 日志失败", "workspace", workspace, "错误", err)

@@ -459,6 +459,21 @@ func TestWikiUpgradeUpdatesExistingWorkspaceWithoutACPSession(t *testing.T) {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
 	markWorkspaceBootstrapped(t, workspace)
+	if err := os.Remove(filepath.Join(workspace, workspaceACPTraceSkillFileName())); err != nil {
+		t.Fatalf("Remove(acp-trace skill) error = %v", err)
+	}
+	for _, name := range []string{filepath.Join("skills", "core.md"), filepath.Join("knowledge", "index.md")} {
+		path := filepath.Join(workspace, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		text := strings.ReplaceAll(string(data), "- [[acp-trace]]：通过 sid 读取 ACP JSONL trace 并整理执行过程。\n", "")
+		text = strings.ReplaceAll(text, "| `"+workspaceACPTraceSkillFileName()+"` | ACP trace 执行轨迹读取流程 |\n", "")
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+	}
 	knowledgeAgents := filepath.Join(workspace, "knowledge", "AGENTS.md")
 	if err := os.WriteFile(knowledgeAgents, []byte("# Existing Knowledge Rules\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(knowledge/AGENTS.md) error = %v", err)
@@ -474,7 +489,7 @@ func TestWikiUpgradeUpdatesExistingWorkspaceWithoutACPSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(/wiki upgrade) error = %v", err)
 	}
-	if !strings.Contains(reply, "wiki upgrade 完成") || !strings.Contains(reply, "knowledge/AGENTS.md") {
+	if !strings.Contains(reply, "wiki upgrade 完成") || !strings.Contains(reply, "knowledge/AGENTS.md") || !strings.Contains(reply, workspaceACPTraceSkillFileName()) {
 		t.Fatalf("reply = %q, want updated files", reply)
 	}
 	if got := rt.promptCallCount(); got != 0 {
@@ -494,6 +509,9 @@ func TestWikiUpgradeUpdatesExistingWorkspaceWithoutACPSession(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "同步 bridge 当前知识库维护约束") {
 		t.Fatalf("knowledge/log.md = %q, want upgrade log", logData)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, workspaceACPTraceSkillFileName())); err != nil {
+		t.Fatalf("acp-trace skill should be created by /wiki upgrade: %v", err)
 	}
 }
 

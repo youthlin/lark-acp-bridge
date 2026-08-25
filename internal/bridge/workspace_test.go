@@ -32,6 +32,34 @@ func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
 	if len(status.CreatedFiles) != 0 {
 		t.Fatalf("created files = %+v, want none for existing workspace", status.CreatedFiles)
 	}
+	if len(status.UpgradedFiles) != 0 {
+		t.Fatalf("upgraded files = %+v, want none for current workspace", status.UpgradedFiles)
+	}
+}
+
+func TestEnsureWorkspaceCreatesACPTraceSkillForNewWorkspace(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace(new) error = %v", err)
+	}
+
+	for _, file := range []struct {
+		name string
+		want string
+	}{
+		{workspaceACPTraceSkillFileName(), "name: acp-trace"},
+		{filepath.Join("skills", "AGENTS.md"), workspaceBuiltinSkillsMarker},
+		{filepath.Join("skills", "core.md"), "[[acp-trace]]"},
+		{filepath.Join("knowledge", "index.md"), workspaceACPTraceSkillFileName()},
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file.name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file.name, err)
+		}
+		if !strings.Contains(string(data), file.want) {
+			t.Fatalf("%s = %q, want %q", file.name, data, file.want)
+		}
+	}
 }
 
 func TestEnsureWorkspaceRejectsEmptyPath(t *testing.T) {
@@ -193,6 +221,74 @@ func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkspaceUpgradesExistingWorkspaceWithACPTraceSkill(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: filepath.Join("skills", "AGENTS.md"), content: "# Custom Skills Rules\n"},
+		{name: filepath.Join("skills", "core.md"), content: "# Custom Skills\n\n- [[wiki]]：维护 workspace 知识库和技能库。\n"},
+		{name: filepath.Join("knowledge", "index.md"), content: "# Custom Index\n\n## L2 Skills\n\n| 文件 | 用途 |\n| --- | --- |\n"},
+		{name: filepath.Join("knowledge", "log.md"), content: "# Log\n"},
+	} {
+		path := filepath.Join(workspace, file.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(file.name), err)
+		}
+		if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
+	}
+
+	status, err := ensureWorkspace(workspace, "bot-a")
+	if err != nil {
+		t.Fatalf("ensureWorkspace(existing) error = %v", err)
+	}
+	if !slicesContains(status.CreatedFiles, workspaceACPTraceSkillFileName()) {
+		t.Fatalf("created files = %+v, want acp-trace skill file", status.CreatedFiles)
+	}
+	for _, want := range []string{
+		workspaceACPTraceSkillFileName(),
+		filepath.Join("skills", "AGENTS.md"),
+		filepath.Join("skills", "core.md"),
+		filepath.Join("knowledge", "index.md"),
+	} {
+		if !slicesContains(status.UpgradedFiles, want) {
+			t.Fatalf("upgraded files = %+v, want %s", status.UpgradedFiles, want)
+		}
+	}
+	skillsAgents, err := os.ReadFile(filepath.Join(workspace, "skills", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(skills/AGENTS.md) error = %v", err)
+	}
+	if !strings.Contains(string(skillsAgents), "# Custom Skills Rules") || !strings.Contains(string(skillsAgents), workspaceBuiltinSkillsMarker) {
+		t.Fatalf("skills/AGENTS.md = %q, want custom content plus builtin marker", skillsAgents)
+	}
+	skillData, err := os.ReadFile(filepath.Join(workspace, workspaceACPTraceSkillFileName()))
+	if err != nil {
+		t.Fatalf("ReadFile(acp-trace skill) error = %v", err)
+	}
+	if !strings.Contains(string(skillData), "最终 assistant 回复") || !strings.Contains(string(skillData), "turn_result") {
+		t.Fatalf("acp-trace skill = %q, want trace guidance", skillData)
+	}
+	logData, err := os.ReadFile(filepath.Join(workspace, "knowledge", "log.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(knowledge/log.md) error = %v", err)
+	}
+	if !strings.Contains(string(logData), "内置技能") || !strings.Contains(string(logData), workspaceACPTraceSkillFileName()) {
+		t.Fatalf("knowledge/log.md = %q, want builtin skill upgrade log", logData)
+	}
+
+	status, err = ensureWorkspace(workspace, "bot-a")
+	if err != nil {
+		t.Fatalf("second ensureWorkspace(existing) error = %v", err)
+	}
+	if len(status.UpgradedFiles) != 0 {
+		t.Fatalf("second upgraded files = %+v, want none", status.UpgradedFiles)
+	}
+}
+
 func TestWorkspaceContextPromptIgnoresEmptyWorkspace(t *testing.T) {
 	oldWd, err := os.Getwd()
 	if err != nil {
@@ -256,4 +352,13 @@ func TestWorkspacePromptForSessionInjectsWorkspaceContextAndMemoryPolicyTogether
 	if strings.Contains(normal, "Workspace Context") || strings.Contains(normal, "Workspace Memory Policy") {
 		t.Fatalf("normal prompt = %q, want no repeated workspace context or memory policy", normal)
 	}
+}
+
+func slicesContains(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }

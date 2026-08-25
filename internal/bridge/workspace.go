@@ -14,6 +14,7 @@ import (
 
 const workspaceBootstrapFile = "Bootstrap.md"
 const workspaceWikiPolicyMarker = "<!-- lark-acp-bridge:wiki-policy:v1 -->"
+const workspaceBuiltinSkillsMarker = "<!-- lark-acp-bridge:builtin-skills:v1 -->"
 const workspaceLocalDir = ".local"
 
 var workspaceLocalStateEntries = []string{
@@ -40,8 +41,9 @@ func sessionStoreSiblingPath(path string, name string) string {
 }
 
 type WorkspaceStatus struct {
-	Path         string
-	CreatedFiles []string
+	Path          string
+	CreatedFiles  []string
+	UpgradedFiles []string
 }
 
 type WorkspaceUpgradeStatus struct {
@@ -49,7 +51,15 @@ type WorkspaceUpgradeStatus struct {
 	UpdatedFiles []string
 }
 
+type ensureWorkspaceOptions struct {
+	recordBuiltinUpgradeLog bool
+}
+
 func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
+	return ensureWorkspaceWithOptions(path, botID, ensureWorkspaceOptions{recordBuiltinUpgradeLog: true})
+}
+
+func ensureWorkspaceWithOptions(path string, botID string, opts ensureWorkspaceOptions) (WorkspaceStatus, error) {
 	if strings.TrimSpace(path) == "" {
 		return WorkspaceStatus{}, fmt.Errorf("workspace 为空")
 	}
@@ -91,6 +101,23 @@ func ensureWorkspace(path string, botID string) (WorkspaceStatus, error) {
 			return WorkspaceStatus{}, err
 		}
 		status.CreatedFiles = append(status.CreatedFiles, workspaceBootstrapFile)
+	}
+	if hadManagedFiles {
+		builtinStatus, err := ensureWorkspaceBuiltinSkills(path)
+		if err != nil {
+			return WorkspaceStatus{}, err
+		}
+		for _, file := range status.CreatedFiles {
+			if isWorkspaceBuiltinSkillFile(file) {
+				builtinStatus.UpdatedFiles = appendUniqueString(builtinStatus.UpdatedFiles, file)
+			}
+		}
+		if opts.recordBuiltinUpgradeLog {
+			if err := appendWorkspaceUpgradeLog(path, builtinStatus); err != nil {
+				return WorkspaceStatus{}, err
+			}
+		}
+		status.UpgradedFiles = append(status.UpgradedFiles, builtinStatus.UpdatedFiles...)
 	}
 	return status, nil
 }
@@ -234,6 +261,13 @@ func upgradeWorkspaceWikiPolicy(path string) (WorkspaceUpgradeStatus, error) {
 			status.UpdatedFiles = append(status.UpdatedFiles, name)
 		}
 	}
+	builtinStatus, err := ensureWorkspaceBuiltinSkills(path)
+	if err != nil {
+		return WorkspaceUpgradeStatus{}, err
+	}
+	for _, name := range builtinStatus.UpdatedFiles {
+		status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, name)
+	}
 	return status, nil
 }
 
@@ -260,6 +294,144 @@ func appendWorkspacePolicyBlock(path string, block string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func ensureWorkspaceBuiltinSkills(path string) (WorkspaceUpgradeStatus, error) {
+	if strings.TrimSpace(path) == "" {
+		return WorkspaceUpgradeStatus{}, fmt.Errorf("workspace 为空")
+	}
+	if err := ensureWorkspaceRoot(path); err != nil {
+		return WorkspaceUpgradeStatus{}, err
+	}
+	status := WorkspaceUpgradeStatus{Path: path}
+	for _, file := range workspaceBuiltinSkillFiles() {
+		created, err := ensureWorkspaceFile(filepath.Join(path, file.name), file.content)
+		if err != nil {
+			return WorkspaceUpgradeStatus{}, fmt.Errorf("更新 workspace 文件 %s: %w", file.name, err)
+		}
+		if created {
+			status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, file.name)
+		}
+	}
+	updated, err := appendWorkspaceLineIfMissing(
+		filepath.Join(path, "skills", "AGENTS.md"),
+		workspaceBuiltinSkillsMarker,
+		workspaceSkillsUsagePolicyBlock(),
+	)
+	if err != nil {
+		return WorkspaceUpgradeStatus{}, fmt.Errorf("更新 workspace 文件 %s: %w", filepath.Join("skills", "AGENTS.md"), err)
+	}
+	if updated {
+		status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, filepath.Join("skills", "AGENTS.md"))
+	}
+	updated, err = insertWorkspaceLineBeforeIfMissing(
+		filepath.Join(path, "skills", "core.md"),
+		"[[acp-trace]]",
+		"- [[acp-trace]]：通过 sid 读取 ACP JSONL trace 并整理执行过程。",
+		"- [[wiki]]",
+	)
+	if err != nil {
+		return WorkspaceUpgradeStatus{}, fmt.Errorf("更新 workspace 文件 %s: %w", filepath.Join("skills", "core.md"), err)
+	}
+	if updated {
+		status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, filepath.Join("skills", "core.md"))
+	}
+	updated, err = insertWorkspaceLineBeforeIfMissing(
+		filepath.Join(path, "knowledge", "index.md"),
+		workspaceACPTraceSkillFileName(),
+		"| `"+workspaceACPTraceSkillFileName()+"` | ACP trace 执行轨迹读取流程 |",
+		"| `skills/wiki/SKILL.md`",
+	)
+	if err != nil {
+		return WorkspaceUpgradeStatus{}, fmt.Errorf("更新 workspace 文件 %s: %w", filepath.Join("knowledge", "index.md"), err)
+	}
+	if updated {
+		status.UpdatedFiles = appendUniqueString(status.UpdatedFiles, filepath.Join("knowledge", "index.md"))
+	}
+	return status, nil
+}
+
+func ensureWorkspaceFile(path string, content string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func appendWorkspaceLineIfMissing(path string, present string, line string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return false, err
+		}
+		data = nil
+	}
+	text := string(data)
+	if strings.Contains(text, present) {
+		return false, nil
+	}
+	next := strings.TrimRight(text, " \t\r\n")
+	if next != "" {
+		next += "\n\n"
+	}
+	next += strings.TrimSpace(line) + "\n"
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func insertWorkspaceLineBeforeIfMissing(path string, present string, line string, before string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return false, err
+		}
+		data = nil
+	}
+	text := string(data)
+	if strings.Contains(text, present) {
+		return false, nil
+	}
+	line = strings.TrimSpace(line)
+	if idx := strings.Index(text, before); idx >= 0 {
+		prefix := strings.TrimRight(text[:idx], " \t\r\n")
+		if prefix != "" {
+			prefix += "\n"
+		}
+		text = prefix + line + "\n" + text[idx:]
+	} else {
+		text = strings.TrimRight(text, " \t\r\n")
+		if text != "" {
+			text += "\n"
+		}
+		text += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
 }
 
 func workspaceKnowledgePolicyBlock() string {
@@ -302,6 +474,180 @@ func workspaceWikiSkillPolicyBlock() string {
 	}, "\n")
 }
 
+func workspaceSkillsUsagePolicyBlock() string {
+	return strings.Join([]string{
+		workspaceBuiltinSkillsMarker,
+		"",
+		"## Bridge Built-in Skills Policy",
+		"",
+		"使用 workspace 技能时还应遵守：",
+		"",
+		"1. 当用户请求命中 `skills/core.md` 中的技能名或说明时，先读取对应的 `skills/<skill-name>/SKILL.md`，再按其中步骤执行。",
+		"2. 内置技能文件由 bridge 幂等补齐；如果用户已经自定义同名文件，不要覆盖已有内容。",
+	}, "\n")
+}
+
+func workspaceKnowledgeIndexContent() string {
+	return strings.Join([]string{
+		"---",
+		"title: knowledge index",
+		"type: knowledge",
+		"tags:",
+		"- index",
+		"---",
+		"",
+		"# Index",
+		"",
+		"## L0 Memory",
+		"",
+		"| 文件 | 用途 |",
+		"| --- | --- |",
+		"| `SOUL.md` | bot 名字、角色、语气、边界和默认工作方式 |",
+		"| `MEMORY.md` | 用户信息、长期偏好和常用上下文 |",
+		"| `AGENTS.md` | 工作流程、协作约定和仓库操作规则 |",
+		"| `TOOLS.md` | 可用工具、关键路径、账号 profile 和环境约束 |",
+		"",
+		"## L1 Knowledge",
+		"",
+		"| 文件 | 用途 |",
+		"| --- | --- |",
+		"| `knowledge/AGENTS.md` | L1 写入规范 |",
+		"| `knowledge/core.md` | 知识概要入口 |",
+		"| `knowledge/index.md` | 三层文件索引 |",
+		"| `knowledge/log.md` | 知识变更日志 |",
+		"| `knowledge/lint.md` | 一致性检查提示词 |",
+		"",
+		"## L2 Skills",
+		"",
+		"| 文件 | 用途 |",
+		"| --- | --- |",
+		"| `skills/AGENTS.md` | L2 写入规范 |",
+		"| `skills/core.md` | 技能索引入口 |",
+		"| `skills/acp-trace/SKILL.md` | ACP trace 执行轨迹读取流程 |",
+		"| `skills/wiki/SKILL.md` | 知识库维护流程 |",
+		"",
+	}, "\n")
+}
+
+func workspaceSkillsAgentsContent() string {
+	return strings.Join([]string{
+		"# Skills 层规范 (L2)",
+		"",
+		"本目录存放稳定、可复用的操作流程。不要把一次性任务总结成 skill。",
+		"",
+		"## 目录结构",
+		"",
+		"- `core.md`：技能索引入口。",
+		"- `<skill-name>/SKILL.md`：单个技能定义。",
+		"",
+		"## SKILL.md 格式",
+		"",
+		"每个 skill 必须包含 YAML frontmatter：",
+		"",
+		"```markdown",
+		"---",
+		"name: <skill-name>",
+		"description: <一句话描述该 skill 的用途>",
+		"trigger: <描述什么场景下应该使用该 skill>",
+		"---",
+		"```",
+		"",
+		"正文应包含 Purpose、When to Use、Steps / Commands / Usage 等可执行说明。",
+		"",
+		workspaceSkillsUsagePolicyBlock(),
+		"",
+	}, "\n")
+}
+
+func workspaceSkillsCoreContent() string {
+	return strings.Join([]string{
+		"---",
+		"title: skills core",
+		"type: skill",
+		"tags:",
+		"- core",
+		"---",
+		"",
+		"# Skills",
+		"",
+		"## 可用技能",
+		"",
+		"- [[acp-trace]]：通过 sid 读取 ACP JSONL trace 并整理执行过程。",
+		"- [[wiki]]：维护 workspace 知识库和技能库。",
+		"",
+	}, "\n")
+}
+
+func workspaceBuiltinSkillFiles() []struct {
+	name    string
+	content string
+} {
+	return []struct {
+		name    string
+		content string
+	}{
+		{name: workspaceACPTraceSkillFileName(), content: workspaceACPTraceSkillContent()},
+	}
+}
+
+func isWorkspaceBuiltinSkillFile(name string) bool {
+	for _, file := range workspaceBuiltinSkillFiles() {
+		if file.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceACPTraceSkillFileName() string {
+	return filepath.Join("skills", "acp-trace", "SKILL.md")
+}
+
+func workspaceACPTraceSkillContent() string {
+	return strings.Join([]string{
+		"---",
+		"name: acp-trace",
+		"description: 通过 ACP session id 读取本地 JSONL trace，并还原执行过程、最终回复和关键工具调用。",
+		"trigger: 当用户提到 sid、session id、会话 id、执行轨迹、trace、查看另一个会话过程、继续某次会话结果时使用。",
+		"---",
+		"",
+		"# ACP Trace",
+		"",
+		"## Purpose",
+		"",
+		"通过用户提供的 `sid` 定位 bot workspace 本地 ACP JSONL trace，整理对应会话的执行过程、最终 assistant 回复、计划、工具调用和错误信息。",
+		"",
+		"## When to Use",
+		"",
+		"- 用户提供 `sid: xxx`，要求查看或总结这次执行。",
+		"- 用户要求查看另一个会话、某次会话、执行轨迹、trace、最终回复或工具调用。",
+		"- 用户要求基于某次执行结果继续分析，但当前会话没有那次上下文。",
+		"",
+		"## Steps",
+		"",
+		"1. 从用户消息中提取 `sid`，去掉可能的 `sid:` 前缀和首尾空白。",
+		"2. 确认目标 bot。用户明确指定 bot 时使用该 bot；未指定时先查当前 bot workspace，再按需搜索 `$HOME/.lark-acp-bridge/bots/*/.local/traces/`。",
+		"3. 优先读取 `<bot-workspace>/.local/traces/<sid>.jsonl`。如果找不到，搜索同级 trace 目录中名称包含该 sid 的 `.jsonl` 文件。",
+		"4. 按 JSONL 逐行解析；不要用纯文本拼接猜测结构。读取失败、JSON 行损坏或文件不存在时说明具体路径和错误。",
+		"5. 解释 trace 类型时遵守：",
+		"   - `user` 是 bridge 发给 ACP agent 的完整 prompt。",
+		"   - `assistant` 是 ACP 上报的 assistant 文本聚合，通常是最终回复来源。",
+		"   - `thought`、`plan`、`status`、`tool` 是执行过程。",
+		"   - `turn_result` 是 `session/prompt` 收尾元信息，不是最终回复。",
+		"   - `error` 是执行错误。",
+		"6. 默认输出高信号摘要：会话路径、用户请求、最终 assistant 回复、关键计划/工具/错误。不要整段粘贴超长 trace；用户要求细节时再展开。",
+		"7. 涉及隐私、密钥、token、cookie、app_secret 等敏感内容时只概述，不原样输出。",
+		"",
+		"## Useful Commands",
+		"",
+		"```bash",
+		"ls -lt $HOME/.lark-acp-bridge/bots/*/.local/traces/*.jsonl",
+		"rg -l '<sid>' $HOME/.lark-acp-bridge/bots/*/.local/traces",
+		"```",
+		"",
+	}, "\n")
+}
+
 func appendWorkspaceUpgradeLog(path string, status WorkspaceUpgradeStatus) error {
 	if len(status.UpdatedFiles) == 0 {
 		return nil
@@ -313,7 +659,7 @@ func appendWorkspaceUpgradeLog(path string, status WorkspaceUpgradeStatus) error
 	}
 	files := append([]string(nil), status.UpdatedFiles...)
 	slices.Sort(files)
-	line := fmt.Sprintf("[%s] 更新 workspace wiki policy 同步 bridge 当前知识库维护约束，涉及 %s", time.Now().Format("2006-01-02"), strings.Join(files, "、"))
+	line := fmt.Sprintf("[%s] 更新 workspace 同步 bridge 当前知识库维护约束和内置技能，涉及 %s", time.Now().Format("2006-01-02"), strings.Join(files, "、"))
 	text := strings.TrimRight(string(data), " \t\r\n") + "\n" + line + "\n"
 	return os.WriteFile(logPath, []byte(text), 0o644)
 }
@@ -377,7 +723,7 @@ func workspaceFiles(botID string) []struct {
 	if botID = strings.TrimSpace(botID); botID != "" {
 		profileName = "lark-acp-" + botID
 	}
-	return []struct {
+	files := []struct {
 		name    string
 		content string
 	}{
@@ -491,43 +837,8 @@ tags:
 `,
 		},
 		{
-			name: filepath.Join("knowledge", "index.md"),
-			content: `---
-title: knowledge index
-type: knowledge
-tags:
-- index
----
-
-# Index
-
-## L0 Memory
-
-| 文件 | 用途 |
-| --- | --- |
-| ` + "`SOUL.md`" + ` | bot 名字、角色、语气、边界和默认工作方式 |
-| ` + "`MEMORY.md`" + ` | 用户信息、长期偏好和常用上下文 |
-| ` + "`AGENTS.md`" + ` | 工作流程、协作约定和仓库操作规则 |
-| ` + "`TOOLS.md`" + ` | 可用工具、关键路径、账号 profile 和环境约束 |
-
-## L1 Knowledge
-
-| 文件 | 用途 |
-| --- | --- |
-| ` + "`knowledge/AGENTS.md`" + ` | L1 写入规范 |
-| ` + "`knowledge/core.md`" + ` | 知识概要入口 |
-| ` + "`knowledge/index.md`" + ` | 三层文件索引 |
-| ` + "`knowledge/log.md`" + ` | 知识变更日志 |
-| ` + "`knowledge/lint.md`" + ` | 一致性检查提示词 |
-
-## L2 Skills
-
-| 文件 | 用途 |
-| --- | --- |
-| ` + "`skills/AGENTS.md`" + ` | L2 写入规范 |
-| ` + "`skills/core.md`" + ` | 技能索引入口 |
-| ` + "`skills/wiki/SKILL.md`" + ` | 知识库维护流程 |
-`,
+			name:    filepath.Join("knowledge", "index.md"),
+			content: workspaceKnowledgeIndexContent(),
 		},
 		{
 			name: filepath.Join("knowledge", "log.md"),
@@ -567,46 +878,12 @@ tags:
 `,
 		},
 		{
-			name: filepath.Join("skills", "AGENTS.md"),
-			content: `# Skills 层规范 (L2)
-
-本目录存放稳定、可复用的操作流程。不要把一次性任务总结成 skill。
-
-## 目录结构
-
-- ` + "`core.md`" + `：技能索引入口。
-- ` + "`<skill-name>/SKILL.md`" + `：单个技能定义。
-
-## SKILL.md 格式
-
-每个 skill 必须包含 YAML frontmatter：
-
-` + "```markdown" + `
----
-name: <skill-name>
-description: <一句话描述该 skill 的用途>
-trigger: <描述什么场景下应该使用该 skill>
----
-` + "```" + `
-
-正文应包含 Purpose、When to Use、Steps / Commands / Usage 等可执行说明。
-`,
+			name:    filepath.Join("skills", "AGENTS.md"),
+			content: workspaceSkillsAgentsContent(),
 		},
 		{
-			name: filepath.Join("skills", "core.md"),
-			content: `---
-title: skills core
-type: skill
-tags:
-- core
----
-
-# Skills
-
-## 可用技能
-
-- [[wiki]]：维护 workspace 知识库和技能库。
-`,
+			name:    filepath.Join("skills", "core.md"),
+			content: workspaceSkillsCoreContent(),
 		},
 		{
 			name: filepath.Join("skills", "wiki", "SKILL.md"),
@@ -641,4 +918,6 @@ trigger: 当用户要求记住经验、沉淀知识、整理知识库、创建�
 `,
 		},
 	}
+	files = append(files, workspaceBuiltinSkillFiles()...)
+	return files
 }

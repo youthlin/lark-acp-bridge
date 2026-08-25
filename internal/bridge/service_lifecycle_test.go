@@ -132,6 +132,113 @@ func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
 	}
 }
 
+func TestStartUpgradesExistingWorkspaceBuiltinSkills(t *testing.T) {
+	workspace := t.TempDir()
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "SOUL.md", content: "# Custom SOUL\n"},
+		{name: filepath.Join("knowledge", "index.md"), content: "# Custom Index\n\n## L2 Skills\n\n| 文件 | 用途 |\n| --- | --- |\n| `skills/wiki/SKILL.md` | 知识库维护流程 |\n"},
+		{name: filepath.Join("knowledge", "log.md"), content: "# Log\n"},
+		{name: filepath.Join("skills", "AGENTS.md"), content: "# Custom Skills Rules\n"},
+		{name: filepath.Join("skills", "core.md"), content: "# Custom Skills\n\n- [[wiki]]：维护 workspace 知识库和技能库。\n"},
+		{name: filepath.Join("skills", "wiki", "SKILL.md"), content: "# Wiki\n"},
+	} {
+		path := filepath.Join(workspace, file.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(file.name), err)
+		}
+		if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
+	}
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	session := Session{
+		Key:               key,
+		AgentName:         "traex",
+		Cwd:               t.TempDir(),
+		Workspace:         workspace,
+		ACPSessionID:      "acp-existing",
+		WorkspacePrompted: true,
+	}
+	if err := os.MkdirAll(workspaceLocalPath(workspace), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.local) error = %v", err)
+	}
+	writeJSONFile(t, workspaceLocalPath(workspace, "sessions.json"), sessionFile{
+		Version:  1,
+		Sessions: []Session{session},
+		History:  []Session{session},
+	})
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:        "bot-a",
+			Workspace: workspace,
+		}},
+		AgentList: []config.NamedAgentConfig{{
+			Name: "traex",
+			AgentConfig: config.AgentConfig{
+				Command: "traex",
+			},
+		}},
+	}
+
+	svc := NewService(cfg, nil)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := svc.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	})
+
+	skillPath := filepath.Join(workspace, workspaceACPTraceSkillFileName())
+	skillData, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", workspaceACPTraceSkillFileName(), err)
+	}
+	if !strings.Contains(string(skillData), "name: acp-trace") || !strings.Contains(string(skillData), "最终 assistant 回复") {
+		t.Fatalf("acp-trace skill = %q, want built-in trace instructions", skillData)
+	}
+	for _, file := range []struct {
+		name string
+		want string
+	}{
+		{name: "SOUL.md", want: "# Custom SOUL"},
+		{name: filepath.Join("skills", "AGENTS.md"), want: workspaceBuiltinSkillsMarker},
+		{name: filepath.Join("skills", "core.md"), want: "[[acp-trace]]"},
+		{name: filepath.Join("knowledge", "index.md"), want: workspaceACPTraceSkillFileName()},
+		{name: filepath.Join("knowledge", "log.md"), want: "内置技能"},
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file.name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file.name, err)
+		}
+		if !strings.Contains(string(data), file.want) {
+			t.Fatalf("%s = %q, want %q", file.name, data, file.want)
+		}
+	}
+	store := svc.stores["bot-a"]
+	if store == nil {
+		t.Fatal("bot store is nil")
+	}
+	got, ok := store.Get(key)
+	if !ok {
+		t.Fatal("session not loaded")
+	}
+	if got.WorkspacePrompted {
+		t.Fatalf("workspace_prompted = true, want reset after startup workspace upgrade")
+	}
+	sessionData, err := os.ReadFile(workspaceLocalPath(workspace, "sessions.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(.local/sessions.json) error = %v", err)
+	}
+	if strings.Contains(string(sessionData), `"workspace_prompted": true`) {
+		t.Fatalf(".local/sessions.json = %q, want workspace prompt reset persisted", sessionData)
+	}
+}
+
 func writeJSONFile(t *testing.T, path string, value any) {
 	t.Helper()
 	data, err := json.MarshalIndent(value, "", "  ")

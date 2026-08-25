@@ -6542,6 +6542,7 @@ func TestHandleFeishuMessageEmptyMessageDoesNotPrompt(t *testing.T) {
 		filepath.Join("knowledge", "lint.md"),
 		filepath.Join("skills", "AGENTS.md"),
 		filepath.Join("skills", "core.md"),
+		filepath.Join("skills", "acp-trace", "SKILL.md"),
 		filepath.Join("skills", "wiki", "SKILL.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
@@ -6673,6 +6674,79 @@ func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, workspaceBootstrapFile)); err != nil {
 		t.Fatalf("Bootstrap.md should stay until ACP agent deletes it: %v", err)
+	}
+}
+
+func TestHandleFeishuMessageResetsWorkspacePromptedAfterBuiltinSkillUpgrade(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workspace := filepath.Join(t.TempDir(), "bot-a")
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "SOUL.md", content: "# SOUL\n\n名字：小助手\n"},
+		{name: filepath.Join("knowledge", "index.md"), content: "# Index\n\n## L2 Skills\n\n| 文件 | 用途 |\n| --- | --- |\n| `skills/AGENTS.md` | L2 写入规范 |\n| `skills/core.md` | 技能索引入口 |\n| `skills/wiki/SKILL.md` | 知识库维护流程 |\n"},
+		{name: filepath.Join("knowledge", "log.md"), content: "# Log\n"},
+		{name: filepath.Join("skills", "AGENTS.md"), content: "# Skills 层规范 (L2)\n"},
+		{name: filepath.Join("skills", "core.md"), content: "# Skills\n\n- [[wiki]]：维护 workspace 知识库和技能库。\n"},
+		{name: filepath.Join("skills", "wiki", "SKILL.md"), content: "# Wiki\n"},
+	} {
+		path := filepath.Join(workspace, file.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(file.name), err)
+		}
+		if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
+	}
+	workDir := t.TempDir()
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:               key,
+		AgentName:         "traex",
+		ACPSessionID:      "acp-session-1",
+		Cwd:               workDir,
+		Workspace:         workspace,
+		WorkspacePrompted: true,
+	}); err != nil {
+		t.Fatalf("Upsert(session) error = %v", err)
+	}
+	rt := &fakeRuntime{promptReply: "已读取 trace。"}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		Workspace: workspace,
+		MessageID: "om_msg",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		Text:      "看一下 sid acp-session-1 的执行轨迹",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "已读取 trace。" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt", rt.promptCalls)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, want := range []string{"## Workspace Context", "skills/core.md", "[[acp-trace]]", "## Workspace Memory Policy", "## User Message"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt text = %q, want %q", prompt, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace, workspaceACPTraceSkillFileName())); err != nil {
+		t.Fatalf("acp-trace skill should be created: %v", err)
+	}
+	session, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if !session.WorkspacePrompted {
+		t.Fatalf("session workspace_prompted = false, want true after refreshed prompt sent")
 	}
 }
 

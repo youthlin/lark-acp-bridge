@@ -19,6 +19,7 @@ func (s *Service) Start(ctx context.Context) error {
 	if len(s.registry.Names()) == 0 {
 		return fmt.Errorf("未配置 ACP agent")
 	}
+	upgradedWorkspaceFiles := make(map[string][]string)
 	for _, bot := range s.configBots() {
 		workspace := strings.TrimSpace(bot.Workspace)
 		if workspace == "" {
@@ -26,6 +27,13 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 		if _, err := prepareWorkspaceLocalState(workspace); err != nil {
 			return fmt.Errorf("准备 bot %q 的 workspace 本地状态: %w", bot.ID, err)
+		}
+		files, err := s.upgradeExistingWorkspaceOnStart(workspace, bot.ID)
+		if err != nil {
+			return err
+		}
+		if len(files) > 0 {
+			upgradedWorkspaceFiles[strings.TrimSpace(bot.ID)] = files
 		}
 		if err := feishu.CleanupImageCache(ctx, workspace); err != nil {
 			slog.WarnContext(ctx, "清理 bot workspace 图片缓存失败", "bot", displayBotID(bot.ID), "workspace", workspace, "错误", err)
@@ -39,6 +47,15 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 		if err := store.Load(); err != nil {
 			return err
+		}
+		if files := upgradedWorkspaceFiles[strings.TrimSpace(botID)]; len(files) > 0 {
+			count, err := store.ResetWorkspacePromptedForAllSessions()
+			if err != nil {
+				return fmt.Errorf("重置 bot %q 的 workspace prompt 状态: %w", botID, err)
+			}
+			if count > 0 {
+				slog.Info("workspace 已升级，重置 bot 会话 workspace prompt 状态", "bot", displayBotID(botID), "数量", count, "files", files)
+			}
 		}
 		slog.Info("已加载持久化会话映射", "bot", displayBotID(botID), "数量", store.Count())
 	}
@@ -66,6 +83,24 @@ func (s *Service) Start(ctx context.Context) error {
 		runtime.startIdleCleaner(ctx, s.runtimeKeyBusy)
 	}
 	return nil
+}
+
+func (s *Service) upgradeExistingWorkspaceOnStart(workspace string, botID string) ([]string, error) {
+	hadManagedFiles, err := workspaceHasManagedFiles(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("检查 bot %q 的 workspace 文件: %w", botID, err)
+	}
+	if !hadManagedFiles {
+		return nil, nil
+	}
+	status, err := ensureWorkspace(workspace, botID)
+	if err != nil {
+		return nil, fmt.Errorf("升级 bot %q 的 workspace: %w", botID, err)
+	}
+	if len(status.UpgradedFiles) > 0 {
+		slog.Info("已升级 bot workspace 内置技能", "bot", displayBotID(botID), "workspace", workspace, "files", status.UpgradedFiles)
+	}
+	return status.UpgradedFiles, nil
 }
 
 func (s *Service) syncResolvedBotConfig(i int, adapter *feishu.Adapter) bool {
