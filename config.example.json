@@ -25,7 +25,6 @@
       }
     }
   ],
-  "message_reaction": false,
   "agent_list": [
     {
       "name": "traex",

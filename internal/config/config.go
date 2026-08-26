@@ -26,10 +26,9 @@ var configPathLocks sync.Map
 const sensitiveFileTooPermissiveMask fs.FileMode = 0o066
 
 type Config struct {
-	AgentList       []NamedAgentConfig `json:"agent_list,omitempty"`
-	Bots            []BotConfig        `json:"bots"`
-	RestartCommand  []string           `json:"restart_command,omitempty"`
-	MessageReaction bool               `json:"message_reaction,omitempty"`
+	AgentList      []NamedAgentConfig `json:"agent_list,omitempty"`
+	Bots           []BotConfig        `json:"bots"`
+	RestartCommand []string           `json:"restart_command,omitempty"`
 }
 
 type NamedAgentConfig struct {

@@ -105,8 +105,6 @@ lark-acp-bridge bots remove default
 
 如果当前 bridge 是内置后台 daemon 子进程，未配置时会使用当前可执行文件按内置后台 `restart` 模式重启；通过 `--config` 启动时会把当前配置路径传给新进程。如果使用 `run` 前台模式、systemd 或其他进程管理器运行，必须配置 `restart_command`，避免额外拉起一个后台实例。
 
-可选配置 `message_reaction` 用于控制是否在普通飞书消息 prompt 中提示 ACP agent：如果收到的消息适合用轻量表情表达判断、认可、惊讶、好笑、无语或鼓励，可以给原消息添加 reaction。该配置是全局开关，不按 chat 单独配置，默认 `false`。开启后，prompt 会提供当前消息的 `message_id` 用法、推荐 `emoji_type` 列表，以及 `lark-cli im reactions create` / 飞书 IM MessageReaction Create API 的操作提示。
-
 第一次和 bot 对话时，如果 workspace 尚未标记为 ready，服务会创建基础知识文件：
 
 ```text
@@ -130,6 +128,8 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 - L0 根目录记忆：`SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`，记录 bot 身份、用户偏好、工作规则和工具环境。
 - L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。内置 `acp-trace` 技能用于按 `sid` 读取本地 ACP JSONL trace，辅助跨会话查看执行轨迹。
+
+新建 workspace 的 `TOOLS.md` 会包含飞书 reaction 工具说明。agent 可在合适时用每轮 `Message Metadata` 的 `message_id` 给原消息添加轻量 reaction 表达态度；这是可选表达，不会作为每轮普通消息的额外 prompt 片段重复注入。
 
 普通文本会自动创建 ACP 会话；群聊默认需要 at bot 才响应，可用 `@Bot /at off` 为当前 chat 改成免 at 且每条消息都响应，也可用 `@Bot /at off auto` 改成免 at 后自动判断是否响应，私聊始终响应且不支持 `/at` 配置。用户只 at 当前 bot 且不带正文时，会按“用户提及你，但本次无消息内容，请按历史消息，引用上下文回复”作为普通 prompt 发送给 ACP agent。`/new [cwd] [title]` 仍可用于手动重开当前会话、指定 cwd 或指定标题。话题群按话题区分会话，普通群和私聊按整个 chat 复用同一会话。`/new` 未指定标题时会按当前聊天历史生成 `session#N`；它只回复会话创建结果和当前 mode/model，不额外发送 prompt。下一条普通文本会携带 workspace 上下文一起作为 `session/prompt` 发给 ACP agent。
 

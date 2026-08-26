@@ -97,9 +97,6 @@ func TestConfigExampleUsesDefaultTraexArgs(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("config.example.json traex args = %#v, want %#v", got, want)
 	}
-	if cfg.MessageReaction {
-		t.Fatal("config.example.json should keep message_reaction disabled by default")
-	}
 	if len(cfg.Bots) == 0 || !cfg.Bots[0].Trace.Enabled || cfg.Bots[0].Trace.RetentionDays != 7 {
 		t.Fatalf("config.example.json trace = %+v, want enabled with 7d retention", cfg.Bots[0].Trace)
 	}
@@ -604,42 +601,6 @@ func TestRemoveBotUpdatesConfig(t *testing.T) {
 	}
 	if len(cfg.Bots) != 1 || cfg.Bots[0].ID != "bot-b" {
 		t.Fatalf("Bots = %+v, want only bot-b", cfg.Bots)
-	}
-}
-
-func TestLoadMessageReaction(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	data := []byte(`{
-  "message_reaction": true,
-  "bots": [
-    {
-      "id": "default",
-      "app_id": "cli_xxx",
-      "app_secret": {
-        "source": "file",
-        "path": "secret.appsecret"
-      },
-      "workspace": "` + filepath.ToSlash(filepath.Join(t.TempDir(), "workspace")) + `"
-    }
-  ],
-  "agent_list": [
-    {
-      "name": "traex",
-      "command": "traex",
-      "args": ["acp", "serve"]
-    }
-  ]
-}`)
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.MessageReaction {
-		t.Fatal("MessageReaction = false, want true")
 	}
 }
 

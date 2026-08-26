@@ -785,6 +785,8 @@ func workspaceFiles(botID string) []struct {
 
 - 如果当前环境没有安装 lark-cli，按飞书 CLI 安装指南安装：https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md
 - 需要调用 lark-cli 时，优先使用当前对话智能体对应的 profile；当前 bot 建议使用 profile：` + profileName + `。
+- 如需用消息表情表达轻量态度，可给当前用户消息添加 reaction；这只是可选表达，不应替代必要回复。目标消息 ID 来自每轮 ` + "`Message Metadata`" + ` 的 ` + "`message_id`" + `，可用 emoji_type：` + strings.Join(feishuMessageReactionEmojiTypes, ", ") + `。
+- 添加 reaction 可用 ` + "`lark-cli im reactions create --message-id <message_id> --data '{\"reaction_type\":{\"emoji_type\":\"THUMBSUP\"}}' --as bot --profile " + profileName + "`" + `；如无把握或上下文不适合，就不要添加。
 - 如果不存在对应 profile，运行 ` + "`lark-acp-bridge bots create-lark-cli-profile " + botID + "`" + ` 创建；如需自定义 profile 名称，使用 ` + "`--profile <name>`" + `。不要手动读取或解密 app_secret。
 - app_secret 属于敏感信息，不要写入提示词、回复、日志或命令行参数；需要传给 lark-cli 时，应使用 stdin 等不回显到命令文本的方式。
 `,

@@ -135,7 +135,6 @@ func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text s
 type workspacePromptOptions struct {
 	IncludeWorkspaceContext bool
 	IncludeMemoryPolicy     bool
-	IncludeReactionPrompt   bool
 }
 
 func (s *Service) promptTextWithWorkspaceContextForSession(session Session, msg feishu.Message, text string) string {
@@ -144,7 +143,6 @@ func (s *Service) promptTextWithWorkspaceContextForSession(session Session, msg 
 	return promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
 		IncludeWorkspaceContext: includeWorkspaceContext,
 		IncludeMemoryPolicy:     includeWorkspaceContext,
-		IncludeReactionPrompt:   s.messageReactionEnabled(),
 	})
 }
 
@@ -162,7 +160,6 @@ func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message,
 		workspaceContext,
 		memoryPolicy,
 		messageMetadataPrompt(msg),
-		feishuMessageReactionPrompt(msg, opts.IncludeReactionPrompt),
 	}, text)
 }
 
@@ -183,21 +180,6 @@ var feishuMessageReactionEmojiTypes = []string{
 	"WOW",         // 惊讶
 	"HEART",       // 爱心
 	"Fire",        // 火
-}
-
-func feishuMessageReactionPrompt(msg feishu.Message, enabled bool) string {
-	if !enabled || strings.TrimSpace(msg.MessageID) == "" {
-		return ""
-	}
-	return strings.Join([]string{
-		"## Feishu Message Reaction",
-		"",
-		"- 如果你认为本次收到的飞书消息适合用一个轻量 reaction 表达判断、认可、惊讶、好笑、无语或鼓励，可以给该消息添加一个表情 reaction。",
-		"- reaction 是可选动作；只有在自然、合适且不会替代必要文字回复时才添加。",
-		"- 目标消息 ID 使用 Message Metadata 中的 `message_id`。",
-		"- 可用 emoji_type 建议从以下列表选择：" + strings.Join(feishuMessageReactionEmojiTypes, ", ") + "。",
-		"- 可使用 `lark-cli im reactions create --message-id <message_id> --data '{\"reaction_type\":{\"emoji_type\":\"THUMBSUP\"}}' --as bot --profile <profile>`，或调用飞书 IM MessageReaction Create API。",
-	}, "\n")
 }
 
 func formatNewSessionReply(session Session, source string) string {

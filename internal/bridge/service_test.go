@@ -401,7 +401,7 @@ func testReadySession(t *testing.T, store *SessionStore) Session {
 	return session
 }
 
-func TestHandleFeishuMessageOmitsReactionPromptByDefault(t *testing.T) {
+func TestHandleFeishuMessageOmitsReactionPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	markWorkspaceBootstrapped(t, workspace)
@@ -438,61 +438,17 @@ func TestHandleFeishuMessageOmitsReactionPromptByDefault(t *testing.T) {
 	rt.mu.Lock()
 	prompt := rt.promptCalls[0].Text
 	rt.mu.Unlock()
-	if strings.Contains(prompt, "## Feishu Message Reaction") || strings.Contains(prompt, "lark-cli im reactions create") {
-		t.Fatalf("prompt = %q, should not contain reaction guidance by default", prompt)
-	}
-}
-
-func TestHandleFeishuMessageIncludesReactionPromptWhenEnabled(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	workspace := filepath.Join(t.TempDir(), "workspace")
-	markWorkspaceBootstrapped(t, workspace)
-	if err := store.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
-		Title:        "test session",
-		AgentName:    "traex",
-		ACPSessionID: "acp-session-1",
-		Cwd:          t.TempDir(),
-		Workspace:    workspace,
-	}); err != nil {
-		t.Fatalf("Upsert(session) error = %v", err)
-	}
-	cfg := config.Default()
-	cfg.MessageReaction = true
-	rt := &fakeRuntime{promptReply: "ACP 回复"}
-	svc := newTestService(cfg, store)
-	svc.setRuntime(rt)
-
-	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:     "bot-a",
-		MessageID: "om_user",
-		ChatID:    "oc_chat",
-		ChatType:  "p2p",
-		Text:      "看一下这个问题",
-	})
-	if err != nil {
-		t.Fatalf("HandleFeishuMessage() error = %v", err)
-	}
-	if reply != "ACP 回复" {
-		t.Fatalf("reply = %q, want ACP reply", reply)
-	}
-	if rt.promptCallCount() != 1 {
-		t.Fatalf("prompt calls = %d, want one prompt", rt.promptCallCount())
-	}
-	rt.mu.Lock()
-	prompt := rt.promptCalls[0].Text
-	rt.mu.Unlock()
 	for _, want := range []string{
-		"## Feishu Message Reaction",
+		"## Message Metadata",
 		"message_id",
 		"om_user",
-		"THUMBSUP, APPLAUSE, FISTBUMP",
-		"lark-cli im reactions create --message-id <message_id>",
-		"MessageReaction Create API",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt = %q, want %q", prompt, want)
+			t.Fatalf("prompt = %q, want message metadata %q", prompt, want)
 		}
+	}
+	if strings.Contains(prompt, "## Feishu Message Reaction") {
+		t.Fatalf("prompt = %q, should not contain standalone per-message reaction section", prompt)
 	}
 }
 

@@ -196,12 +196,6 @@ func (s *Service) configRestartCommand() []string {
 	return append([]string(nil), s.cfg.RestartCommand...)
 }
 
-func (s *Service) messageReactionEnabled() bool {
-	s.configMu.RLock()
-	defer s.configMu.RUnlock()
-	return s.cfg.MessageReaction
-}
-
 var _ feishu.Handler = (*Service)(nil)
 var _ feishu.ModelSelectionHandler = (*Service)(nil)
 var _ feishu.ModeSelectionHandler = (*Service)(nil)
