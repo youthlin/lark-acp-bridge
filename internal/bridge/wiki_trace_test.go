@@ -39,7 +39,7 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		ACPSessionID: "acp-wiki",
 		Cwd:          t.TempDir(),
 	}
-	observer := svc.wikiTraceObserver(session)
+	observer := svc.wikiTraceObserver(session, 7)
 	observer.start(context.Background())
 	observer.onUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
 		SessionUpdate: "agent_message_chunk",
@@ -82,6 +82,9 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		t.Fatalf("initial meta = %+v, want source metadata", initialMeta)
 	}
 	process := strings.Join(card.processUpdatesSnapshot(), "\n")
+	if !strings.Contains(process, "msg: wiki\\_acp-wiki\\_generation\\_7") {
+		t.Fatalf("process updates = %q, want synthetic wiki trace message id", process)
+	}
 	for _, want := range []string{"分析是否需要沉淀", "检查知识索引", "读取 knowledge/index.md"} {
 		if !strings.Contains(process, want) {
 			t.Fatalf("process updates = %q, want %q", process, want)
@@ -147,7 +150,7 @@ func TestWikiTraceUsesTraceChatShowConfig(t *testing.T) {
 			observer := svc.wikiTraceObserver(Session{
 				Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source"}),
 				ACPSessionID: "acp-wiki",
-			})
+			}, 1)
 			if observer == nil {
 				t.Fatal("wikiTraceObserver() = nil")
 			}
@@ -182,7 +185,7 @@ func TestWikiTraceNoReplyShowsNoChangesSummary(t *testing.T) {
 	observer := svc.wikiTraceObserver(Session{
 		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source"}),
 		ACPSessionID: "acp-wiki",
-	})
+	}, 1)
 	observer.start(context.Background())
 	observer.complete(context.Background(), acp.PromptResult{Text: "NoReply", StopReason: "end_turn"}, nil)
 	if got := card.finalTextUpdatesSnapshot(); len(got) != 1 || got[0] != "检查完成，无需沉淀。" {

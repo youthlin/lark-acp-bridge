@@ -17,6 +17,8 @@ type promptCardStream struct {
 	session Session
 	starter streamCardStarter
 	options feishu.StreamCardOptions
+	// trace 中记录的消息 id, 不等同于飞书消息id(om_xxx), (非im消息会按规则生成)
+	processMessageID string
 
 	mu                sync.Mutex
 	card              feishu.StreamCard
@@ -76,6 +78,13 @@ func (s *promptCardStream) setInitialMeta(meta feishu.StreamCardMeta) {
 		return
 	}
 	s.options.Meta = meta
+}
+
+func (s *promptCardStream) setProcessMessageID(messageID string) {
+	if s == nil {
+		return
+	}
+	s.processMessageID = strings.TrimSpace(messageID)
 }
 
 func (s *promptCardStream) delayCardCreation() {
@@ -707,7 +716,11 @@ func (s *promptCardStream) processPanelTextLocked() string {
 	if sid := strings.TrimSpace(s.session.ACPSessionID); sid != "" {
 		prefix = append(prefix, "sid: "+escapeInlineMarkdown(sid))
 	}
-	if msgID := strings.TrimSpace(s.msg.MessageID); msgID != "" {
+	msgID := strings.TrimSpace(s.processMessageID)
+	if msgID == "" {
+		msgID = strings.TrimSpace(s.msg.MessageID)
+	}
+	if msgID != "" {
 		prefix = append(prefix, "msg: "+escapeInlineMarkdown(msgID))
 	}
 	if len(prefix) == 0 {

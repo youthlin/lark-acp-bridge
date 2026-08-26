@@ -42,7 +42,6 @@ func workspaceContextPrompt(workspace string) string {
 	}
 	sections := []string{
 		"## Workspace Context",
-		"",
 		"下面是当前 bot workspace 的引导、长期记忆和工作规则。后续回复应遵循这些内容。",
 	}
 	sections = append(sections, fileSections...)

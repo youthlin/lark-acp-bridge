@@ -16,10 +16,11 @@ const (
 )
 
 type wikiTraceObserver struct {
-	message feishu.Message
-	session Session
-	show    ChatConfig
-	starter scheduledTaskStreamStarter
+	message        feishu.Message
+	session        Session
+	show           ChatConfig
+	starter        scheduledTaskStreamStarter
+	traceMessageID string
 
 	stream *promptCardStream
 	chunks *promptChunkAccumulator
@@ -34,7 +35,7 @@ func wikiTracePromptOptions(observer *wikiTraceObserver) acp.PromptOptions {
 	}
 }
 
-func (s *Service) wikiTraceObserver(session Session) *wikiTraceObserver {
+func (s *Service) wikiTraceObserver(session Session, generation int64) *wikiTraceObserver {
 	bot, ok := s.botConfig(session.Key.BotID)
 	if !ok || !bot.WikiTrace.Enabled || strings.TrimSpace(bot.WikiTrace.ChatID) == "" {
 		return nil
@@ -45,10 +46,11 @@ func (s *Service) wikiTraceObserver(session Session) *wikiTraceObserver {
 		Workspace: strings.TrimSpace(session.Workspace),
 	}
 	return &wikiTraceObserver{
-		message: msg,
-		session: session,
-		show:    s.chatConfigForMessage(msg),
-		starter: s.scheduleStreamStarter(session.Key.BotID),
+		message:        msg,
+		session:        session,
+		show:           s.chatConfigForMessage(msg),
+		starter:        s.scheduleStreamStarter(session.Key.BotID),
+		traceMessageID: wikiTraceMessageID(session, generation),
 	}
 }
 
@@ -142,6 +144,7 @@ func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream 
 		return nil
 	}
 	stream := newPromptCardStream(ctx, o.message, o.session, o.show, streamCardStarterFunc(o.starter))
+	stream.setProcessMessageID(o.traceMessageID)
 	stream.setInitialMeta(o.streamCardMeta(wikiTraceCardRunning))
 	if stream.ensureCardWithContext(ctx) == nil {
 		return nil

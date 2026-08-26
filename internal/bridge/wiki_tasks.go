@@ -637,7 +637,7 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 	}
 	s.markWikiStarted(key)
 	prompt := wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{}))
-	trace := s.wikiTraceObserver(session)
+	trace := s.wikiTraceObserver(session, generation)
 	trace.start(ctx)
 	recorder := s.newTraceRecorderWithMessageID(session, prompt, wikiTraceMessageID(session, generation))
 	result, err := s.runtime.Prompt(ctx, session, agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
@@ -690,7 +690,7 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 	}()
 	s.markWikiStarted(key)
 	prompt := wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{}))
-	trace := s.wikiTraceObserver(pending.session)
+	trace := s.wikiTraceObserver(pending.session, pending.generation)
 	trace.start(ctx)
 	recorder := s.newTraceRecorderWithMessageID(pending.session, prompt, wikiTraceMessageID(pending.session, pending.generation))
 	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
