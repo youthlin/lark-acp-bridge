@@ -148,7 +148,6 @@ type giteeRelease struct {
 }
 
 // latestViaGitee 通过 Gitee OpenAPI v5 查询最新 Release。
-// Gitee 没有稳定的 /releases/latest，这里取列表第一个（按创建时间倒序）。
 func (o *Options) latestViaGitee(ctx context.Context) (*Release, error) {
 	repo := strings.TrimSpace(o.GiteeRepo)
 	if repo == "" {
@@ -157,7 +156,7 @@ func (o *Options) latestViaGitee(ctx context.Context) (*Release, error) {
 	if repo == "-" {
 		return nil, errors.New("Gitee 镜像已禁用")
 	}
-	url := fmt.Sprintf("https://gitee.com/api/v5/repos/%s/releases?page=1&per_page=1", repo)
+	url := fmt.Sprintf("https://gitee.com/api/v5/repos/%s/releases/latest", repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -175,15 +174,14 @@ func (o *Options) latestViaGitee(ctx context.Context) (*Release, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Gitee API 返回 %s", resp.Status)
 	}
-	var rels []giteeRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+	var rel giteeRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		return nil, err
 	}
-	if len(rels) == 0 || strings.TrimSpace(rels[0].TagName) == "" {
+	if strings.TrimSpace(rel.TagName) == "" {
 		return nil, errors.New("Gitee 暂无 Release")
 	}
-	r := rels[0]
-	return o.releaseForTag(r.TagName, r.Body), nil
+	return o.releaseForTag(rel.TagName, rel.Body), nil
 }
 
 type ghRelease struct {

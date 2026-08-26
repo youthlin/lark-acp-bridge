@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -139,6 +140,71 @@ func TestParseTagFromLocation(t *testing.T) {
 	if _, err := parseTagFromLocation("https://example/tag/"); err == nil {
 		t.Fatal("expected error for trailing slash")
 	}
+}
+
+func TestLatestViaGiteeUsesLatestEndpoint(t *testing.T) {
+	var gotPath string
+	var gotToken string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v5/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotToken = r.URL.Query().Get("access_token")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"tag_name":"v2026-08-26","body":"notes"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("GITEE_TOKEN", "token-1")
+
+	o := &Options{
+		GiteeRepo:  "owner/repo",
+		GOOS:       "linux",
+		GOARCH:     "amd64",
+		HTTPClient: rewriteHostClient(srv),
+	}
+	rel, err := o.latestViaGitee(context.Background())
+	if err != nil {
+		t.Fatalf("latestViaGitee() error = %v", err)
+	}
+	if rel.Tag != "v2026-08-26" || rel.Body != "notes" {
+		t.Fatalf("release = %+v, want latest tag and body", rel)
+	}
+	if gotPath != "/api/v5/repos/owner/repo/releases/latest" {
+		t.Fatalf("path = %q, want latest endpoint", gotPath)
+	}
+	if gotToken != "token-1" {
+		t.Fatalf("access_token = %q, want token-1", gotToken)
+	}
+}
+
+func rewriteHostClient(srv *httptest.Server) *http.Client {
+	base, err := url.Parse(srv.URL)
+	if err != nil {
+		panic(err)
+	}
+	client := srv.Client()
+	client.Transport = rewriteHostTransport{
+		base: base,
+		next: client.Transport,
+	}
+	return client
+}
+
+type rewriteHostTransport struct {
+	base *url.URL
+	next http.RoundTripper
+}
+
+func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	next := t.next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	cloned := req.Clone(req.Context())
+	cloned.URL.Scheme = t.base.Scheme
+	cloned.URL.Host = t.base.Host
+	return next.RoundTrip(cloned)
 }
 
 func TestApplyEndToEnd(t *testing.T) {
