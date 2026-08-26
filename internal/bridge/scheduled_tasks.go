@@ -148,15 +148,16 @@ func scheduledTaskTriggerRequest(task ScheduledTask, runID string, triggeredAt t
 		return TriggerRequest{}, fmt.Errorf("定时任务 workspace 不能为空")
 	}
 	return TriggerRequest{
-		BotID:     task.BotID,
-		Key:       scheduledTaskRunKey(task, runID),
-		Workspace: workspace,
-		AgentName: task.AgentName,
-		Cwd:       task.Cwd,
-		Title:     task.ID,
-		Prompt:    scheduledTaskRunPrompt(task, runID, triggeredAt),
-		Metadata:  scheduledTaskRunMetadata(task, runID, triggeredAt),
-		Sink:      sink,
+		BotID:          task.BotID,
+		Key:            scheduledTaskRunKey(task, runID),
+		TraceMessageID: scheduledTaskTraceMessageID(task, runID),
+		Workspace:      workspace,
+		AgentName:      task.AgentName,
+		Cwd:            task.Cwd,
+		Title:          task.ID,
+		Prompt:         scheduledTaskRunPrompt(task, runID, triggeredAt),
+		Metadata:       scheduledTaskRunMetadata(task, runID, triggeredAt),
+		Sink:           sink,
 	}, nil
 }
 
@@ -187,6 +188,11 @@ func scheduledTaskRunID(task ScheduledTask, triggeredAt time.Time) string {
 		triggeredAt = time.Now()
 	}
 	return task.ID + "-" + triggeredAt.UTC().Format("20060102T150405.000000000Z")
+}
+
+func scheduledTaskTraceMessageID(task ScheduledTask, runID string) string {
+	task = normalizeScheduledTask(task)
+	return traceMessageID(sessionSourceSchedule, task.ID, runID)
 }
 
 func (s *Service) markScheduleRunRunningOrSkipped(task ScheduledTask, runID string, key SessionKey, startedAt time.Time, prompt string) (scheduleRunStatus, bool) {

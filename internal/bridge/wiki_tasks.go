@@ -639,7 +639,7 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 	prompt := wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{}))
 	trace := s.wikiTraceObserver(session)
 	trace.start(ctx)
-	recorder := s.newTraceRecorder(session, prompt)
+	recorder := s.newTraceRecorderWithMessageID(session, prompt, wikiTraceMessageID(session, generation))
 	result, err := s.runtime.Prompt(ctx, session, agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
 	if recorder != nil {
 		recorder.Complete(result, err)
@@ -692,13 +692,17 @@ func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
 	prompt := wikiReflectionPrompt(sessionWorkspace(pending.session, feishu.Message{}))
 	trace := s.wikiTraceObserver(pending.session)
 	trace.start(ctx)
-	recorder := s.newTraceRecorder(pending.session, prompt)
+	recorder := s.newTraceRecorderWithMessageID(pending.session, prompt, wikiTraceMessageID(pending.session, pending.generation))
 	result, err := s.runtime.PromptWithRuntimeKey(ctx, runtime, pending.session, pending.agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(trace)))
 	if recorder != nil {
 		recorder.Complete(result, err)
 	}
 	trace.complete(ctx, result, err)
 	s.markWikiFinished(key, pending.session, result, err)
+}
+
+func wikiTraceMessageID(session Session, generation int64) string {
+	return traceMessageID("wiki", session.ACPSessionID, fmt.Sprintf("generation_%d", generation))
 }
 
 func (s *Service) markWikiStarted(key SessionKey) {

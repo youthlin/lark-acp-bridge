@@ -22,6 +22,22 @@ const traceDirName = "traces"
 
 var traceFileSafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+const traceTimestampLayout = "2006-01-02T15:04:05.000000000-07:00"
+
+type traceTimestamp time.Time
+
+func (t traceTimestamp) IsZero() bool {
+	return time.Time(t).IsZero()
+}
+
+func (t traceTimestamp) MarshalJSON() ([]byte, error) {
+	ts := time.Time(t)
+	if ts.IsZero() {
+		return json.Marshal("")
+	}
+	return json.Marshal(ts.Format(traceTimestampLayout))
+}
+
 type traceStore struct {
 	dir           string
 	retention     time.Duration
@@ -30,8 +46,9 @@ type traceStore struct {
 }
 
 type traceRecord struct {
-	Timestamp     time.Time              `json:"timestamp"`
+	TS            traceTimestamp         `json:"ts"`
 	Type          string                 `json:"type"`
+	IsFinal       bool                   `json:"is_final,omitempty"`
 	BotID         string                 `json:"bot_id,omitempty"`
 	Source        string                 `json:"source,omitempty"`
 	MainID        string                 `json:"main_id,omitempty"`
@@ -168,8 +185,8 @@ func (s *traceStore) sessionPath(session Session) string {
 }
 
 func normalizeTraceRecord(session Session, record traceRecord) traceRecord {
-	if record.Timestamp.IsZero() {
-		record.Timestamp = time.Now()
+	if record.TS.IsZero() {
+		record.TS = traceTimestamp(time.Now())
 	}
 	record.Type = strings.TrimSpace(record.Type)
 	record.BotID = strings.TrimSpace(firstNonEmpty(record.BotID, session.Key.BotID))
@@ -206,17 +223,17 @@ func traceSafeFileName(value string) string {
 }
 
 type traceRecorder struct {
-	store        *traceStore
-	session      Session
-	messageID    string
-	assistantMu  sync.Mutex
-	assistant    strings.Builder
-	assistantSet bool
-	toolMu       sync.Mutex
-	tools        map[string]*traceToolAggregate
-	toolSequence int
-	updateMu     sync.Mutex
-	update       *traceUpdateAggregate
+	store             *traceStore
+	session           Session
+	messageID         string
+	assistantMu       sync.Mutex
+	assistant         strings.Builder
+	finalAssistantSet bool
+	toolMu            sync.Mutex
+	tools             map[string]*traceToolAggregate
+	toolSequence      int
+	updateMu          sync.Mutex
+	update            *traceUpdateAggregate
 }
 
 type traceToolAggregate struct {
@@ -289,6 +306,25 @@ func (s *Service) newTraceRecorderForMessage(session Session, msg feishu.Message
 	return newTraceRecorderWithMessageID(s.traceStoreForSession(session), session, prompt, msg.MessageID)
 }
 
+func (s *Service) newTraceRecorderWithMessageID(session Session, prompt string, messageID string) *traceRecorder {
+	return newTraceRecorderWithMessageID(s.traceStoreForSession(session), session, prompt, messageID)
+}
+
+func traceMessageID(prefix string, parts ...string) string {
+	prefix = traceSafeFileName(prefix)
+	if prefix == "" || prefix == "unknown-session" {
+		prefix = "trace"
+	}
+	values := []string{prefix}
+	for _, part := range parts {
+		part = traceSafeFileName(part)
+		if part != "" && part != "unknown-session" {
+			values = append(values, part)
+		}
+	}
+	return strings.Join(values, "_")
+}
+
 func tracePromptOptions(recorder *traceRecorder, opts acp.PromptOptions) acp.PromptOptions {
 	if recorder == nil {
 		return opts
@@ -315,7 +351,6 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 			r.flushProcessUpdates()
 			r.appendAssistant(chunk.Text)
 		case promptChunkTargetThought:
-			r.flushAssistant()
 			r.recordProcessChunk("thought", kind, u, chunk.Text)
 		case promptChunkTargetPlan:
 			r.flushAssistant()
@@ -325,7 +360,9 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 			r.flushProcessUpdates()
 			r.recordToolChunk(kind, u, chunk.Text)
 		default:
-			r.flushAssistant()
+			if chunk.FinalBoundary || isFinalTextBoundaryUpdateKind(kind) {
+				r.flushAssistant()
+			}
 			r.recordProcessChunk(traceRecordTypeForUpdate(kind), kind, u, chunk.Text)
 		}
 		return
@@ -342,27 +379,24 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 		if text != "" {
 			r.flushProcessUpdates()
 			r.appendAssistant(text)
-			r.flushAssistant()
 		}
 		if text == "" || traceContentIsNonText(u.Content) {
-			r.flushAssistant()
 			r.recordProcessUpdate("update", kind, u)
 		}
 	case "plan":
 		r.flushAssistant()
 		r.recordProcessUpdate("plan", kind, u)
 	case "thought", "reasoning":
-		r.flushAssistant()
 		r.recordProcessUpdate("thought", kind, u)
 	case "status", "progress":
-		r.flushAssistant()
 		r.recordProcessUpdate("status", kind, u)
 	case "usage_update":
-		r.flushAssistant()
 		r.recordProcessUpdate("usage", kind, u)
 	default:
 		if shouldTraceRawUpdate(kind, u) {
-			r.flushAssistant()
+			if isFinalTextBoundaryUpdateKind(kind) {
+				r.flushAssistant()
+			}
 			r.recordProcessUpdate(traceRecordTypeForUpdate(kind), kind, u)
 		}
 	}
@@ -374,9 +408,10 @@ func (r *traceRecorder) Complete(result acp.PromptResult, err error) {
 	}
 	r.flushProcessUpdates()
 	r.flushTools()
-	r.flushAssistant()
-	if !r.hasAssistant() && strings.TrimSpace(result.Text) != "" {
-		r.append(traceRecord{Type: "assistant", Content: result.Text})
+	r.flushFinalAssistant()
+	if !r.hasFinalAssistant() && strings.TrimSpace(result.Text) != "" {
+		r.markFinalAssistant()
+		r.append(traceRecord{Type: "assistant", IsFinal: true, Content: result.Text})
 	}
 	if err != nil {
 		r.append(traceRecord{Type: "error", Error: err.Error()})
@@ -821,31 +856,54 @@ func (r *traceRecorder) appendAssistant(text string) {
 }
 
 func (r *traceRecorder) flushAssistant() {
+	r.flushAssistantAs("assistant", false)
+}
+
+func (r *traceRecorder) flushFinalAssistant() {
+	r.flushAssistantAs("assistant", true)
+}
+
+func (r *traceRecorder) flushAssistantAs(recordType string, isFinal bool) {
 	if r == nil {
 		return
+	}
+	recordType = strings.TrimSpace(recordType)
+	if recordType == "" {
+		recordType = "assistant"
 	}
 	r.assistantMu.Lock()
 	content := r.assistant.String()
 	if strings.TrimSpace(content) != "" {
 		r.assistant.Reset()
-		r.assistantSet = true
+		if isFinal {
+			r.finalAssistantSet = true
+		}
 	} else {
 		r.assistant.Reset()
 		content = ""
 	}
 	r.assistantMu.Unlock()
 	if content != "" {
-		r.append(traceRecord{Type: "assistant", Content: content})
+		r.append(traceRecord{Type: recordType, IsFinal: isFinal, Content: content})
 	}
 }
 
-func (r *traceRecorder) hasAssistant() bool {
+func (r *traceRecorder) markFinalAssistant() {
+	if r == nil {
+		return
+	}
+	r.assistantMu.Lock()
+	defer r.assistantMu.Unlock()
+	r.finalAssistantSet = true
+}
+
+func (r *traceRecorder) hasFinalAssistant() bool {
 	if r == nil {
 		return false
 	}
 	r.assistantMu.Lock()
 	defer r.assistantMu.Unlock()
-	return r.assistantSet || strings.TrimSpace(r.assistant.String()) != ""
+	return r.finalAssistantSet || strings.TrimSpace(r.assistant.String()) != ""
 }
 
 func traceUpdateKey(recordType string, kind string) string {

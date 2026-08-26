@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 	"github.com/youthlin/lark-acp-bridge/internal/config"
@@ -101,6 +102,7 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 
 	path := filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl")
 	records := readTraceRecords(t, path)
+	assertTraceRecordTimestamps(t, records)
 	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,thought,plan,usage,tool,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
@@ -128,8 +130,9 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 		t.Fatalf("tool record = %+v, want redundant raw_update omitted", records[4])
 	}
 	if records[5]["type"] != "assistant" || records[5]["content"] != "完成" {
-		t.Fatalf("sixth record = %+v, want assistant content", records[5])
+		t.Fatalf("sixth record = %+v, want final assistant content", records[5])
 	}
+	assertTraceRecordFinal(t, records[5], true)
 	if records[6]["type"] != "turn_result" || records[6]["stop_reason"] != "end_turn" {
 		t.Fatalf("seventh record = %+v, want turn result", records[6])
 	}
@@ -173,6 +176,27 @@ func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 		if records[i]["message_id"] != want {
 			t.Fatalf("record[%d] message_id = %v, want %s; record = %+v", i, records[i]["message_id"], want, records[i])
 		}
+	}
+	assertTraceRecordFinal(t, records[1], true)
+	assertTraceRecordFinal(t, records[3], true)
+}
+
+func TestTraceRecordTimestampMarshalsAsFixedTS(t *testing.T) {
+	data, err := json.Marshal(traceRecord{
+		TS:      traceTimestamp(time.Date(2026, 8, 26, 12, 34, 56, 120000000, time.UTC)),
+		Type:    "assistant",
+		IsFinal: true,
+		Content: "done",
+	})
+	if err != nil {
+		t.Fatalf("Marshal trace record error = %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"ts":"2026-08-26T12:34:56.120000000+00:00"`) {
+		t.Fatalf("trace record = %s, want fixed-width ts with trailing zeros", text)
+	}
+	if strings.Contains(text, `"timestamp"`) {
+		t.Fatalf("trace record = %s, want no timestamp field", text)
 	}
 }
 
@@ -276,6 +300,7 @@ func TestTraceTurnResultCompactsRawResult(t *testing.T) {
 	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
+	assertTraceRecordFinal(t, records[1], true)
 	result := records[2]
 	if result["type"] != "turn_result" || result["stop_reason"] != "end_turn" {
 		t.Fatalf("turn result = %+v, want stop reason", result)
@@ -296,16 +321,19 @@ func TestTraceTurnResultCompactsRawResult(t *testing.T) {
 
 func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		key  SessionKey
+		name           string
+		key            SessionKey
+		traceMessageID string
 	}{
 		{
-			name: "schedule",
-			key:  SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"},
+			name:           "schedule",
+			key:            SessionKey{BotID: "bot-a", Source: sessionSourceSchedule, MainID: "task:daily", SubID: "run:1"},
+			traceMessageID: "schedule_daily_run_1",
 		},
 		{
-			name: "drive_comment",
-			key:  SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"},
+			name:           "drive_comment",
+			key:            SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"},
+			traceMessageID: "drive_comment_docx_token_comment-1",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -337,12 +365,13 @@ func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
 			svc.setRuntime(rt)
 
 			result, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
-				BotID:     "bot-a",
-				Key:       tt.key,
-				Workspace: workspace,
-				AgentName: "traex",
-				Cwd:       t.TempDir(),
-				Prompt:    "run " + tt.name,
+				BotID:          "bot-a",
+				Key:            tt.key,
+				TraceMessageID: tt.traceMessageID,
+				Workspace:      workspace,
+				AgentName:      "traex",
+				Cwd:            t.TempDir(),
+				Prompt:         "run " + tt.name,
 			})
 			if err != nil {
 				t.Fatalf("runTriggerPrompt() error = %v", err)
@@ -355,17 +384,72 @@ func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
 			if records[0]["source"] != tt.key.Source || records[0]["main_id"] != tt.key.MainID || records[0]["sub_id"] != tt.key.SubID {
 				t.Fatalf("first record key fields = %+v, want trigger source key", records[0])
 			}
+			for i, record := range records {
+				if record["message_id"] != tt.traceMessageID {
+					t.Fatalf("record[%d] message_id = %v, want %s; record = %+v", i, record["message_id"], tt.traceMessageID, record)
+				}
+			}
 			if records[1]["type"] != "status" || records[1]["content"] != "preparing" {
 				t.Fatalf("second record = %+v, want status update", records[1])
 			}
 			if records[2]["type"] != "assistant" || records[2]["content"] != "done" {
-				t.Fatalf("third record = %+v, want assistant update", records[2])
+				t.Fatalf("third record = %+v, want final assistant update", records[2])
+			}
+			assertTraceRecordFinal(t, records[2], true)
+		})
+	}
+}
+
+func TestNonIMTraceMessageIDBuilders(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "trigger fallback",
+			got: triggerTraceMessageID(SessionKey{
+				BotID:  "bot-a",
+				Source: sessionSourceSchedule,
+				MainID: "task:daily",
+				SubID:  "run:1",
+			}),
+			want: "schedule_task_daily_run_1",
+		},
+		{
+			name: "scheduled task run",
+			got: scheduledTaskTraceMessageID(ScheduledTask{
+				ID: "daily:report",
+			}, "run:1"),
+			want: "schedule_daily_report_run_1",
+		},
+		{
+			name: "drive comment",
+			got: driveCommentTraceMessageID(feishu.DriveComment{
+				FileType:  "docx",
+				FileToken: "tok:en",
+				CommentID: "comment-1",
+				ReplyID:   "reply:2",
+			}),
+			want: "drive_comment_docx_tok_en_comment-1_reply_2",
+		},
+		{
+			name: "wiki",
+			got: wikiTraceMessageID(Session{
+				ACPSessionID: "acp:session",
+			}, 3),
+			want: "wiki_acp_session_generation_3",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("trace message id = %q, want %q", tt.got, tt.want)
 			}
 		})
 	}
 }
 
-func TestAgentMessageUpdateWritesAssistantOnly(t *testing.T) {
+func TestAgentMessageUpdateWritesFinalAssistantOnly(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
 		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
@@ -392,12 +476,67 @@ func TestAgentMessageUpdateWritesAssistantOnly(t *testing.T) {
 	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
+	assertTraceRecordFinal(t, records[1], true)
 	if records[1]["content"] != "  answer with spacing  " {
-		t.Fatalf("assistant content = %q, want original spacing", records[1]["content"])
+		t.Fatalf("final assistant content = %q, want original spacing", records[1]["content"])
 	}
 	if _, ok := records[1]["raw_update"]; ok {
-		t.Fatalf("assistant record = %+v, want no duplicate raw_update", records[1])
+		t.Fatalf("final assistant record = %+v, want no duplicate raw_update", records[1])
 	}
+}
+
+func TestTraceSeparatesIntermediateAssistantFromFinalAssistant(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: workspace,
+		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
+	}}}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, ".local", "sessions.json")))
+	recorder := svc.newTraceRecorder(session, "hello")
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "agent_message_chunk",
+		Content:       &acp.ContentBlock{Type: "text", Text: "先执行检查"},
+	}})
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call",
+		ToolCallID:    "tool-1",
+		Title:         "Run tests",
+		Kind:          "execute",
+		Status:        "in_progress",
+		RawInput:      json.RawMessage(`{"cmd":"go test ./..."}`),
+	}})
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call_update",
+		ToolCallID:    "tool-1",
+		Status:        "completed",
+		RawOutput:     json.RawMessage(`"ok"`),
+	}})
+	recorder.OnUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "agent_message_chunk",
+		Content:       &acp.ContentBlock{Type: "text", Text: "最终回复"},
+	}})
+	recorder.Complete(acp.PromptResult{Text: "最终回复", StopReason: "end_turn"}, nil)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,tool,assistant,turn_result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	if records[1]["content"] != "先执行检查" {
+		t.Fatalf("intermediate assistant = %+v, want process assistant", records[1])
+	}
+	assertTraceRecordFinal(t, records[1], false)
+	if records[3]["content"] != "最终回复" {
+		t.Fatalf("final assistant = %+v, want final reply", records[3])
+	}
+	assertTraceRecordFinal(t, records[3], true)
 }
 
 func traceRecordTypes(records []map[string]any) []string {
@@ -428,4 +567,34 @@ func readTraceRecords(t *testing.T, path string) []map[string]any {
 		t.Fatalf("Scan(%s) error = %v", path, err)
 	}
 	return records
+}
+
+func assertTraceRecordTimestamps(t *testing.T, records []map[string]any) {
+	t.Helper()
+	for i, record := range records {
+		if _, ok := record["timestamp"]; ok {
+			t.Fatalf("record[%d] = %+v, want ts field instead of timestamp", i, record)
+		}
+		ts, ok := record["ts"].(string)
+		if !ok || strings.TrimSpace(ts) == "" {
+			t.Fatalf("record[%d] ts = %#v, want non-empty string", i, record["ts"])
+		}
+		if _, err := time.Parse(traceTimestampLayout, ts); err != nil {
+			t.Fatalf("record[%d] ts = %q, want %s format: %v", i, ts, traceTimestampLayout, err)
+		}
+	}
+}
+
+func assertTraceRecordFinal(t *testing.T, record map[string]any, want bool) {
+	t.Helper()
+	got, ok := record["is_final"]
+	if want {
+		if !ok || got != true {
+			t.Fatalf("record = %+v, want is_final=true", record)
+		}
+		return
+	}
+	if ok && got != false {
+		t.Fatalf("record = %+v, want non-final assistant", record)
+	}
 }

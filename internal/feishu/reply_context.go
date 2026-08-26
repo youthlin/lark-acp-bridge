@@ -31,6 +31,7 @@ type StreamCardMeta struct {
 
 type StreamCardOptions struct {
 	ProcessPanelEnabled bool
+	InitialProcess      string
 	StatusBarEnabled    bool
 	ProcessTitle        string
 	Meta                StreamCardMeta

@@ -269,7 +269,7 @@ func TestEnsureWorkspaceUpgradesExistingWorkspaceWithACPTraceSkill(t *testing.T)
 	if err != nil {
 		t.Fatalf("ReadFile(acp-trace skill) error = %v", err)
 	}
-	if !strings.Contains(string(skillData), "最终 assistant 回复") || !strings.Contains(string(skillData), "turn_result") {
+	if !strings.Contains(string(skillData), "is_final=true") || !strings.Contains(string(skillData), "message_id") || !strings.Contains(string(skillData), "turn_result") {
 		t.Fatalf("acp-trace skill = %q, want trace guidance", skillData)
 	}
 	logData, err := os.ReadFile(filepath.Join(workspace, "knowledge", "log.md"))

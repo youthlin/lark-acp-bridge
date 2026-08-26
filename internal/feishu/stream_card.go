@@ -275,8 +275,9 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message, options Stre
 	processPanelEnabled := options.ProcessPanelEnabled
 	statusBarEnabled := options.StatusBarEnabled
 	processTitle := normalizedStreamCardProcessTitle(options.ProcessTitle)
+	initialProcess := strings.TrimSpace(options.InitialProcess)
 	meta := normalizeStreamCardMeta(options.Meta)
-	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromBlocksWithProcessTitle([]outboundBlock{{Kind: outboundBlockMarkdown}}, "", streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta, processTitle), "流式")
+	cardID, err := a.createCardJSON(ctx, newStreamCardJSONFromBlocksWithProcessTitle([]outboundBlock{{Kind: outboundBlockMarkdown}}, initialProcess, streamCardInitialStatus, "", processPanelEnabled, statusBarEnabled, false, true, meta, processTitle), "流式")
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +296,7 @@ func (a *Adapter) StartStreamCard(ctx context.Context, msg Message, options Stre
 		created:        streamCardNow(),
 		meta:           meta,
 		processCreated: processPanelEnabled,
+		process:        initialProcess,
 		processTitle:   processTitle,
 		statusCreated:  statusBarEnabled,
 		status:         initialStatus,

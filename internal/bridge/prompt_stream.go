@@ -703,15 +703,21 @@ func processPanelText(entries []string) string {
 
 func (s *promptCardStream) processPanelTextLocked() string {
 	process := processPanelText(s.process)
-	if strings.TrimSpace(process) == "" {
-		return ""
+	var prefix []string
+	if sid := strings.TrimSpace(s.session.ACPSessionID); sid != "" {
+		prefix = append(prefix, "sid: "+escapeInlineMarkdown(sid))
 	}
-	sid := strings.TrimSpace(s.session.ACPSessionID)
-	if sid == "" {
+	if msgID := strings.TrimSpace(s.msg.MessageID); msgID != "" {
+		prefix = append(prefix, "msg: "+escapeInlineMarkdown(msgID))
+	}
+	if len(prefix) == 0 {
 		return process
 	}
-	prefix := "sid: " + escapeInlineMarkdown(sid)
-	return prefix + "\n\n" + process
+	prefixText := strings.Join(prefix, "\n")
+	if strings.TrimSpace(process) == "" {
+		return prefixText
+	}
+	return prefixText + "\n\n" + process
 }
 
 func (s *promptCardStream) finishProcessStream() {
@@ -927,13 +933,24 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 	ready := make(chan struct{})
 	s.creating = true
 	s.ready = ready
+	initialProcess := ""
+	options := s.options
+	processPanelEnabled := s.showStepMessages || s.showThoughts || s.showTools
+	statusBarEnabled := s.showStatusBar
+	processTitle := promptStreamProcessTitle(s.session)
+	starter := s.starter
+	msg := s.msg
+	if processPanelEnabled {
+		initialProcess = s.processPanelTextLocked()
+	}
 	s.mu.Unlock()
 
-	options := s.options
-	options.ProcessPanelEnabled = s.showStepMessages || s.showThoughts || s.showTools
-	options.StatusBarEnabled = s.showStatusBar
-	options.ProcessTitle = promptStreamProcessTitle(s.session)
-	starter := s.starter
+	options.ProcessPanelEnabled = processPanelEnabled
+	options.StatusBarEnabled = statusBarEnabled
+	options.ProcessTitle = processTitle
+	if options.ProcessPanelEnabled {
+		options.InitialProcess = initialProcess
+	}
 	if starter == nil {
 		s.mu.Lock()
 		s.creating = false
@@ -945,7 +962,7 @@ func (s *promptCardStream) ensureCardWithContext(ctx context.Context) feishu.Str
 		s.mu.Unlock()
 		return nil
 	}
-	card, err := starter.StartStreamCard(ctx, s.msg, options)
+	card, err := starter.StartStreamCard(ctx, msg, options)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.creating = false

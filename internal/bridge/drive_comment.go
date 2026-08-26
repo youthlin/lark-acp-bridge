@@ -104,15 +104,16 @@ func (s *Service) driveCommentTriggerRequest(comment feishu.DriveComment) (Trigg
 		workspace = s.botWorkspace(comment.BotID)
 	}
 	req := TriggerRequest{
-		BotID:     comment.BotID,
-		Key:       driveCommentSessionKey(comment),
-		Workspace: workspace,
-		AgentName: agentName,
-		Cwd:       cwd,
-		Title:     driveCommentSessionTitle(comment),
-		Prompt:    driveCommentPrompt(comment),
-		Metadata:  driveCommentMetadata(comment),
-		Sink:      noopTriggerSink{},
+		BotID:          comment.BotID,
+		Key:            driveCommentSessionKey(comment),
+		TraceMessageID: driveCommentTraceMessageID(comment),
+		Workspace:      workspace,
+		AgentName:      agentName,
+		Cwd:            cwd,
+		Title:          driveCommentSessionTitle(comment),
+		Prompt:         driveCommentPrompt(comment),
+		Metadata:       driveCommentMetadata(comment),
+		Sink:           noopTriggerSink{},
 	}
 	if sink := s.driveCommentTraceSink(comment, cwd); sink != nil {
 		req.Sink = sink
@@ -163,6 +164,11 @@ func driveCommentSessionTitle(comment feishu.DriveComment) string {
 		return "云文档评论"
 	}
 	return "云文档评论 " + comment.FileType + ":" + comment.FileToken + "#" + comment.CommentID
+}
+
+func driveCommentTraceMessageID(comment feishu.DriveComment) string {
+	comment = comment.Normalized()
+	return traceMessageID(sessionSourceDriveComment, comment.FileType, comment.FileToken, comment.CommentID, comment.ReplyID)
 }
 
 func driveCommentPrompt(comment feishu.DriveComment) string {

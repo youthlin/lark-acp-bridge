@@ -26,6 +26,7 @@ type TriggerSink interface {
 type TriggerRequest struct {
 	BotID                string
 	Key                  SessionKey
+	TraceMessageID       string
 	Workspace            string
 	AgentName            string
 	Cwd                  string
@@ -68,6 +69,10 @@ func (r TriggerRequest) normalized() TriggerRequest {
 	if r.BotID == "" {
 		r.BotID = r.Key.BotID
 	}
+	r.TraceMessageID = strings.TrimSpace(r.TraceMessageID)
+	if r.TraceMessageID == "" && !strings.EqualFold(r.Key.Source, sessionSourceIM) {
+		r.TraceMessageID = triggerTraceMessageID(r.Key)
+	}
 	r.Workspace = strings.TrimSpace(r.Workspace)
 	r.AgentName = strings.TrimSpace(r.AgentName)
 	r.Cwd = strings.TrimSpace(r.Cwd)
@@ -80,6 +85,11 @@ func (r TriggerRequest) normalized() TriggerRequest {
 func (r TriggerRequest) valid() bool {
 	r = r.normalized()
 	return r.BotID != "" && r.Key.Valid() && r.Prompt != ""
+}
+
+func triggerTraceMessageID(key SessionKey) string {
+	key = normalizeSessionKey(key)
+	return traceMessageID(key.Source, key.MainID, key.SubID)
 }
 
 func newTriggerResult(req TriggerRequest, session Session, acpResult acp.PromptResult, text string, textSet bool, sentProgress bool, err error) TriggerResult {
@@ -376,7 +386,7 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	}
 	chunks := &triggerTextAccumulator{}
 	out, err := runPromptTask(s, ctx, session, agent, triggerPromptTaskOptions(), func(taskCtx context.Context) (acp.PromptResult, bool, error) {
-		recorder := s.newTraceRecorder(session, req.Prompt)
+		recorder := s.newTraceRecorderWithMessageID(session, req.Prompt, req.TraceMessageID)
 		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, tracePromptOptions(recorder, acp.PromptOptions{
 			OnUpdate: func(update acp.PromptUpdate) {
 				chunks.add(update)

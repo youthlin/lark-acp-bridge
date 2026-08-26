@@ -198,7 +198,7 @@ func TestStartUpgradesExistingWorkspaceBuiltinSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", workspaceACPTraceSkillFileName(), err)
 	}
-	if !strings.Contains(string(skillData), "name: acp-trace") || !strings.Contains(string(skillData), "最终 assistant 回复") {
+	if !strings.Contains(string(skillData), "name: acp-trace") || !strings.Contains(string(skillData), "is_final=true") || !strings.Contains(string(skillData), "message_id") {
 		t.Fatalf("acp-trace skill = %q, want built-in trace instructions", skillData)
 	}
 	for _, file := range []struct {
