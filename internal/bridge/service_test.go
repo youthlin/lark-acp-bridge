@@ -4507,7 +4507,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	for _, want := range []string{
 		"## 群聊明确提及",
 		"当前群聊已启用 /at off auto，但本轮用户明确 at 了你。",
-		"请按普通用户消息正常回复，不要输出 SILENT。",
+		"`SILENT` 只用于未 at bot 的自动判断；本轮必须按普通用户消息正常回复，不能输出 SILENT。",
 		"请处理",
 	} {
 		if !strings.Contains(mentionPrompt, want) {
@@ -4521,6 +4521,25 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 		if strings.Contains(mentionPrompt, unexpected) {
 			t.Fatalf("mention prompt = %q, should not contain auto decision rule %q", mentionPrompt, unexpected)
 		}
+	}
+
+	rt.mu.Lock()
+	rt.promptResults = []acp.PromptResult{{Text: "SILENT"}}
+	rt.promptUpdates = nil
+	rt.mu.Unlock()
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     msg.BotID,
+		MessageID: "om_auto_mentioned_silent",
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		Text:      "@智能助手 下班了？",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(group mention returns SILENT after auto) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want invalid mention SILENT suppressed", reply)
 	}
 
 	rt.mu.Lock()
@@ -4539,7 +4558,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want empty final reply because delayed auto card was sent", reply)
 	}
-	if len(rt.promptCalls) != 3 {
+	if len(rt.promptCalls) != 4 {
 		t.Fatalf("promptCalls = %+v, want second auto prompt", rt.promptCalls)
 	}
 	if len(cards) != 1 {
@@ -4611,7 +4630,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want silent ignore after /at on", reply)
 	}
-	if len(rt.promptCalls) != 3 {
+	if len(rt.promptCalls) != 4 {
 		t.Fatalf("promptCalls = %+v, want no extra prompt after /at on", rt.promptCalls)
 	}
 }

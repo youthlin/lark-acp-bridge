@@ -181,6 +181,10 @@ func (s *Service) finishPromptPostWork(ctx context.Context, out promptRunOutcome
 	if opts.allowReplySuppression && s.shouldSuppressAtAutoReply(opts.msg, reply) {
 		return promptPostWorkResult{session: session, suppressed: true}
 	}
+	if opts.allowReplySuppression && s.shouldSuppressInvalidMentionSilentReply(opts.msg, reply) {
+		slog.WarnContext(ctx, "明确 at 消息返回 SILENT，按空回复抑制", "session", session.ACPSessionID, "message_id", opts.msg.MessageID)
+		return promptPostWorkResult{session: session, suppressed: true}
+	}
 	if !opts.skipPostPromptWork && shouldUpdatePromptTitle(out.err, reply, out.sentProgress, opts.updateTitleOnSuccessOnly) && opts.updateTitle != nil {
 		session = opts.updateTitle(ctx, session)
 		out.session = session

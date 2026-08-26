@@ -181,6 +181,56 @@ func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 	assertTraceRecordFinal(t, records[3], true)
 }
 
+func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := newTraceStore(workspace, config.TraceConfig{Enabled: true, RetentionDays: 7})
+	oldMax := traceFileMaxBytes
+	traceFileMaxBytes = 600
+	t.Cleanup(func() { traceFileMaxBytes = oldMax })
+
+	path := filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll(trace dir) error = %v", err)
+	}
+	records := []traceRecord{
+		{TS: traceTimestamp(time.Now()), Type: "user", Content: "hello"},
+		{TS: traceTimestamp(time.Now()), Type: "tool", ToolCallID: "tool-1", Output: json.RawMessage(`"` + strings.Repeat("x", 800) + `"`)},
+		{TS: traceTimestamp(time.Now()), Type: "assistant", Content: "working"},
+		{TS: traceTimestamp(time.Now()), Type: "assistant", IsFinal: true, Content: "done"},
+	}
+	var data []byte
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("Marshal(%+v) error = %v", record, err)
+		}
+		data = append(data, line...)
+		data = append(data, '\n')
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(trace) error = %v", err)
+	}
+	if err := store.Append(session, traceRecord{Type: "usage", Used: 1, Size: 2}); err != nil {
+		t.Fatalf("Append(usage) error = %v", err)
+	}
+
+	gotRecords := readTraceRecords(t, path)
+	if got := traceRecordTypes(gotRecords); strings.Join(got, ",") != "user,assistant" {
+		t.Fatalf("record types = %v, records = %+v", got, gotRecords)
+	}
+	if gotRecords[0]["content"] != "hello" || gotRecords[1]["content"] != "done" {
+		t.Fatalf("records = %+v, want summary user and final assistant", gotRecords)
+	}
+	assertTraceRecordFinal(t, gotRecords[1], true)
+}
+
 func TestTraceRecordTimestampMarshalsAsFixedTS(t *testing.T) {
 	data, err := json.Marshal(traceRecord{
 		TS:      traceTimestamp(time.Date(2026, 8, 26, 12, 34, 56, 120000000, time.UTC)),

@@ -358,7 +358,7 @@ func (s *Service) promptTextWithAtAutoMention(msg feishu.Message, promptText str
 	return promptWithUserMessage([]string{
 		"## 群聊明确提及\n" + strings.Join([]string{
 			"当前群聊已启用 /at off auto，但本轮用户明确 at 了你。",
-			"请按普通用户消息正常回复，不要输出 SILENT。",
+			"`SILENT` 只用于未 at bot 的自动判断；本轮必须按普通用户消息正常回复，不能输出 SILENT。",
 		}, "\n"),
 	}, promptText)
 }
@@ -440,6 +440,10 @@ func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
 
 func (s *Service) shouldSuppressAtAutoReply(msg feishu.Message, reply string) bool {
 	return s.shouldHandleAtAutoMessage(msg) && isSilentReplySentinel(reply)
+}
+
+func (s *Service) shouldSuppressInvalidMentionSilentReply(msg feishu.Message, reply string) bool {
+	return s.shouldHandleAtAutoMentionMessage(msg) && strings.EqualFold(strings.TrimSpace(reply), silentReplySentinel)
 }
 
 func (s *Service) shouldDelayAtAutoProgress(msg feishu.Message) bool {

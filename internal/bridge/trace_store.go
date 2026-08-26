@@ -1,9 +1,12 @@
 package bridge
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +22,8 @@ import (
 )
 
 const traceDirName = "traces"
+
+var traceFileMaxBytes int64 = 10 * 1024 * 1024
 
 var traceFileSafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
@@ -130,7 +135,20 @@ func (s *traceStore) Append(session Session, record traceRecord) error {
 		return fmt.Errorf("编码 trace 记录: %w", err)
 	}
 	data = append(data, '\n')
-	file, err := os.OpenFile(s.sessionPath(session), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	path := s.sessionPath(session)
+	compacted, err := compactTraceFileIfNeeded(path, int64(len(data)))
+	if err != nil {
+		slog.Warn("压缩 ACP trace 文件失败", "path", path, "错误", err)
+	}
+	if compacted && !traceRecordKeptAfterCompaction(record) {
+		slog.Debug("跳过触发压缩的非摘要 ACP trace 记录", "path", path, "type", record.Type, "message_id", record.MessageID)
+		return nil
+	}
+	if !traceRecordKeptAfterCompaction(record) && traceFileWouldExceed(path, int64(len(data))) {
+		slog.Debug("跳过非摘要 ACP trace 记录以限制文件大小", "path", path, "type", record.Type, "message_id", record.MessageID)
+		return nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("打开 trace 文件: %w", err)
 	}
@@ -142,6 +160,101 @@ func (s *traceStore) Append(session Session, record traceRecord) error {
 		return fmt.Errorf("关闭 trace 文件: %w", err)
 	}
 	return nil
+}
+
+func compactTraceFileIfNeeded(path string, incomingBytes int64) (bool, error) {
+	if !traceFileWouldExceed(path, incomingBytes) {
+		return false, nil
+	}
+	return true, compactTraceFileToSummary(path)
+}
+
+func traceFileWouldExceed(path string, incomingBytes int64) bool {
+	if traceFileMaxBytes <= 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size()+incomingBytes > traceFileMaxBytes
+}
+
+func compactTraceFileToSummary(path string) error {
+	in, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".trace-compact-*.jsonl")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	reader := bufio.NewReader(in)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 && traceLineKeptAfterCompaction(line) {
+			if _, err := tmp.Write(line); err != nil {
+				_ = tmp.Close()
+				return err
+			}
+			if len(line) == 0 || line[len(line)-1] != '\n' {
+				if _, err := tmp.Write([]byte{'\n'}); err != nil {
+					_ = tmp.Close()
+					return err
+				}
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		_ = tmp.Close()
+		return readErr
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func traceLineKeptAfterCompaction(line []byte) bool {
+	var record struct {
+		Type    string `json:"type"`
+		IsFinal bool   `json:"is_final,omitempty"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(line), &record); err != nil {
+		return false
+	}
+	return traceRecordKeptAfterCompaction(traceRecord{Type: record.Type, IsFinal: record.IsFinal})
+}
+
+func traceRecordKeptAfterCompaction(record traceRecord) bool {
+	switch strings.TrimSpace(record.Type) {
+	case "user":
+		return true
+	case "assistant":
+		return record.IsFinal
+	default:
+		return false
+	}
 }
 
 func (s *traceStore) pruneLocked(now time.Time) {
