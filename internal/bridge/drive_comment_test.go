@@ -338,12 +338,14 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	replies := &driveCommentReplyRecorder{}
 	var streamTargets []feishu.Message
 	var streamMetas []feishu.StreamCardMeta
+	var initialProcesses []string
 	streamCard := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_trace", ChatID: "oc_trace", RootID: "om_trace"}}
 	outbound := &fakeSentMessageClient{}
 	outbound.driveCommentReplySender = replies.ReplyDriveComment
 	outbound.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
 		streamMetas = append(streamMetas, options.Meta)
+		initialProcesses = append(initialProcesses, options.InitialProcess)
 		return streamCard, nil
 	}
 	svc.setOutbound("bot-a", outbound)
@@ -364,6 +366,9 @@ func TestDriveCommentTraceStreamsToConfiguredChatAndBindsMessage(t *testing.T) {
 	}
 	if len(streamTargets) != 1 || streamTargets[0].ChatID != "oc_trace" || streamTargets[0].MessageID != "" {
 		t.Fatalf("stream targets = %+v, want new card in trace chat", streamTargets)
+	}
+	if len(initialProcesses) != 1 || !strings.Contains(initialProcesses[0], "msg: drive\\_comment\\_docx\\_doc-token\\_comment-1") {
+		t.Fatalf("initial processes = %+v, want drive comment trace msg id", initialProcesses)
 	}
 	wantMetadata := "**引用文本：** quoted document text\n**评论内容：** please handle\n**文档链接：** https://feishu.cn/docx/doc-token"
 	if len(streamMetas) != 1 || streamMetas[0].Subtitle != "" || streamMetas[0].Metadata != wantMetadata || streamMetas[0].SourceURL != "" || streamMetas[0].Footer != driveCommentStreamCardFooter || !streamMetas[0].HideHeaderIcon {

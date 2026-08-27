@@ -107,6 +107,7 @@ func (s *driveCommentTraceSink) ensureStream(ctx context.Context, result Trigger
 	}
 	message := s.traceMessage(result.Session.Key)
 	stream := newPromptCardStream(ctx, message, session, s.show, streamCardStarterFunc(s.starter))
+	stream.setProcessMessageID(result.Request.TraceMessageID)
 	stream.setInitialMeta(s.streamCardMeta())
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {

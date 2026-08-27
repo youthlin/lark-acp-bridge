@@ -1147,10 +1147,12 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	}
 	var streamTargets []feishu.Message
 	var streamMetas []feishu.StreamCardMeta
+	var initialProcesses []string
 	var streamCard *fakeStreamCard
 	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
 		streamMetas = append(streamMetas, options.Meta)
+		initialProcesses = append(initialProcesses, options.InitialProcess)
 		streamCard = &fakeStreamCard{message: feishu.SentMessage{
 			MessageID: "om_schedule_result",
 			ChatID:    msg.ChatID,
@@ -1185,6 +1187,9 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	}
 	if streamCard == nil {
 		t.Fatal("stream card was not created")
+	}
+	if len(initialProcesses) != 1 || !strings.Contains(initialProcesses[0], "msg: schedule\\_daily\\_run-1") {
+		t.Fatalf("initial processes = %+v, want scheduled trace msg id", initialProcesses)
 	}
 	metaUpdates := streamCard.metaUpdatesSnapshot()
 	if len(metaUpdates) != 1 || metaUpdates[0].Title != "定时任务已完成" || metaUpdates[0].Subtitle != "task-id: daily" || metaUpdates[0].Footer != "本消息的回复链将在本次执行会话中处理。" {

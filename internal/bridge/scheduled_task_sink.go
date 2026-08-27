@@ -148,6 +148,7 @@ func (s *scheduledTaskIMSink) ensureStream(ctx context.Context, result TriggerRe
 		session.Cwd = s.cwd
 	}
 	stream := newPromptCardStream(ctx, s.message, session, ChatConfig{}, streamCardStarterFunc(s.starter))
+	stream.setProcessMessageID(result.Request.TraceMessageID)
 	stream.setInitialMeta(s.streamCardMeta(result))
 	card := stream.ensureCardWithContext(ctx)
 	if card == nil {
