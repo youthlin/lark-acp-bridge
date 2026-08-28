@@ -54,14 +54,9 @@ type traceRecord struct {
 	TS            traceTimestamp         `json:"ts"`
 	Type          string                 `json:"type"`
 	IsFinal       bool                   `json:"is_final,omitempty"`
-	BotID         string                 `json:"bot_id,omitempty"`
 	Source        string                 `json:"source,omitempty"`
-	MainID        string                 `json:"main_id,omitempty"`
 	SubID         string                 `json:"sub_id,omitempty"`
-	SessionID     string                 `json:"session_id,omitempty"`
 	MessageID     string                 `json:"message_id,omitempty"`
-	AgentName     string                 `json:"agent_name,omitempty"`
-	Cwd           string                 `json:"cwd,omitempty"`
 	Content       string                 `json:"content,omitempty"`
 	ToolCallID    string                 `json:"tool_call_id,omitempty"`
 	Name          string                 `json:"name,omitempty"`
@@ -302,13 +297,8 @@ func normalizeTraceRecord(session Session, record traceRecord) traceRecord {
 		record.TS = traceTimestamp(time.Now())
 	}
 	record.Type = strings.TrimSpace(record.Type)
-	record.BotID = strings.TrimSpace(firstNonEmpty(record.BotID, session.Key.BotID))
 	record.Source = strings.TrimSpace(firstNonEmpty(record.Source, session.Key.Source))
-	record.MainID = strings.TrimSpace(firstNonEmpty(record.MainID, session.Key.MainID, session.Key.ChatID))
 	record.SubID = strings.TrimSpace(firstNonEmpty(record.SubID, session.Key.SubID))
-	record.SessionID = strings.TrimSpace(firstNonEmpty(record.SessionID, session.ACPSessionID))
-	record.AgentName = strings.TrimSpace(firstNonEmpty(record.AgentName, session.AgentName))
-	record.Cwd = strings.TrimSpace(firstNonEmpty(record.Cwd, session.Cwd))
 	record.ToolCallID = strings.TrimSpace(record.ToolCallID)
 	record.Name = strings.TrimSpace(record.Name)
 	record.Kind = strings.TrimSpace(record.Kind)

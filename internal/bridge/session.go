@@ -9,11 +9,11 @@ import (
 )
 
 type SessionKey struct {
-	BotID  string `json:"bot_id"`
-	Source string `json:"source,omitempty"`
-	MainID string `json:"main_id,omitempty"`
-	SubID  string `json:"sub_id,omitempty"`
-	ChatID string `json:"chat_id,omitempty"`
+	BotID  string `json:"bot_id"`            // config.json 中配置的 bot id
+	Source string `json:"source,omitempty"`  // 消息来源 im/schedule/drive_comment
+	MainID string `json:"main_id,omitempty"` // chatid
+	SubID  string `json:"sub_id,omitempty"`  // thread_id
+	ChatID string `json:"chat_id,omitempty"` // todo 考虑去除
 }
 
 func (k SessionKey) Valid() bool {

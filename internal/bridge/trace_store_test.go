@@ -110,6 +110,7 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 		if record["message_id"] != "om_prompt_1" {
 			t.Fatalf("record[%d] message_id = %v, want om_prompt_1; record = %+v", i, record["message_id"], record)
 		}
+		assertTraceRecordOmitsSessionMetadata(t, record)
 	}
 	if records[0]["type"] != "user" || records[0]["content"] == "" {
 		t.Fatalf("first record = %+v, want user prompt", records[0])
@@ -431,13 +432,14 @@ func TestTriggerPromptWritesJSONLTraceForNonIMSources(t *testing.T) {
 			if got := traceRecordTypes(records); strings.Join(got, ",") != "user,status,assistant,turn_result" {
 				t.Fatalf("record types = %v, records = %+v", got, records)
 			}
-			if records[0]["source"] != tt.key.Source || records[0]["main_id"] != tt.key.MainID || records[0]["sub_id"] != tt.key.SubID {
+			if records[0]["source"] != tt.key.Source || records[0]["sub_id"] != tt.key.SubID {
 				t.Fatalf("first record key fields = %+v, want trigger source key", records[0])
 			}
 			for i, record := range records {
 				if record["message_id"] != tt.traceMessageID {
 					t.Fatalf("record[%d] message_id = %v, want %s; record = %+v", i, record["message_id"], tt.traceMessageID, record)
 				}
+				assertTraceRecordOmitsSessionMetadata(t, record)
 			}
 			if records[1]["type"] != "status" || records[1]["content"] != "preparing" {
 				t.Fatalf("second record = %+v, want status update", records[1])
@@ -631,6 +633,15 @@ func assertTraceRecordTimestamps(t *testing.T, records []map[string]any) {
 		}
 		if _, err := time.Parse(traceTimestampLayout, ts); err != nil {
 			t.Fatalf("record[%d] ts = %q, want %s format: %v", i, ts, traceTimestampLayout, err)
+		}
+	}
+}
+
+func assertTraceRecordOmitsSessionMetadata(t *testing.T, record map[string]any) {
+	t.Helper()
+	for _, key := range []string{"bot_id", "session_id", "agent_name", "main_id", "cwd"} {
+		if _, ok := record[key]; ok {
+			t.Fatalf("record = %+v, want no redundant session metadata field %q", record, key)
 		}
 	}
 }
