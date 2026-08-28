@@ -124,11 +124,6 @@ func (s *SessionStore) Load() error {
 	}
 	s.trimHistoryLocked()
 	s.pruneMessageBindingsLocked(time.Now())
-	if sessionFileHasLegacySessionKeyShape(data) {
-		if err := s.writeLocked(); err != nil {
-			slog.Warn("转换旧会话 key 写回失败", "路径", s.path, "读取路径", path, "错误", err)
-		}
-	}
 	return nil
 }
 
@@ -1202,51 +1197,6 @@ func chatKeyFromSessionKey(key SessionKey) ChatKey {
 		return ChatKey{BotID: key.BotID}
 	}
 	return ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)}
-}
-
-func sessionFileHasLegacySessionKeyShape(data []byte) bool {
-	type rawSession struct {
-		Key map[string]json.RawMessage `json:"key"`
-	}
-	type rawMessage struct {
-		SessionKey map[string]json.RawMessage `json:"session_key"`
-	}
-	var raw struct {
-		Sessions []rawSession `json:"sessions"`
-		History  []rawSession `json:"history"`
-		Messages []rawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return false
-	}
-	for _, session := range raw.Sessions {
-		if sessionKeyShapeHasLegacyFields(session.Key) {
-			return true
-		}
-	}
-	for _, session := range raw.History {
-		if sessionKeyShapeHasLegacyFields(session.Key) {
-			return true
-		}
-	}
-	for _, message := range raw.Messages {
-		if sessionKeyShapeHasLegacyFields(message.SessionKey) {
-			return true
-		}
-	}
-	return false
-}
-
-func sessionKeyShapeHasLegacyFields(key map[string]json.RawMessage) bool {
-	if len(key) == 0 {
-		return false
-	}
-	for _, field := range []string{"chat_id", "thread_id", "parent_id"} {
-		if _, ok := key[field]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 type sessionFile struct {

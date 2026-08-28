@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -17,30 +16,6 @@ type SessionKey struct {
 
 func (k SessionKey) Valid() bool {
 	return sessionKeySource(k) != "" && sessionKeyMainID(k) != ""
-}
-
-func (k *SessionKey) UnmarshalJSON(data []byte) error {
-	type sessionKeyJSON struct {
-		BotID          string `json:"bot_id"`
-		Source         string `json:"source,omitempty"`
-		MainID         string `json:"main_id,omitempty"`
-		SubID          string `json:"sub_id,omitempty"`
-		LegacyParentID string `json:"parent_id,omitempty"`
-		LegacyChatID   string `json:"chat_id,omitempty"`
-		LegacyThreadID string `json:"thread_id,omitempty"`
-	}
-	var raw sessionKeyJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	k.BotID = raw.BotID
-	k.Source = raw.Source
-	k.MainID = firstNonEmpty(raw.MainID, raw.LegacyParentID, raw.LegacyChatID)
-	k.SubID = firstNonEmpty(raw.SubID, raw.LegacyThreadID)
-	if strings.TrimSpace(k.Source) == "" && strings.TrimSpace(raw.LegacyChatID) != "" {
-		k.Source = sessionSourceIM
-	}
-	return nil
 }
 
 type ChatKey struct {

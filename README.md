@@ -165,7 +165,7 @@ $BOT_WORKSPACE/.local/cache/
 
 workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；会话、定时任务、token 用量、重启回执、飞书消息去重记录和飞书图片缓存这类本地运行态统一写入 `.local/`。bridge 会在服务启动和 workspace 初始化时确保 `.gitignore` 包含 `.local/`，方便后续直接对 workspace 做 git 管理。服务启动和 workspace 初始化时还会把升级前已经存在于 workspace 根目录的 `sessions.json`、`scheduled_tasks.json`、`token_usage.json`、`restart_ack.json`、`processed_messages.json` 和 `cache/` 一次性移动到 `.local/` 下，并删除外层旧路径；如果 `.local/` 下已经存在同名目标，为避免覆盖数据，会跳过该项并保留外层旧副本，同时记录 warning 日志。
 
-会话映射使用 JSON 文件保存 `bot_id + source + main_id + sub_id -> ACP session`。当前聊天入口使用 `source=im`，普通群和私聊的 `main_id` 是 `chat_id`、`sub_id` 为空，表示整个 chat 共用一个 ACP session；话题群的 `main_id` 是 `chat_id`、`sub_id` 是当前话题的 `thread_id`。旧版 IM 记录中的 `chat_id + thread_id` 会被防御性读取为 `source=im`、`main_id=<chat_id>`、`sub_id=<thread_id>`，但新版本写入时只使用新的 SessionKey 形态。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`.local/sessions.json` 还会保留同一主资源里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`，并保存 chat 维度的 `/agent`、`/show`、`/at`、`/wiki` 配置。服务进程内会为活跃飞书会话维护对应的 ACP agent 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
+会话映射使用 JSON 文件保存 `bot_id + source + main_id + sub_id -> ACP session`。当前聊天入口使用 `source=im`，普通群和私聊的 `main_id` 是 `chat_id`、`sub_id` 为空，表示整个 chat 共用一个 ACP session；话题群的 `main_id` 是 `chat_id`、`sub_id` 是当前话题的 `thread_id`。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`.local/sessions.json` 还会保留同一主资源里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`，并保存 chat 维度的 `/agent`、`/show`、`/at`、`/wiki` 配置。服务进程内会为活跃飞书会话维护对应的 ACP agent 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
 
 `.local/restart_ack.json` 是一次性重启回执文件。用户通过 `/restart` 触发重启时，旧进程先记录原消息位置并发送“准备重启”，新进程启动后读取该文件，向原消息回复“已重启”，发送成功后删除文件。
 
