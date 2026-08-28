@@ -494,6 +494,9 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	if !strings.Contains(reply, "/loop add <补充消息>|status|stop") {
 		t.Fatalf("reply = %q, want loop add help", reply)
 	}
+	if !strings.Contains(reply, "/sid <acp_session_id> <prompt>") {
+		t.Fatalf("reply = %q, want sid help", reply)
+	}
 }
 
 func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
@@ -653,6 +656,11 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			name: "/queue",
 			text: "/queue",
 			msg:  feishu.Message{Text: "/queue"},
+		},
+		{
+			name: "/sid",
+			text: "/sid",
+			msg:  feishu.Message{Text: "/sid"},
 		},
 		{
 			name: "/restart",
@@ -9622,6 +9630,162 @@ func TestHandleFeishuMessageReplyToDriveCommentTraceCardUsesBoundSession(t *test
 	}
 	if strings.Contains(rt.promptCalls[0].Text, "@智能助手") || !strings.Contains(rt.promptCalls[0].Text, "继续处理") {
 		t.Fatalf("prompt text = %q, want stripped follow-up text", rt.promptCalls[0].Text)
+	}
+}
+
+func TestHandleSIDCommandRoutesPromptToSpecifiedSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptReply: "已停止"}
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = t.TempDir()
+	cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	workDir := t.TempDir()
+	sourceKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"})
+	sourceSession := Session{
+		Key:          sourceKey,
+		AgentName:    "traex",
+		ACPSessionID: "acp-source",
+		Cwd:          workDir,
+		Workspace:    workDir,
+	}
+	if err := store.Upsert(sourceSession); err != nil {
+		t.Fatalf("Upsert(source session) error = %v", err)
+	}
+	otherCurrent := sourceSession
+	otherCurrent.ACPSessionID = "acp-other"
+	if err := store.Upsert(otherCurrent); err != nil {
+		t.Fatalf("Upsert(other current session) error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_sid",
+		ChatID:    "oc_trace",
+		ChatType:  "group",
+		SenderID:  testOwnerOpenID,
+		Text:      "@智能助手 /sid acp-source 停止执行 你跑偏啦",
+		Mentions:  testBotMentions(),
+		Workspace: workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/sid) error = %v", err)
+	}
+	if reply != "已停止" {
+		t.Fatalf("reply = %q, want sid prompt reply", reply)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one prompt", calls)
+	}
+	if calls[0].Session.Key != sourceKey || calls[0].Session.ACPSessionID != "acp-source" {
+		t.Fatalf("prompt session = %+v, want source session", calls[0].Session)
+	}
+	if strings.Contains(calls[0].Text, "/sid") || strings.Contains(calls[0].Text, "acp-source") || !strings.Contains(calls[0].Text, "停止执行 你跑偏啦") {
+		t.Fatalf("prompt text = %q, want stripped user text", calls[0].Text)
+	}
+	restored, ok := store.Get(sourceKey)
+	if !ok || restored.ACPSessionID != "acp-source" {
+		t.Fatalf("current source session = %+v ok=%v, want restored acp-source", restored, ok)
+	}
+}
+
+func TestHandleSIDCommandCancelsRunningTaskBeforeSessionTransition(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = t.TempDir()
+	cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
+	svc := NewService(cfg, store)
+	workDir := t.TempDir()
+	sourceKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"})
+	targetSession := Session{
+		Key:          sourceKey,
+		AgentName:    "traex",
+		ACPSessionID: "acp-source",
+		Cwd:          workDir,
+		Workspace:    workDir,
+	}
+	if err := store.Upsert(targetSession); err != nil {
+		t.Fatalf("Upsert(target session) error = %v", err)
+	}
+	currentSession := targetSession
+	currentSession.ACPSessionID = "acp-running"
+	if err := store.Upsert(currentSession); err != nil {
+		t.Fatalf("Upsert(current session) error = %v", err)
+	}
+	rt := &fakeRuntime{
+		promptReply: "插入完成",
+		activeSessionIDs: map[SessionKey]string{
+			sourceKey: currentSession.ACPSessionID,
+		},
+	}
+	svc.setRuntime(rt)
+	agent := mustConfigAgent(t, cfg, "traex")
+	taskStarted := make(chan struct{})
+	taskDone := make(chan error, 1)
+	go func() {
+		_, err := runUserTask(svc, context.Background(), currentSession, agent, runningTaskOptions{}, func(ctx context.Context) (struct{}, error) {
+			close(taskStarted)
+			<-ctx.Done()
+			return struct{}{}, ctx.Err()
+		})
+		taskDone <- err
+	}()
+	<-taskStarted
+	transitionChecked := make(chan struct{}, 1)
+	rt.transitionBefore = func() {
+		rt.mu.Lock()
+		cancelCalls := append([]fakeCancelCall(nil), rt.cancelCalls...)
+		promptCalls := append([]fakePromptCall(nil), rt.promptCalls...)
+		rt.mu.Unlock()
+		if len(cancelCalls) != 1 || cancelCalls[0].Session.ACPSessionID != "acp-running" {
+			t.Errorf("cancelCalls before transition = %+v, want one cancel for acp-running", cancelCalls)
+		}
+		if len(promptCalls) != 0 {
+			t.Errorf("promptCalls before transition = %+v, want none", promptCalls)
+		}
+		transitionChecked <- struct{}{}
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_sid",
+		ChatID:    "oc_trace",
+		ChatType:  "group",
+		SenderID:  testOwnerOpenID,
+		Text:      "@智能助手 /sid acp-source 插入处理",
+		Mentions:  testBotMentions(),
+		Workspace: workDir,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/sid) error = %v", err)
+	}
+	if reply != "插入完成" {
+		t.Fatalf("reply = %q, want sid prompt reply", reply)
+	}
+	if err := <-taskDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("running task error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-transitionChecked:
+	default:
+		t.Fatal("transitionBefore was not called")
+	}
+	rt.mu.Lock()
+	cancels := append([]fakeCancelCall(nil), rt.cancelCalls...)
+	rt.mu.Unlock()
+	calls := rt.promptCallsSnapshot()
+	if len(cancels) != 1 || len(calls) != 1 {
+		t.Fatalf("cancelCalls=%+v promptCalls=%+v, want one cancel then one prompt", cancels, calls)
+	}
+	if cancels[0].Seq >= calls[0].Seq {
+		t.Fatalf("call order cancel seq=%d prompt seq=%d, want cancel before prompt", cancels[0].Seq, calls[0].Seq)
+	}
+	if calls[0].Session.ACPSessionID != "acp-source" {
+		t.Fatalf("prompt session = %+v, want target session acp-source", calls[0].Session)
 	}
 }
 

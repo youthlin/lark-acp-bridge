@@ -151,6 +151,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/sid",
+		helpLines: []string{"/sid <acp_session_id> <prompt> - 将本条消息发送到指定 ACP session"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleSIDCommand(ctx, text, msg)
+		},
+	},
+	{
 		name:      "/restart",
 		helpLines: []string{"/restart - 重启 bridge 服务，重启完成后自动回复确认"},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
@@ -280,6 +287,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/wiki"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/loop"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/queue"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/sid"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/card"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/cmds"),

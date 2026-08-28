@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -12,13 +13,14 @@ const (
 	wikiTraceCardRunning   = "知识沉淀处理中"
 	wikiTraceCardCompleted = "知识沉淀完成"
 	wikiTraceCardFailed    = "知识沉淀失败"
-	wikiTraceCardFooter    = "本卡片仅展示后台知识沉淀过程，不会向来源聊天发送回复。"
+	wikiTraceCardFooter    = "本卡片仅展示后台知识沉淀过程，不会向来源聊天发送回复。回复本消息会进入原会话。"
 )
 
 type wikiTraceObserver struct {
 	message        feishu.Message
 	session        Session
 	show           ChatConfig
+	store          *SessionStore
 	starter        scheduledTaskStreamStarter
 	traceMessageID string
 
@@ -49,6 +51,7 @@ func (s *Service) wikiTraceObserver(session Session, generation int64) *wikiTrac
 		message:        msg,
 		session:        session,
 		show:           s.chatConfigForMessage(msg),
+		store:          s.storeForBotID(session.Key.BotID),
 		starter:        s.scheduleStreamStarter(session.Key.BotID),
 		traceMessageID: wikiTraceMessageID(session, generation),
 	}
@@ -146,12 +149,32 @@ func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream 
 	stream := newPromptCardStream(ctx, o.message, o.session, o.show, streamCardStarterFunc(o.starter))
 	stream.setProcessMessageID(o.traceMessageID)
 	stream.setInitialMeta(o.streamCardMeta(wikiTraceCardRunning))
-	if stream.ensureCardWithContext(ctx) == nil {
+	card := stream.ensureCardWithContext(ctx)
+	if card == nil {
 		return nil
 	}
 	o.stream = stream
 	o.chunks = newPromptChunkAccumulator(stream)
+	o.bindStreamMessage(ctx, card.Message())
 	return stream
+}
+
+func (o *wikiTraceObserver) bindStreamMessage(ctx context.Context, sent feishu.SentMessage) {
+	if o == nil || o.store == nil || strings.TrimSpace(sent.MessageID) == "" {
+		return
+	}
+	chatID := firstNonEmpty(sent.ChatID, o.message.ChatID)
+	if strings.TrimSpace(chatID) == "" {
+		return
+	}
+	if _, err := o.store.BindMessageToSession(MessageSessionBinding{
+		BotID:      o.session.Key.BotID,
+		ChatID:     chatID,
+		MessageID:  sent.MessageID,
+		SessionKey: o.session.Key,
+	}); err != nil {
+		slog.WarnContext(ctx, "保存知识沉淀过程卡片会话绑定失败", "message_id", sent.MessageID, "session", o.session.ACPSessionID, "错误", err)
+	}
 }
 
 func (o *wikiTraceObserver) streamCardMeta(title string) feishu.StreamCardMeta {

@@ -565,6 +565,15 @@ func (s *Service) cancelRunningSessionWorkSync(ctx context.Context, key SessionK
 	}
 }
 
+func (s *Service) interruptRunningSessionWork(ctx context.Context, key SessionKey) error {
+	task := s.takeRunningTask(key)
+	if task == nil {
+		return nil
+	}
+	completed := s.cancelTask(ctx, task, true)
+	return s.waitForReplacedTaskCompleted(ctx, task, completed, runningTaskOptions{})
+}
+
 func (s *Service) takeRunningTask(key SessionKey) *runningTask {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()

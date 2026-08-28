@@ -15,7 +15,11 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
-const sessionSourceIM = "im"
+const (
+	sessionSourceIM             = "im"
+	maxMessageSessionBindings   = 2000
+	messageSessionBindingMaxAge = 7 * 24 * time.Hour
+)
 
 type SessionStore struct {
 	path         string
@@ -119,6 +123,7 @@ func (s *SessionStore) Load() error {
 		}
 	}
 	s.trimHistoryLocked()
+	s.pruneMessageBindingsLocked(time.Now())
 	return nil
 }
 
@@ -377,6 +382,7 @@ func (s *SessionStore) BindMessageToSession(binding MessageSessionBinding) (Mess
 	}
 	binding.UpdatedAt = now
 	s.messages[messageBindingKeyFromBinding(binding)] = binding
+	s.pruneMessageBindingsLocked(now)
 	return binding, s.writeOrRestoreLocked(snapshot)
 }
 
@@ -430,6 +436,43 @@ func (s *SessionStore) ResumeSession(key SessionKey, acpSessionID string) (Sessi
 	defer s.mu.Unlock()
 
 	return s.resumeSessionLocked(key, acpSessionID)
+}
+
+func (s *SessionStore) SessionByACPSessionID(botID, acpSessionID string) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	botID = strings.TrimSpace(botID)
+	acpSessionID = strings.TrimSpace(acpSessionID)
+	if acpSessionID == "" {
+		return Session{}, false
+	}
+	var (
+		best  Session
+		found bool
+	)
+	for _, session := range s.sessions {
+		if !sessionMatchesACPSessionID(session, botID, acpSessionID) {
+			continue
+		}
+		if !found || session.UpdatedAt.After(best.UpdatedAt) || session.UpdatedAt.Equal(best.UpdatedAt) && sessionKeyLess(session.Key, best.Key) {
+			best = cloneSession(session)
+			found = true
+		}
+	}
+	if found {
+		return best, true
+	}
+	for _, session := range s.history {
+		if !sessionMatchesACPSessionID(session, botID, acpSessionID) {
+			continue
+		}
+		if !found || session.UpdatedAt.After(best.UpdatedAt) || session.UpdatedAt.Equal(best.UpdatedAt) && sessionKeyLess(session.Key, best.Key) {
+			best = cloneSession(session)
+			found = true
+		}
+	}
+	return best, found
 }
 
 func (s *SessionStore) ResumeSessionIfCurrent(key SessionKey, currentACPSessionID, acpSessionID string) (Session, bool, error) {
@@ -641,9 +684,61 @@ func (s *SessionStore) trimHistoryLocked() {
 	s.history = trimmed
 }
 
+func (s *SessionStore) pruneMessageBindingsLocked(now time.Time) {
+	if len(s.messages) == 0 {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	for key, binding := range s.messages {
+		binding = normalizeMessageBinding(binding)
+		if !validMessageBinding(binding) {
+			delete(s.messages, key)
+			continue
+		}
+		if _, ok := s.sessions[binding.SessionKey]; !ok {
+			delete(s.messages, key)
+			continue
+		}
+		if messageBindingTooOld(binding, now) {
+			delete(s.messages, key)
+			continue
+		}
+		if normalizedKey := messageBindingKeyFromBinding(binding); normalizedKey != key {
+			delete(s.messages, key)
+			s.messages[normalizedKey] = binding
+		} else {
+			s.messages[key] = binding
+		}
+	}
+	if len(s.messages) <= maxMessageSessionBindings {
+		return
+	}
+	bindings := make([]MessageSessionBinding, 0, len(s.messages))
+	for _, binding := range s.messages {
+		bindings = append(bindings, normalizeMessageBinding(binding))
+	}
+	sort.SliceStable(bindings, func(i, j int) bool {
+		return messageBindingUpdatedAfter(bindings[i], bindings[j])
+	})
+	s.messages = make(map[messageBindingKey]MessageSessionBinding, maxMessageSessionBindings)
+	for i, binding := range bindings {
+		if i >= maxMessageSessionBindings {
+			break
+		}
+		s.messages[messageBindingKeyFromBinding(binding)] = binding
+	}
+}
+
 func sameHistorySession(a, b Session) bool {
 	return sameSessionMain(a.Key, b.Key) &&
 		a.ACPSessionID == b.ACPSessionID
+}
+
+func sessionMatchesACPSessionID(session Session, botID, acpSessionID string) bool {
+	session = normalizeSessionForStore(session)
+	return botID != "" && session.Key.Valid() && session.Key.BotID == botID && session.ACPSessionID == acpSessionID
 }
 
 func (s *SessionStore) snapshotLocked() sessionStoreSnapshot {
@@ -828,6 +923,51 @@ func messageBindingCreatedBefore(a, b MessageSessionBinding) bool {
 		return a.CreatedAt.Before(b.CreatedAt)
 	}
 	return a.MessageID < b.MessageID
+}
+
+func messageBindingTooOld(binding MessageSessionBinding, now time.Time) bool {
+	if messageSessionBindingMaxAge <= 0 || now.IsZero() {
+		return false
+	}
+	timestamp := binding.UpdatedAt
+	if timestamp.IsZero() {
+		timestamp = binding.CreatedAt
+	}
+	if timestamp.IsZero() {
+		return false
+	}
+	return timestamp.Before(now.Add(-messageSessionBindingMaxAge))
+}
+
+func messageBindingUpdatedAfter(a, b MessageSessionBinding) bool {
+	ta := messageBindingUpdatedAt(a)
+	tb := messageBindingUpdatedAt(b)
+	if !ta.Equal(tb) {
+		if ta.IsZero() {
+			return false
+		}
+		if tb.IsZero() {
+			return true
+		}
+		return ta.After(tb)
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		if a.CreatedAt.IsZero() {
+			return false
+		}
+		if b.CreatedAt.IsZero() {
+			return true
+		}
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return messageBindingLess(a, b)
+}
+
+func messageBindingUpdatedAt(binding MessageSessionBinding) time.Time {
+	if !binding.UpdatedAt.IsZero() {
+		return binding.UpdatedAt
+	}
+	return binding.CreatedAt
 }
 
 func normalizeSessionForStore(session Session) Session {

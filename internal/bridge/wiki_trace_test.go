@@ -28,6 +28,7 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	var target feishu.Message
 	var initialMeta feishu.StreamCardMeta
 	card := &fakeStreamCard{}
+	card.message = feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}
 	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		target = msg
 		initialMeta = options.Meta
@@ -36,8 +37,12 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	session := Session{
 		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"}),
 		Title:        "来源会话标题",
+		AgentName:    "traex",
 		ACPSessionID: "acp-wiki",
 		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(source session) error = %v", err)
 	}
 	observer := svc.wikiTraceObserver(session, 7)
 	observer.start(context.Background())
@@ -99,6 +104,13 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	}
 	if !card.isClosed() {
 		t.Fatal("wiki trace card was not closed")
+	}
+	got, binding, ok := store.SessionForMessage("bot-a", "oc_trace", "om_wiki_trace")
+	if !ok {
+		t.Fatalf("SessionForMessage(wiki trace card) ok=false binding=%+v", binding)
+	}
+	if got.Key != session.Key || got.ACPSessionID != session.ACPSessionID {
+		t.Fatalf("bound session = %+v, want source session %+v", got, session)
 	}
 }
 

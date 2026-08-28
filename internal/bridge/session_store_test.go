@@ -380,6 +380,14 @@ func TestSessionStoreFirstMessageForSessionReturnsEarliestMatchingBinding(t *tes
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
 	key := SessionKey{BotID: "bot-a", Source: sessionSourceDriveComment, MainID: "docx:token", SubID: "comment-1"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-comment",
+		Cwd:          "/repo",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
 	createdAt := time.Now().Add(-time.Minute)
 	for _, binding := range []MessageSessionBinding{
 		{
@@ -421,6 +429,63 @@ func TestSessionStoreFirstMessageForSessionReturnsEarliestMatchingBinding(t *tes
 	got, ok = reloaded.FirstMessageForSession("bot-a", "oc_trace", key)
 	if !ok || got.MessageID != "om_root" {
 		t.Fatalf("reloaded FirstMessageForSession() = %+v, %v, want om_root", got, ok)
+	}
+}
+
+func TestSessionStorePrunesMessageBindings(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session",
+		Cwd:          "/repo",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	now := time.Now()
+	store.mu.Lock()
+	store.messages[messageBindingKey{BotID: "bot-a", ChatID: "oc_trace", MessageID: "om_old"}] = MessageSessionBinding{
+		BotID:      "bot-a",
+		ChatID:     "oc_trace",
+		MessageID:  "om_old",
+		SessionKey: key,
+		CreatedAt:  now.Add(-messageSessionBindingMaxAge - time.Hour),
+		UpdatedAt:  now.Add(-messageSessionBindingMaxAge - time.Hour),
+	}
+	store.messages[messageBindingKey{BotID: "bot-a", ChatID: "oc_trace", MessageID: "om_orphan"}] = MessageSessionBinding{
+		BotID:      "bot-a",
+		ChatID:     "oc_trace",
+		MessageID:  "om_orphan",
+		SessionKey: SessionKey{BotID: "bot-a", ChatID: "oc_missing"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	for i := 0; i < maxMessageSessionBindings+1; i++ {
+		messageID := fmt.Sprintf("om_recent_%04d", i)
+		store.messages[messageBindingKey{BotID: "bot-a", ChatID: "oc_trace", MessageID: messageID}] = MessageSessionBinding{
+			BotID:      "bot-a",
+			ChatID:     "oc_trace",
+			MessageID:  messageID,
+			SessionKey: key,
+			CreatedAt:  now.Add(time.Duration(i) * time.Second),
+			UpdatedAt:  now.Add(time.Duration(i) * time.Second),
+		}
+	}
+	store.pruneMessageBindingsLocked(now)
+	gotLen := len(store.messages)
+	store.mu.Unlock()
+
+	if gotLen != maxMessageSessionBindings {
+		t.Fatalf("len(messages) = %d, want %d", gotLen, maxMessageSessionBindings)
+	}
+	for _, messageID := range []string{"om_old", "om_orphan", "om_recent_0000"} {
+		if _, _, ok := store.SessionForMessage("bot-a", "oc_trace", messageID); ok {
+			t.Fatalf("SessionForMessage(%s) ok=true, want pruned", messageID)
+		}
+	}
+	if got, _, ok := store.SessionForMessage("bot-a", "oc_trace", fmt.Sprintf("om_recent_%04d", maxMessageSessionBindings)); !ok || got.Key != normalizeSessionKey(key) {
+		t.Fatalf("newest binding session = %+v ok=%v, want retained source session", got, ok)
 	}
 }
 
