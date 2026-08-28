@@ -34,8 +34,8 @@ func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
 }
 
 func TestTakePendingAtAutoMessagesSessionBoundaries(t *testing.T) {
-	keyA := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"})
-	keyB := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	keyA := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
+	keyB := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name      string
 		takeKey   SessionKey
@@ -55,7 +55,7 @@ func TestTakePendingAtAutoMessagesSessionBoundaries(t *testing.T) {
 		},
 		{
 			name:    "取出时先规范化 session key",
-			takeKey: SessionKey{BotID: "bot-a", ChatID: "chat-a"},
+			takeKey: imSessionKey("bot-a", "chat-a", ""),
 			want: []pendingAtMessage{
 				{SenderID: "ou_a", Text: "补充 1"},
 				{SenderID: "ou_b", Text: "补充 2"},
@@ -66,7 +66,7 @@ func TestTakePendingAtAutoMessagesSessionBoundaries(t *testing.T) {
 		},
 		{
 			name:    "取出不存在的 session 返回空且不影响其他 session",
-			takeKey: normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-missing"}),
+			takeKey: normalizeSessionKey(imSessionKey("bot-a", "chat-missing", "")),
 			want:    nil,
 			remaining: map[SessionKey][]pendingAtMessage{
 				keyA: {
@@ -101,7 +101,7 @@ func TestTakePendingAtAutoMessagesSessionBoundaries(t *testing.T) {
 }
 
 func TestAppendPendingAtAutoMessageSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	agent := config.AgentConfig{Command: "traex"}
 	cases := []struct {

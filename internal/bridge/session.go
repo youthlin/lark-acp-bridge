@@ -13,39 +13,10 @@ type SessionKey struct {
 	Source string `json:"source,omitempty"`  // 消息来源 im/schedule/drive_comment
 	MainID string `json:"main_id,omitempty"` // chatid
 	SubID  string `json:"sub_id,omitempty"`  // thread_id
-	ChatID string `json:"chat_id,omitempty"` // todo 考虑去除
 }
 
 func (k SessionKey) Valid() bool {
 	return sessionKeySource(k) != "" && sessionKeyMainID(k) != ""
-}
-
-func (k SessionKey) MarshalJSON() ([]byte, error) {
-	type sessionKeyJSON struct {
-		BotID    string `json:"bot_id"`
-		Source   string `json:"source,omitempty"`
-		MainID   string `json:"main_id,omitempty"`
-		SubID    string `json:"sub_id,omitempty"`
-		ChatID   string `json:"chat_id,omitempty"`
-		ThreadID string `json:"thread_id,omitempty"` // IM 兼容旧 sessions.json
-	}
-	source := strings.TrimSpace(k.Source)
-	mainID := strings.TrimSpace(k.MainID)
-	chatID := strings.TrimSpace(k.ChatID)
-	if source == "" || (source == sessionSourceIM && (mainID == "" || mainID == chatID)) {
-		return json.Marshal(sessionKeyJSON{
-			BotID:    k.BotID,
-			ChatID:   k.ChatID,
-			ThreadID: k.SubID,
-		})
-	}
-	return json.Marshal(sessionKeyJSON{
-		BotID:  k.BotID,
-		Source: k.Source,
-		MainID: k.MainID,
-		SubID:  k.SubID,
-		ChatID: k.ChatID,
-	})
 }
 
 func (k *SessionKey) UnmarshalJSON(data []byte) error {
@@ -55,7 +26,7 @@ func (k *SessionKey) UnmarshalJSON(data []byte) error {
 		MainID         string `json:"main_id,omitempty"`
 		SubID          string `json:"sub_id,omitempty"`
 		LegacyParentID string `json:"parent_id,omitempty"`
-		ChatID         string `json:"chat_id,omitempty"`
+		LegacyChatID   string `json:"chat_id,omitempty"`
 		LegacyThreadID string `json:"thread_id,omitempty"`
 	}
 	var raw sessionKeyJSON
@@ -64,9 +35,11 @@ func (k *SessionKey) UnmarshalJSON(data []byte) error {
 	}
 	k.BotID = raw.BotID
 	k.Source = raw.Source
-	k.MainID = firstNonEmpty(raw.MainID, raw.LegacyParentID)
+	k.MainID = firstNonEmpty(raw.MainID, raw.LegacyParentID, raw.LegacyChatID)
 	k.SubID = firstNonEmpty(raw.SubID, raw.LegacyThreadID)
-	k.ChatID = raw.ChatID
+	if strings.TrimSpace(k.Source) == "" && strings.TrimSpace(raw.LegacyChatID) != "" {
+		k.Source = sessionSourceIM
+	}
 	return nil
 }
 

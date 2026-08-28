@@ -194,7 +194,7 @@ func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message
 	}
 	sent, err := s.sendModelSelectionCardOutbound(ctx, msg, feishu.ModelSelectionCard{
 		BotID:            session.Key.BotID,
-		ChatID:           session.Key.ChatID,
+		ChatID:           sessionKeyMainID(session.Key),
 		ThreadID:         session.Key.SubID,
 		GroupMessageType: msg.GroupMessageType,
 		ACPSessionID:     session.ACPSessionID,
@@ -311,7 +311,7 @@ func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message,
 	}
 	sent, err := s.sendModeSelectionCardOutbound(ctx, msg, feishu.ModeSelectionCard{
 		BotID:            session.Key.BotID,
-		ChatID:           session.Key.ChatID,
+		ChatID:           sessionKeyMainID(session.Key),
 		ThreadID:         session.Key.SubID,
 		GroupMessageType: msg.GroupMessageType,
 		ACPSessionID:     session.ACPSessionID,

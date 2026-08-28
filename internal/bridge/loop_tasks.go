@@ -91,7 +91,7 @@ func (s *Service) handleLoopCommand(ctx context.Context, text string, msg feishu
 	startText := loopAnchorText(req, loopProgressStarted, 0, "", started, started)
 	cardReq := feishu.LoopStatusCardRequest{
 		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
+		ChatID:       sessionKeyMainID(session.Key),
 		ThreadID:     session.Key.SubID,
 		ACPSessionID: session.ACPSessionID,
 		Text:         startText,

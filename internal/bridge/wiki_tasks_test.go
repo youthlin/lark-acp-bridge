@@ -21,7 +21,7 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "changed: yes\nfiles:\n- knowledge/core.md\nsummary: 更新知识入口\nreason: 用户要求长期保留"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -75,7 +75,7 @@ func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
 	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
 	}
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:          key,
 		Title:        "来源会话",
@@ -122,7 +122,7 @@ func TestPendingWikiTraceKeepsIndependentRuntimeKey(t *testing.T) {
 	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
 	}
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	pending := pendingWikiRun{
 		generation: 7,
 		session: Session{
@@ -198,7 +198,7 @@ func TestWikiLintRunsPromptRecordsSummaryAndKeepsTimer(t *testing.T) {
 		return card, nil
 	}
 	svc.setOutbound("bot-a", client)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -324,7 +324,7 @@ func TestWikiLintReturnsImmediatelyWhenPromptIsStillRunning(t *testing.T) {
 		return card, nil
 	}
 	svc.setOutbound("bot-a", client)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir(), Workspace: workspace}
 	if err := store.Upsert(session); err != nil {
@@ -387,7 +387,7 @@ func TestWikiLintReportsBusyWithoutCancelingCurrentTask(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "changed: no\nsummary: ok"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}
 	if err := store.Upsert(session); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
@@ -420,7 +420,7 @@ func TestWikiLintReportsBusyDuringBackgroundWikiTask(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "changed: no\nsummary: ok"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir(), Workspace: workspace}
 	if err := store.Upsert(session); err != nil {
@@ -554,7 +554,7 @@ func TestWikiUpgradeReportsBusyDuringWorkspaceTask(t *testing.T) {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
 	markWorkspaceBootstrapped(t, workspace)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	otherSession := Session{Key: otherKey, AgentName: "traex", ACPSessionID: "acp-other", Cwd: t.TempDir(), Workspace: workspace}
 	_, finish := svc.startTask(context.Background(), otherSession, mustConfigAgent(t, cfg, "traex"), taskKindUser)
 	defer finish()
@@ -598,7 +598,7 @@ func TestWikiUpgradeReportsBusyDuringBackgroundWikiTask(t *testing.T) {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
 	markWorkspaceBootstrapped(t, workspace)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-wiki", Cwd: t.TempDir(), Workspace: workspace}
 	_, finish, _ := svc.startWikiTask(context.Background(), session, mustConfigAgent(t, cfg, "traex"), wikiRuntimeKey(key, 1, session.ACPSessionID))
 	defer finish()
@@ -621,7 +621,7 @@ func TestWikiUpgradeReportsBusyDuringBackgroundWikiTask(t *testing.T) {
 func TestWikiStatusIncludesLastSummary(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
@@ -650,7 +650,7 @@ func TestWikiStatusIncludesLastSummary(t *testing.T) {
 
 func TestWikiStatusSnapshotSessionWorkBoundaries(t *testing.T) {
 	agent := config.AgentConfig{Command: "traex"}
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -734,9 +734,9 @@ func TestWikiStatusSnapshotSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestWikiTimerSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	newServiceWithTimers := func(t *testing.T) (*Service, *time.Timer, *time.Timer) {
 		t.Helper()
 		svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
@@ -853,7 +853,7 @@ func TestWikiTimerSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestScheduleWikiTimerSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
 	agent := config.AgentConfig{Command: "traex"}
 	oldTimer := time.NewTimer(time.Hour)
@@ -972,9 +972,9 @@ func TestScheduleWikiTimerSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestBeginWikiTimerRunSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	cases := []struct {
 		name         string
 		generation   int64
@@ -1071,9 +1071,9 @@ func TestBeginWikiTimerRunSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	oldStarted := time.Date(2020, 8, 1, 11, 0, 0, 0, time.UTC)
 	oldEnded := oldStarted.Add(time.Minute)
 	newServiceWithStatuses := func(t *testing.T) *Service {
@@ -1184,10 +1184,10 @@ func TestWikiStatusMarkersSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestWikiTaskLifecycleSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
 	runtime := wikiRuntimeKey(normalizedKey, 1, "acp-a")
-	otherRuntime := wikiRuntimeKey(normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"}), 1, "acp-b")
+	otherRuntime := wikiRuntimeKey(normalizeSessionKey(imSessionKey("bot-a", "oc_other", "")), 1, "acp-b")
 	cases := []struct {
 		name           string
 		replaceTask    bool
@@ -1285,61 +1285,57 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 		wantRemainingRuntime runtimeKey
 	}{
 		{
-			name: "取消同 session 后台 wiki",
-			cancelKey: SessionKey{
-				BotID:  "bot-a",
-				Source: "im",
-				ChatID: "chat-a",
-				MainID: "chat-a",
-			},
+			name:      "取消同 session 后台 wiki",
+			cancelKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-a"},
+
 			wantCanceledRuntimes: []runtimeKey{
 				{
-					SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"},
+					SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-a"},
 					Scope:      runtimeScopeWiki,
 					RunID:      "1:acp-a",
 				},
 			},
 			wantRemainingRuntime: runtimeKey{
-				SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-b", MainID: "chat-b"},
+				SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-b"},
 				Scope:      runtimeScopeWiki,
 				RunID:      "1:acp-b",
 			},
 		},
 		{
 			name: "规范化 key 后取消同 session 后台 wiki",
-			cancelKey: SessionKey{
-				BotID:  "bot-a",
-				ChatID: "chat-a",
-			},
+			cancelKey: imSessionKey(
+				"bot-a",
+				"chat-a", ""),
+
 			wantCanceledRuntimes: []runtimeKey{
 				{
-					SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"},
+					SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-a"},
 					Scope:      runtimeScopeWiki,
 					RunID:      "1:acp-a",
 				},
 			},
 			wantRemainingRuntime: runtimeKey{
-				SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-b", MainID: "chat-b"},
+				SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-b"},
 				Scope:      runtimeScopeWiki,
 				RunID:      "1:acp-b",
 			},
 		},
 		{
 			name: "同 session 下第二个后台 wiki 不登记",
-			cancelKey: SessionKey{
-				BotID:  "bot-a",
-				ChatID: "chat-a",
-			},
+			cancelKey: imSessionKey(
+				"bot-a",
+				"chat-a", ""),
+
 			includeSecondWiki: true,
 			wantCanceledRuntimes: []runtimeKey{
 				{
-					SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"},
+					SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-a"},
 					Scope:      runtimeScopeWiki,
 					RunID:      "1:acp-a",
 				},
 			},
 			wantRemainingRuntime: runtimeKey{
-				SessionKey: SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-b", MainID: "chat-b"},
+				SessionKey: SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-b"},
 				Scope:      runtimeScopeWiki,
 				RunID:      "1:acp-b",
 			},
@@ -1351,12 +1347,12 @@ func TestCancelWikiTasksSessionBoundaries(t *testing.T) {
 			rt := &fakeRuntime{}
 			svc.setRuntime(rt)
 			sessionA := Session{
-				Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"}),
+				Key:          normalizeSessionKey(imSessionKey("bot-a", "chat-a", "")),
 				AgentName:    "traex",
 				ACPSessionID: "acp-a",
 			}
 			sessionB := Session{
-				Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"}),
+				Key:          normalizeSessionKey(imSessionKey("bot-a", "chat-b", "")),
 				AgentName:    "traex",
 				ACPSessionID: "acp-b",
 			}

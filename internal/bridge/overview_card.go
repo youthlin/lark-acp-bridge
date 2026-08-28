@@ -368,7 +368,7 @@ func (s *Service) overviewModelSelection(action feishu.OverviewAction) (feishu.O
 	}
 	card := feishu.ModelSelectionCard{
 		BotID:            session.Key.BotID,
-		ChatID:           session.Key.ChatID,
+		ChatID:           sessionKeyMainID(session.Key),
 		ThreadID:         session.Key.SubID,
 		GroupMessageType: action.GroupMessageType,
 		ACPSessionID:     session.ACPSessionID,
@@ -400,7 +400,7 @@ func (s *Service) overviewModeSelection(action feishu.OverviewAction) (feishu.Ov
 	}
 	card := feishu.ModeSelectionCard{
 		BotID:            session.Key.BotID,
-		ChatID:           session.Key.ChatID,
+		ChatID:           sessionKeyMainID(session.Key),
 		ThreadID:         session.Key.SubID,
 		GroupMessageType: action.GroupMessageType,
 		ACPSessionID:     session.ACPSessionID,

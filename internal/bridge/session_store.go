@@ -124,6 +124,11 @@ func (s *SessionStore) Load() error {
 	}
 	s.trimHistoryLocked()
 	s.pruneMessageBindingsLocked(time.Now())
+	if sessionFileHasLegacySessionKeyShape(data) {
+		if err := s.writeLocked(); err != nil {
+			slog.Warn("转换旧会话 key 写回失败", "路径", s.path, "读取路径", path, "错误", err)
+		}
+	}
 	return nil
 }
 
@@ -614,7 +619,7 @@ func (s *SessionStore) Count() int {
 }
 
 func (s *SessionStore) ListByChat(botID, chatID string) []Session {
-	return s.ListByMain(SessionKey{BotID: botID, Source: sessionSourceIM, MainID: chatID, ChatID: chatID})
+	return s.ListByMain(SessionKey{BotID: botID, Source: sessionSourceIM, MainID: chatID})
 }
 
 func (s *SessionStore) ListByMain(key SessionKey) []Session {
@@ -887,9 +892,6 @@ func sessionKeyLess(a, b SessionKey) bool {
 	if sessionKeyMainID(a) != sessionKeyMainID(b) {
 		return sessionKeyMainID(a) < sessionKeyMainID(b)
 	}
-	if a.ChatID != b.ChatID {
-		return a.ChatID < b.ChatID
-	}
 	return a.SubID < b.SubID
 }
 
@@ -1149,18 +1151,9 @@ func normalizeSessionKey(key SessionKey) SessionKey {
 		Source: strings.TrimSpace(key.Source),
 		MainID: strings.TrimSpace(key.MainID),
 		SubID:  strings.TrimSpace(key.SubID),
-		ChatID: strings.TrimSpace(key.ChatID),
 	}
 	if normalized.Source == "" {
 		normalized.Source = sessionSourceIM
-	}
-	if normalized.Source == sessionSourceIM {
-		if normalized.MainID == "" {
-			normalized.MainID = normalized.ChatID
-		}
-		if normalized.ChatID == "" {
-			normalized.ChatID = normalized.MainID
-		}
 	}
 	return normalized
 }
@@ -1187,14 +1180,7 @@ func sessionKeySource(key SessionKey) string {
 }
 
 func sessionKeyMainID(key SessionKey) string {
-	mainID := strings.TrimSpace(key.MainID)
-	if mainID != "" {
-		return mainID
-	}
-	if sessionKeySource(key) == sessionSourceIM {
-		return strings.TrimSpace(key.ChatID)
-	}
-	return ""
+	return strings.TrimSpace(key.MainID)
 }
 
 func sessionMain(key SessionKey) sessionMainKey {
@@ -1216,6 +1202,51 @@ func chatKeyFromSessionKey(key SessionKey) ChatKey {
 		return ChatKey{BotID: key.BotID}
 	}
 	return ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)}
+}
+
+func sessionFileHasLegacySessionKeyShape(data []byte) bool {
+	type rawSession struct {
+		Key map[string]json.RawMessage `json:"key"`
+	}
+	type rawMessage struct {
+		SessionKey map[string]json.RawMessage `json:"session_key"`
+	}
+	var raw struct {
+		Sessions []rawSession `json:"sessions"`
+		History  []rawSession `json:"history"`
+		Messages []rawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	for _, session := range raw.Sessions {
+		if sessionKeyShapeHasLegacyFields(session.Key) {
+			return true
+		}
+	}
+	for _, session := range raw.History {
+		if sessionKeyShapeHasLegacyFields(session.Key) {
+			return true
+		}
+	}
+	for _, message := range raw.Messages {
+		if sessionKeyShapeHasLegacyFields(message.SessionKey) {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionKeyShapeHasLegacyFields(key map[string]json.RawMessage) bool {
+	if len(key) == 0 {
+		return false
+	}
+	for _, field := range []string{"chat_id", "thread_id", "parent_id"} {
+		if _, ok := key[field]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type sessionFile struct {

@@ -35,7 +35,7 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 		return card, nil
 	}
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source")),
 		Title:        "来源会话标题",
 		AgentName:    "traex",
 		ACPSessionID: "acp-wiki",
@@ -160,7 +160,7 @@ func TestWikiTraceUsesTraceChatShowConfig(t *testing.T) {
 				return card, nil
 			}
 			observer := svc.wikiTraceObserver(Session{
-				Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source"}),
+				Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "")),
 				ACPSessionID: "acp-wiki",
 			}, 1)
 			if observer == nil {
@@ -195,7 +195,7 @@ func TestWikiTraceNoReplyShowsNoChangesSummary(t *testing.T) {
 		return card, nil
 	}
 	observer := svc.wikiTraceObserver(Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "")),
 		ACPSessionID: "acp-wiki",
 	}, 1)
 	observer.start(context.Background())

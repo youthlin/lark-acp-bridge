@@ -213,7 +213,7 @@ func TestApplyACPStateUpdatePersistsACPMeta(t *testing.T) {
 
 func TestSessionStoreUpdateCurrentSessionAppliesUpdateToLatestState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	latest := Session{
 		Key:          key,
 		Title:        "手动标题",

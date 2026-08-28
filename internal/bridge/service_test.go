@@ -386,7 +386,7 @@ func testReadySession(t *testing.T, store *SessionStore) Session {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	markWorkspaceBootstrapped(t, workspace)
 	session := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"},
+		Key:          imSessionKey("bot-a", "oc_chat", "omt_thread"),
 		Title:        "test session",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
@@ -406,7 +406,7 @@ func TestHandleFeishuMessageOmitsReactionPrompt(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	markWorkspaceBootstrapped(t, workspace)
 	if err := store.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		Title:        "test session",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
@@ -607,7 +607,7 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			text: "/config",
 			msg: feishu.Message{
 				BotID:            session.Key.BotID,
-				ChatID:           session.Key.ChatID,
+				ChatID:           sessionKeyMainID(session.Key),
 				ThreadID:         session.Key.SubID,
 				ChatType:         "topic_group",
 				GroupMessageType: "thread",
@@ -620,7 +620,7 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			text: "/model",
 			msg: feishu.Message{
 				BotID:            session.Key.BotID,
-				ChatID:           session.Key.ChatID,
+				ChatID:           sessionKeyMainID(session.Key),
 				ThreadID:         session.Key.SubID,
 				ChatType:         "topic_group",
 				GroupMessageType: "thread",
@@ -633,7 +633,7 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			text: "/mode",
 			msg: feishu.Message{
 				BotID:            session.Key.BotID,
-				ChatID:           session.Key.ChatID,
+				ChatID:           sessionKeyMainID(session.Key),
 				ThreadID:         session.Key.SubID,
 				ChatType:         "topic_group",
 				GroupMessageType: "thread",
@@ -691,7 +691,7 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			text: "/session list",
 			msg: feishu.Message{
 				BotID:            session.Key.BotID,
-				ChatID:           session.Key.ChatID,
+				ChatID:           sessionKeyMainID(session.Key),
 				ThreadID:         session.Key.SubID,
 				ChatType:         "topic_group",
 				GroupMessageType: "thread",
@@ -704,7 +704,7 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			text: "/show status",
 			msg: feishu.Message{
 				BotID:            session.Key.BotID,
-				ChatID:           session.Key.ChatID,
+				ChatID:           sessionKeyMainID(session.Key),
 				ThreadID:         session.Key.SubID,
 				ChatType:         "topic_group",
 				GroupMessageType: "thread",
@@ -786,7 +786,7 @@ func TestStatusShowsRuntimeSnapshot(t *testing.T) {
 	cfg.Bots[0].ID = "bot-a"
 	svc := newTestService(cfg, store)
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -802,7 +802,7 @@ func TestStatusShowsRuntimeSnapshot(t *testing.T) {
 	runtime.idleTimeout = 30 * time.Minute
 	current := currentRuntimeKey(session.Key)
 	wiki := wikiRuntimeKey(session.Key, 1, session.ACPSessionID)
-	other := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	other := currentRuntimeKey(imSessionKey("bot-a", "oc_other", ""))
 	runtime.slots[current] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: session.ACPSessionID,
@@ -1032,7 +1032,7 @@ func TestHandleFeishuMessagePromptRecreatesSessionAfterAgentSwitch(t *testing.T)
 	rt := &fakeRuntime{newSessionID: "acp-session-claude", promptReply: "ACP 回复"}
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		Title:        "old session",
@@ -1045,7 +1045,7 @@ func TestHandleFeishuMessagePromptRecreatesSessionAfterAgentSwitch(t *testing.T)
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    key.BotID,
-		ChatID:   key.ChatID,
+		ChatID:   sessionKeyMainID(key),
 		ChatType: "p2p",
 		Text:     "/agent claude",
 	}); err != nil {
@@ -1053,7 +1053,7 @@ func TestHandleFeishuMessagePromptRecreatesSessionAfterAgentSwitch(t *testing.T)
 	}
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_msg",
 		Text:      "继续",
@@ -1107,7 +1107,7 @@ func TestHandleFeishuMessageCommandsListsACPCommands(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1136,7 +1136,7 @@ func TestHandleFeishuMessageCommandsForwardsACPCommand(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1166,7 +1166,7 @@ func TestHandleFeishuMessageDoubleSlashForwardsACPCommand(t *testing.T) {
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1197,7 +1197,7 @@ func TestHandleFeishuMessageDoubleSlashCompactResetsWorkspacePrompted(t *testing
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1213,7 +1213,7 @@ func TestHandleFeishuMessageDoubleSlashCompactResetsWorkspacePrompted(t *testing
 
 	_, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1243,7 +1243,7 @@ func TestHandleFeishuMessageRejectsEmptyACPCommandName(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1272,7 +1272,7 @@ func TestHandleFeishuMessageCompactConfig(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1293,7 +1293,7 @@ func TestHandleFeishuMessageCompactConfig(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1336,7 +1336,7 @@ func TestHandleFeishuMessageAutoCompactAfterPromptThreshold(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1388,7 +1388,7 @@ func TestHandleFeishuMessageAutoCompactResetsWorkspacePrompted(t *testing.T) {
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1439,7 +1439,7 @@ func TestHandleFeishuMessageContextUsageDropResetsWorkspacePrompted(t *testing.T
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1455,7 +1455,7 @@ func TestHandleFeishuMessageContextUsageDropResetsWorkspacePrompted(t *testing.T
 
 	_, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1501,7 +1501,7 @@ func TestHandleFeishuMessageContextUsageDifferentSizeDoesNotResetWorkspacePrompt
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1558,7 +1558,7 @@ func TestHandleFeishuMessageAutoCompactRunsSilently(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1624,7 +1624,7 @@ func TestHandleFeishuMessageAutoCompactCancelsPendingWikiTimer(t *testing.T) {
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1676,7 +1676,7 @@ func TestHandleFeishuMessageAutoCompactCanBeInterruptedByNewMessage(t *testing.T
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1689,7 +1689,7 @@ func TestHandleFeishuMessageAutoCompactCanBeInterruptedByNewMessage(t *testing.T
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1731,7 +1731,7 @@ func TestHandleFeishuMessageAutoCompactRequiresCommand(t *testing.T) {
 
 	_, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1818,7 +1818,7 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1835,7 +1835,7 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1855,7 +1855,7 @@ func TestHandleFeishuMessageConfigShowsAndSetsOptions(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1919,7 +1919,7 @@ func TestHandleFeishuMessageConfigSendsDetailCard(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -1980,7 +1980,7 @@ func TestHandleFeishuMessageConfigSetsBooleanOption(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2028,7 +2028,7 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2043,7 +2043,7 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2058,7 +2058,7 @@ func TestHandleFeishuMessageConfigRejectsUnknownOptionOrValue(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2114,7 +2114,7 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2131,7 +2131,7 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2154,7 +2154,7 @@ func TestHandleFeishuMessageModelShowsAndSetsModel(t *testing.T) {
 	if !ok || modelValueString(modelOpt.CurrentValue) != "gpt-5.6" {
 		t.Fatalf("updated config options = %+v, want gpt-5.6", updated.ConfigOptions)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
 	if !ok || !hasAgentConfig || agentConfig.Model != "gpt-5.6" {
 		t.Fatalf("chat config = %+v, %v; want default model gpt-5.6", chat, ok)
@@ -2194,7 +2194,7 @@ func TestHandleFeishuMessageModelSendsSelectionCard(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2256,7 +2256,7 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2273,7 +2273,7 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2296,7 +2296,7 @@ func TestHandleFeishuMessageModeCommandShowsAndSetsMode(t *testing.T) {
 	if !ok || configOptionValueString(modeOpt.CurrentValue) != "plan" {
 		t.Fatalf("updated config options = %+v, want plan", updated.ConfigOptions)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
 	if !ok || !hasAgentConfig || agentConfig.Mode != "plan" {
 		t.Fatalf("chat config = %+v, %v; want default mode plan", chat, ok)
@@ -2336,7 +2336,7 @@ func TestHandleFeishuMessageModeSendsSelectionCard(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2364,7 +2364,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2378,7 +2378,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 			t.Fatalf("reply = %q, want %q", reply, want)
 		}
 	}
-	updated, ok := store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	updated, ok := store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !ok {
 		t.Fatal("chat config not found")
 	}
@@ -2388,7 +2388,7 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2400,14 +2400,14 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if !strings.Contains(reply, "已开启思考消息展示") || !strings.Contains(reply, "思考消息：开启") {
 		t.Fatalf("reply = %q, want thought display enabled", reply)
 	}
-	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !updated.ShowThoughts || updated.HideThoughts {
 		t.Fatalf("thought flags = show:%v hide:%v, want visible after /show thought on", updated.ShowThoughts, updated.HideThoughts)
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2419,14 +2419,14 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if !strings.Contains(reply, "已关闭计划展示") || !strings.Contains(reply, "计划：关闭") {
 		t.Fatalf("reply = %q, want plan display disabled", reply)
 	}
-	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !updated.HidePlans {
 		t.Fatalf("HidePlans = false, want true after /show plan off")
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2438,14 +2438,14 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if !strings.Contains(reply, "已关闭状态栏展示") || !strings.Contains(reply, "状态栏：关闭") {
 		t.Fatalf("reply = %q, want status bar disabled", reply)
 	}
-	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !updated.HideStatusBar {
 		t.Fatalf("HideStatusBar = false, want true after /show status off")
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2457,14 +2457,14 @@ func TestHandleFeishuMessageShowCommandPersistsDisplayOptions(t *testing.T) {
 	if !strings.Contains(reply, "已关闭用量明细展示") || !strings.Contains(reply, "用量明细：关闭") {
 		t.Fatalf("reply = %q, want usage detail disabled", reply)
 	}
-	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	updated, _ = store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !updated.HideUsageDetail {
 		t.Fatalf("HideUsageDetail = false, want true after /show used off")
 	}
 
 	reply, err = handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 		ChatType: "topic_group",
 		Mentions: testBotMentions(),
@@ -2568,7 +2568,7 @@ func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:            session.Key.BotID,
-		ChatID:           session.Key.ChatID,
+		ChatID:           sessionKeyMainID(session.Key),
 		ThreadID:         session.Key.SubID,
 		GroupMessageType: "thread",
 		ChatType:         "topic_group",
@@ -2582,7 +2582,7 @@ func TestHandleFeishuMessageCardCommandSendsOverviewCard(t *testing.T) {
 	if reply != "" {
 		t.Fatalf("reply = %q, want empty after overview card is sent", reply)
 	}
-	if gotMsg.ChatID != session.Key.ChatID || gotMsg.ThreadID != session.Key.SubID {
+	if gotMsg.ChatID != sessionKeyMainID(session.Key) || gotMsg.ThreadID != session.Key.SubID {
 		t.Fatalf("overview message = %+v, want current chat/thread", gotMsg)
 	}
 	if !gotCard.HasSession || gotCard.CurrentACPSessionID != session.ACPSessionID || gotCard.SessionTitle != "test session" {
@@ -2640,7 +2640,7 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	svc := newTestService(cfg, store)
 	action := feishu.OverviewAction{
 		BotID:               session.Key.BotID,
-		ChatID:              session.Key.ChatID,
+		ChatID:              sessionKeyMainID(session.Key),
 		ThreadID:            session.Key.SubID,
 		GroupMessageType:    "thread",
 		RequesterID:         testOwnerOpenID,
@@ -2659,7 +2659,7 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	if result.Overview == nil || result.Overview.Show.Status {
 		t.Fatalf("overview result = %+v, want status hidden", result.Overview)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	if !ok || !chat.HideStatusBar {
 		t.Fatalf("chat config = %+v, %v; want status bar hidden", chat, ok)
 	}
@@ -2674,7 +2674,7 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	if result.Overview == nil || result.Overview.WikiEnabled {
 		t.Fatalf("overview result = %+v, want wiki disabled", result.Overview)
 	}
-	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	if !ok || !chat.WikiDisabled {
 		t.Fatalf("chat config = %+v, %v; want wiki disabled", chat, ok)
 	}
@@ -2689,7 +2689,7 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	if result.Overview == nil || result.Overview.ChatAgentName != "codex" {
 		t.Fatalf("overview result = %+v, want codex chat agent", result.Overview)
 	}
-	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	if !ok || chat.AgentName != "codex" {
 		t.Fatalf("chat config = %+v, %v; want codex agent", chat, ok)
 	}
@@ -2705,7 +2705,7 @@ func TestHandleOverviewActionUpdatesChatConfig(t *testing.T) {
 	if result.Overview == nil || result.Overview.AtStatus != "自动判断 + 处理中表情" {
 		t.Fatalf("overview result = %+v, want auto-reaction at status", result.Overview)
 	}
-	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	if !ok || !chat.MentionOptional || chat.AtMode != atModeAutoReaction {
 		t.Fatalf("chat config = %+v, %v; want auto-reaction at mode", chat, ok)
 	}
@@ -2771,7 +2771,7 @@ func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
 	svc.setRuntime(rt)
 	action := feishu.OverviewAction{
 		BotID:               session.Key.BotID,
-		ChatID:              session.Key.ChatID,
+		ChatID:              sessionKeyMainID(session.Key),
 		ThreadID:            session.Key.SubID,
 		GroupMessageType:    "thread",
 		RequesterID:         testOwnerOpenID,
@@ -2792,7 +2792,7 @@ func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
 	if len(rt.configCalls) != 1 || rt.configCalls[0].ConfigID != "model" || rt.configCalls[0].Value != "gpt-5.6" {
 		t.Fatalf("configCalls = %+v, want model set_config_option", rt.configCalls)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok := store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	agentConfig, hasAgentConfig := chat.AgentConfigs[session.AgentName]
 	if !ok || !hasAgentConfig || agentConfig.Model != "gpt-5.6" {
 		t.Fatalf("chat config = %+v, %v; want default model gpt-5.6", chat, ok)
@@ -2811,7 +2811,7 @@ func TestHandleOverviewActionSetsModelAndMode(t *testing.T) {
 	if len(rt.configCalls) != 2 || rt.configCalls[1].ConfigID != "mode" || rt.configCalls[1].Value != "plan" {
 		t.Fatalf("configCalls = %+v, want mode set_config_option", rt.configCalls)
 	}
-	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: session.Key.ChatID})
+	chat, ok = store.GetChat(ChatKey{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})
 	agentConfig, hasAgentConfig = chat.AgentConfigs[session.AgentName]
 	if !ok || !hasAgentConfig || agentConfig.Mode != "plan" || agentConfig.Model != "gpt-5.6" {
 		t.Fatalf("chat config = %+v, %v; want default mode plan and model gpt-5.6", chat, ok)
@@ -2835,7 +2835,7 @@ func TestHandleOverviewActionSetSessionRestoresAndRefreshesCard(t *testing.T) {
 
 	result, err := svc.HandleOverviewAction(context.Background(), feishu.OverviewAction{
 		BotID:               current.Key.BotID,
-		ChatID:              current.Key.ChatID,
+		ChatID:              sessionKeyMainID(current.Key),
 		ChatType:            "topic_group",
 		ThreadID:            current.Key.SubID,
 		GroupMessageType:    "thread",
@@ -3016,7 +3016,7 @@ func TestHandleFeishuMessageShowCommandSurvivesNewSession(t *testing.T) {
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	if session, ok := store.Get(SessionKey{BotID: msg.BotID, ChatID: msg.ChatID}); !ok || session.HideStatusBar || session.HideUsageDetail {
+	if session, ok := store.Get(imSessionKey(msg.BotID, msg.ChatID, "")); !ok || session.HideStatusBar || session.HideUsageDetail {
 		t.Fatalf("session = %+v, %v; show options should not be stored on session", session, ok)
 	}
 	var statusBarEnabled *bool
@@ -3078,7 +3078,7 @@ func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ChatType: "group",
 		Text:     "/new",
 		Mentions: []feishu.Mention{testBotMention("智能助手")},
@@ -3089,7 +3089,7 @@ func TestHandleFeishuMessageNewMigratesLegacySessionShowOptionsToChat(t *testing
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	chat, ok := store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}))
+	chat, ok := store.GetChat(chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}))
 	if !ok || !chat.HideStatusBar || !chat.HideUsageDetail {
 		t.Fatalf("chat config = %+v, %v; want legacy show options migrated", chat, ok)
 	}
@@ -3138,7 +3138,7 @@ func TestHandleFeishuMessageWithoutSessionAutoCreatesSession(t *testing.T) {
 	if strings.Contains(rt.promptCalls[0].Text, "@我的智能助手") {
 		t.Fatalf("prompt text = %q, should strip bot mention", rt.promptCalls[0].Text)
 	}
-	if _, ok := store.Get(SessionKey{ChatID: "oc_chat", SubID: "omt_thread"}); !ok {
+	if _, ok := store.Get(imSessionKey("", "oc_chat", "omt_thread")); !ok {
 		t.Fatalf("auto-created session not persisted")
 	}
 }
@@ -3174,7 +3174,7 @@ func TestHandleFeishuMessagePersistsNewSessionInfoMeta(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("HandleFeishuMessage() error = %v", err)
 	}
-	session, ok := store.Get(SessionKey{ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := store.Get(imSessionKey("", "oc_chat", "omt_thread"))
 	if !ok {
 		t.Fatalf("auto-created session not persisted")
 	}
@@ -3186,7 +3186,7 @@ func TestHandleFeishuMessagePersistsNewSessionInfoMeta(t *testing.T) {
 func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
-	key := SessionKey{ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		Title:        "old session",
@@ -3272,7 +3272,7 @@ func TestHandleFeishuMessageRefreshesUnavailablePersistedACPSession(t *testing.T
 func TestHandleFeishuMessageRefreshesBrokenPipeACPSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
-	key := SessionKey{ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		Title:        "old session",
@@ -3377,7 +3377,7 @@ func TestHandleFeishuMessageRefreshesBrokenPipeACPSession(t *testing.T) {
 
 func TestRefreshACPSessionDoesNotReplaceNewCurrentSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldSession := Session{
 		Key:          key,
 		Title:        "旧会话",
@@ -3404,7 +3404,7 @@ func TestRefreshACPSessionDoesNotReplaceNewCurrentSession(t *testing.T) {
 
 	_, err := svc.refreshACPSession(context.Background(), feishu.Message{
 		BotID:    key.BotID,
-		ChatID:   key.ChatID,
+		ChatID:   sessionKeyMainID(key),
 		ChatType: "p2p",
 	}, oldSession, mustConfigAgent(t, config.Default(), "traex"))
 	if err == nil || !strings.Contains(err.Error(), "当前会话已变化") {
@@ -3657,7 +3657,7 @@ func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	if len(rt.newCalls) != 1 || rt.newCalls[0].Key.SubID != "" {
 		t.Fatalf("newCalls = %+v, want one chat-level private session", rt.newCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_private", "")); !ok {
 		t.Fatalf("private chat session not persisted by chat id")
 	}
 
@@ -3699,7 +3699,7 @@ func TestHandleFeishuPrivateChatReusesChatSessionUntilNew(t *testing.T) {
 	if len(rt.newCalls) != 2 {
 		t.Fatalf("newCalls = %+v, want /new to create a new private session", rt.newCalls)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok {
 		t.Fatalf("private chat session not found after /new")
 	}
@@ -3754,7 +3754,7 @@ func TestHandleFeishuGroupChatReusesChatSessionWithoutTopic(t *testing.T) {
 	if rt.newCalls[0].Key.SubID != "" || rt.promptCalls[1].Session.Key.SubID != "" {
 		t.Fatalf("session keys = new %+v prompt %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls[1].Session.Key)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_group", "")); !ok {
 		t.Fatalf("ordinary group chat session not persisted by chat id")
 	}
 }
@@ -3809,7 +3809,7 @@ func TestHandleFeishuOrdinaryGroupThreadIDReusesChatSession(t *testing.T) {
 	if rt.newCalls[0].Key.SubID != "" || rt.promptCalls[0].Session.Key.SubID != "" || rt.promptCalls[1].Session.Key.SubID != "" {
 		t.Fatalf("session keys = new %+v prompts %+v, want chat-level group session", rt.newCalls[0].Key, rt.promptCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", SubID: "omt_group_thread"}); ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_group", "omt_group_thread")); ok {
 		t.Fatalf("ordinary group thread id should not create thread session")
 	}
 }
@@ -4883,8 +4883,8 @@ func TestHandleFeishuGroupChatAtAutoKeepsReplacementWaitDelayedWhenSilent(t *tes
 	}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_group"})
-	chatKey := ChatKey{BotID: "bot-a", ChatID: key.ChatID}
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_group", ""))
+	chatKey := ChatKey{BotID: "bot-a", ChatID: sessionKeyMainID(key)}
 	if err := store.UpsertChat(ChatConfig{Key: chatKey, MentionOptional: true, AtMode: atModeAuto}); err != nil {
 		t.Fatalf("UpsertChat() error = %v", err)
 	}
@@ -4928,7 +4928,7 @@ func TestHandleFeishuGroupChatAtAutoKeepsReplacementWaitDelayedWhenSilent(t *tes
 		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 			BotID:     "bot-a",
 			MessageID: "om_auto_silent_wait",
-			ChatID:    key.ChatID,
+			ChatID:    sessionKeyMainID(key),
 			ChatType:  "group",
 			SenderID:  "ou_a",
 			Text:      "路过闲聊",
@@ -5215,8 +5215,8 @@ func TestHandleFeishuTopicThreadsUseSeparateSessions(t *testing.T) {
 		t.Fatalf("newCalls = %+v, want distinct thread keys", rt.newCalls)
 	}
 	for _, key := range []SessionKey{
-		{BotID: "bot-a", ChatID: "oc_group", SubID: "omt_topic_1"},
-		{BotID: "bot-a", ChatID: "oc_group", SubID: "omt_topic_2"},
+		imSessionKey("bot-a", "oc_group", "omt_topic_1"),
+		imSessionKey("bot-a", "oc_group", "omt_topic_2"),
 	} {
 		if _, ok := store.Get(key); !ok {
 			t.Fatalf("topic session %v not persisted", key)
@@ -5257,7 +5257,7 @@ func TestHandleFeishuGroupNewTopicUsesThreadSession(t *testing.T) {
 	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.Key.SubID != "omt_group_topic" {
 		t.Fatalf("promptCalls = %+v, want prompt on group topic session", rt.promptCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", SubID: "omt_group_topic"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_group", "omt_group_topic")); !ok {
 		t.Fatalf("group topic session not persisted")
 	}
 }
@@ -5332,7 +5332,7 @@ func TestHandleFeishuNewTopicWithoutThreadDoesNotReusePreviousTopicSession(t *te
 	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
 	cfg.SetAgent("traex", agent)
-	oldKey := SessionKey{BotID: "bot-a", ChatID: "oc_group", SubID: "om_previous_topic"}
+	oldKey := imSessionKey("bot-a", "oc_group", "om_previous_topic")
 	if err := store.Upsert(Session{
 		Key:          oldKey,
 		Title:        "旧话题",
@@ -5368,7 +5368,7 @@ func TestHandleFeishuNewTopicWithoutThreadDoesNotReusePreviousTopicSession(t *te
 	if len(rt.promptCalls) != 1 || rt.promptCalls[0].Session.ACPSessionID != "acp-session-new" {
 		t.Fatalf("promptCalls = %+v, want new ACP session", rt.promptCalls)
 	}
-	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_group", SubID: "om_new_topic"}); !ok || session.ACPSessionID != "acp-session-new" {
+	if session, ok := store.Get(imSessionKey("bot-a", "oc_group", "om_new_topic")); !ok || session.ACPSessionID != "acp-session-new" {
 		t.Fatalf("new topic session = %+v, %v; want persisted new session", session, ok)
 	}
 }
@@ -5409,7 +5409,7 @@ func TestHandleFeishuTopicThreadAllowsNewAndSessionCommands(t *testing.T) {
 	if len(rt.newCalls) != 2 || rt.newCalls[0].Key != topicKey || rt.newCalls[1].Key != topicKey {
 		t.Fatalf("newCalls = %+v, want both sessions scoped to current topic", rt.newCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: base.BotID, ChatID: base.ChatID}); ok {
+	if _, ok := store.Get(imSessionKey(base.BotID, base.ChatID, "")); ok {
 		t.Fatal("topic /new unexpectedly created a chat-level session")
 	}
 
@@ -5555,7 +5555,7 @@ func TestHandleFeishuSessionListAndResume(t *testing.T) {
 	if len(rt.closedKeys) != 1 || rt.closedKeys[0] != imSessionKey("bot-a", "oc_private", "") {
 		t.Fatalf("closedKeys = %+v, want current private chat key closed", rt.closedKeys)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok {
 		t.Fatalf("current private session not found")
 	}
@@ -5662,7 +5662,7 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	if !strings.Contains(reply, "标题：调试登录失败") {
 		t.Fatalf("reply = %q, want explicit title", reply)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok {
 		t.Fatalf("session not found")
 	}
@@ -5683,7 +5683,7 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	if !strings.Contains(reply, "已设置当前会话标题：新标题") {
 		t.Fatalf("reply = %q, want title confirmation", reply)
 	}
-	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok = store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok || session.Title != "新标题" || !session.ManualTitle {
 		t.Fatalf("session = %+v, %v; want manual title 新标题", session, ok)
 	}
@@ -5701,7 +5701,7 @@ func TestHandleFeishuSessionTitleCommands(t *testing.T) {
 	if !strings.Contains(reply, "已设置当前会话标题：多空格标题") {
 		t.Fatalf("reply = %q, want spaced title confirmation", reply)
 	}
-	session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok = store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok || session.Title != "多空格标题" || !session.ManualTitle {
 		t.Fatalf("session = %+v, %v; want manual title 多空格标题", session, ok)
 	}
@@ -5796,7 +5796,7 @@ func TestHandleFeishuNewSessionInheritsModeAndModelForSameAgent(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	previous := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Key:          imSessionKey("bot-a", "oc_private", ""),
 		Title:        "previous",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-old",
@@ -5863,7 +5863,7 @@ func TestHandleFeishuNewSessionInheritsModeAndModelForSameAgent(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     previous.Key.BotID,
-		ChatID:    previous.Key.ChatID,
+		ChatID:    sessionKeyMainID(previous.Key),
 		ChatType:  "p2p",
 		MessageID: "om_new",
 		Text:      "/new",
@@ -5901,7 +5901,7 @@ func TestHandleFeishuNewSessionWaitsForConfigOptionsBeforeInheritance(t *testing
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	previous := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Key:          imSessionKey("bot-a", "oc_private", ""),
 		Title:        "previous",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-old",
@@ -5953,7 +5953,7 @@ func TestHandleFeishuNewSessionWaitsForConfigOptionsBeforeInheritance(t *testing
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     previous.Key.BotID,
-		ChatID:    previous.Key.ChatID,
+		ChatID:    sessionKeyMainID(previous.Key),
 		ChatType:  "p2p",
 		MessageID: "om_new",
 		Text:      "/new",
@@ -5977,7 +5977,7 @@ func TestHandleFeishuNewSessionDoesNotInheritModeAndModelForDifferentAgent(t *te
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	previous := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_private"},
+		Key:          imSessionKey("bot-a", "oc_private", ""),
 		Title:        "previous",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-old",
@@ -5991,7 +5991,7 @@ func TestHandleFeishuNewSessionDoesNotInheritModeAndModelForDifferentAgent(t *te
 		t.Fatalf("Upsert(previous) error = %v", err)
 	}
 	if err := store.UpsertChat(ChatConfig{
-		Key:       ChatKey{BotID: previous.Key.BotID, ChatID: previous.Key.ChatID},
+		Key:       ChatKey{BotID: previous.Key.BotID, ChatID: sessionKeyMainID(previous.Key)},
 		AgentName: "hermes",
 	}); err != nil {
 		t.Fatalf("UpsertChat() error = %v", err)
@@ -6018,7 +6018,7 @@ func TestHandleFeishuNewSessionDoesNotInheritModeAndModelForDifferentAgent(t *te
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     previous.Key.BotID,
-		ChatID:    previous.Key.ChatID,
+		ChatID:    sessionKeyMainID(previous.Key),
 		ChatType:  "p2p",
 		MessageID: "om_new",
 		Text:      "/new",
@@ -6377,7 +6377,7 @@ func TestHandleFeishuAutoSessionUsesFirstPromptAsTitle(t *testing.T) {
 	if reply != "ACP 回复" {
 		t.Fatalf("reply = %q, want ACP reply", reply)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok {
 		t.Fatalf("auto-created session not found")
 	}
@@ -6398,11 +6398,11 @@ func TestHandleFeishuMessageRefreshesAutomaticSessionTitle(t *testing.T) {
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_new",
 		Text:      "/new " + workDir,
@@ -6419,7 +6419,7 @@ func TestHandleFeishuMessageRefreshesAutomaticSessionTitle(t *testing.T) {
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_prompt_1",
 		Text:      "第一次问题",
@@ -6436,7 +6436,7 @@ func TestHandleFeishuMessageRefreshesAutomaticSessionTitle(t *testing.T) {
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_prompt_2",
 		Text:      "第二次问题",
@@ -6458,11 +6458,11 @@ func TestHandleFeishuMessageKeepsManualSessionTitle(t *testing.T) {
 	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_new",
 		Text:      "/new " + workDir + " 手动标题",
@@ -6479,7 +6479,7 @@ func TestHandleFeishuMessageKeepsManualSessionTitle(t *testing.T) {
 
 	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		MessageID: "om_prompt",
 		Text:      "普通消息不应覆盖手动标题",
@@ -6539,7 +6539,7 @@ func TestHandleFeishuMessageMentionOnlyPromptsWithContextInstruction(t *testing.
 	rt := &fakeRuntime{promptReply: "ACP 回复"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		ACPSessionID: "acp-session-1",
@@ -6618,9 +6618,9 @@ func TestHandleFeishuMessageNewDefersBootstrapContextPrompt(t *testing.T) {
 	if len(rt.promptCalls) != 0 {
 		t.Fatalf("promptCalls = %+v, want /new to defer workspace context prompt", rt.promptCalls)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if !ok {
-		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+		session, ok = store.Get(imSessionKey("bot-a", "oc_chat", ""))
 	}
 	if !ok {
 		t.Fatalf("persisted session not found")
@@ -6683,7 +6683,7 @@ func TestHandleFeishuMessageResetsWorkspacePromptedAfterBuiltinSkillUpgrade(t *t
 		}
 	}
 	workDir := t.TempDir()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	if err := store.Upsert(Session{
 		Key:               key,
 		AgentName:         "traex",
@@ -6916,7 +6916,7 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 	if got := cards[0].textUpdatesSnapshot(); len(got) == 0 || got[0] != "处理中。" {
 		t.Fatalf("textUpdates = %+v, want streamed text", got)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_private"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_private", ""))
 	if !ok {
 		t.Fatal("IM session not stored")
 	}
@@ -7548,7 +7548,7 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
 	if err := store.UpsertChat(ChatConfig{
-		Key:           chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}),
+		Key:           chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}),
 		HideStatusBar: true,
 	}); err != nil {
 		t.Fatalf("UpsertChat(chat) error = %v", err)
@@ -7598,7 +7598,7 @@ func TestHandleFeishuMessageCanHideStreamCardStatusBar(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
 		MessageID: "om_msg",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Text:      "run",
@@ -7625,7 +7625,7 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
 	if err := store.UpsertChat(ChatConfig{
-		Key:             chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}),
+		Key:             chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}),
 		HideUsageDetail: true,
 	}); err != nil {
 		t.Fatalf("UpsertChat(chat) error = %v", err)
@@ -7665,7 +7665,7 @@ func TestHandleFeishuMessageCanHideStreamCardUsageDetail(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
 		MessageID: "om_msg",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Text:      "run",
@@ -7719,7 +7719,7 @@ func TestHandleFeishuMessageSkipsUsageDetailWithoutUsageInfo(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
 		MessageID: "om_msg",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Text:      "run",
@@ -8336,7 +8336,7 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 			session := testReadySession(t, store)
-			chat := ChatConfig{Key: chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID})}
+			chat := ChatConfig{Key: chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)})}
 			tt.mutate(&chat)
 			if err := store.UpsertChat(chat); err != nil {
 				t.Fatalf("UpsertChat(chat) error = %v", err)
@@ -8391,7 +8391,7 @@ func TestHandleFeishuMessageShowOptionsFilterProcessUpdates(t *testing.T) {
 			reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 				BotID:     session.Key.BotID,
 				MessageID: "om_msg",
-				ChatID:    session.Key.ChatID,
+				ChatID:    sessionKeyMainID(session.Key),
 				ThreadID:  session.Key.SubID,
 				ChatType:  "topic_group",
 				Text:      "run",
@@ -8425,7 +8425,7 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
 	if err := store.UpsertChat(ChatConfig{
-		Key:              chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: session.Key.ChatID}),
+		Key:              chatKeyFromMessage(feishu.Message{BotID: session.Key.BotID, ChatID: sessionKeyMainID(session.Key)}),
 		HideStepMessages: true,
 		HidePlans:        true,
 		HideThoughts:     true,
@@ -8472,7 +8472,7 @@ func TestHandleFeishuMessageShowOptionsCanHideWholeProcessPanel(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
 		MessageID: "om_msg",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Text:      "run",
@@ -8534,7 +8534,7 @@ func TestHandleFeishuMessageRefreshesRunningStreamCardStatus(t *testing.T) {
 		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 			BotID:     session.Key.BotID,
 			MessageID: "om_msg",
-			ChatID:    session.Key.ChatID,
+			ChatID:    sessionKeyMainID(session.Key),
 			ThreadID:  session.Key.SubID,
 			ChatType:  "topic_group",
 			Text:      "run",
@@ -8583,7 +8583,7 @@ func TestHandleFeishuMessagePermissionRequestDefaultsToReject(t *testing.T) {
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     session.Key.BotID,
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Mentions:  testBotMentions(),
@@ -8730,9 +8730,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithBootstrapContext(t *testing.T)
 	if !strings.Contains(rt.promptCalls[0].Text, "## User Message") || !strings.Contains(rt.promptCalls[0].Text, "你好") {
 		t.Fatalf("prompt text = %q, want user message with bootstrap context", rt.promptCalls[0].Text)
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if !ok {
-		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+		session, ok = store.Get(imSessionKey("bot-a", "oc_chat", ""))
 	}
 	if !ok {
 		t.Fatalf("auto-created session not persisted")
@@ -8749,7 +8749,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSessionWithoutReadyState(t *test
 	svc.setRuntime(rt)
 	workspace := filepath.Join(t.TempDir(), "bot-a")
 	markWorkspaceBootstrapped(t, workspace)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("bot-a", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		Title:        "test session",
@@ -8796,7 +8796,7 @@ func TestHandleFeishuMessageKeepsPersistedACPSessionAfterBootstrapDeleted(t *tes
 		t.Fatalf("WriteFile(SOUL.md) error = %v", err)
 	}
 	workDir := t.TempDir()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("bot-a", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -8852,7 +8852,7 @@ func TestHandleFeishuMessageRecreatesMissingACPSessionTitleUsesUserText(t *testi
 	workspace := filepath.Join(t.TempDir(), "bot-a")
 	markWorkspaceBootstrapped(t, workspace)
 	workDir := t.TempDir()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("bot-a", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -8940,7 +8940,7 @@ func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) 
 	if len(rt.promptCalls) != 0 {
 		t.Fatalf("promptCalls = %+v, want /new to defer workspace context prompt", rt.promptCalls)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_chat", "")); !ok {
 		t.Fatalf("session not found")
 	}
 
@@ -8970,7 +8970,7 @@ func TestHandleFeishuMessageBootstrappedWorkspaceAllowsNewSession(t *testing.T) 
 	if !strings.Contains(contextPrompt, "## User Message") || !strings.Contains(contextPrompt, "介绍一下") {
 		t.Fatalf("workspace context prompt = %q, want user message", contextPrompt)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_chat", "")); !ok {
 		t.Fatalf("session not found after next prompt")
 	}
 }
@@ -8997,7 +8997,7 @@ func TestHandleFeishuMessagePreservesACPStateUpdates(t *testing.T) {
 		BotID:     session.Key.BotID,
 		Workspace: session.Workspace,
 		MessageID: "om_msg",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ThreadID:  session.Key.SubID,
 		ChatType:  "topic_group",
 		Mentions:  testBotMentions(),
@@ -9063,9 +9063,9 @@ func TestHandleFeishuMessageAutoCreatesSessionWithKnowledge(t *testing.T) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
 	}
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if !ok {
-		session, ok = store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+		session, ok = store.Get(imSessionKey("bot-a", "oc_chat", ""))
 	}
 	if !ok {
 		t.Fatalf("auto-created session not persisted")
@@ -9109,9 +9109,9 @@ func TestHandleFeishuMessageNewPersistsSession(t *testing.T) {
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	session, ok := reloaded.Get(SessionKey{ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := reloaded.Get(imSessionKey("", "oc_chat", "omt_thread"))
 	if !ok {
-		session, ok = reloaded.Get(SessionKey{ChatID: "oc_chat"})
+		session, ok = reloaded.Get(imSessionKey("", "oc_chat", ""))
 	}
 	if !ok {
 		t.Fatalf("persisted session not found")
@@ -9147,10 +9147,10 @@ func TestHandleFeishuMessagePersistsSessionByBotID(t *testing.T) {
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	if _, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
+	if _, ok := store.Get(imSessionKey("bot-a", "oc_chat", "")); !ok {
 		t.Fatalf("session with bot id not found")
 	}
-	if _, ok := store.Get(SessionKey{ChatID: "oc_chat", SubID: "omt_thread"}); ok {
+	if _, ok := store.Get(imSessionKey("", "oc_chat", "omt_thread")); ok {
 		t.Fatalf("session without bot id should not be written for new messages")
 	}
 }
@@ -9190,7 +9190,7 @@ func TestHandleFeishuMessageUsesBotWorkspaceSessionStore(t *testing.T) {
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if _, ok := reloaded.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok {
+	if _, ok := reloaded.Get(imSessionKey("bot-a", "oc_chat", "")); !ok {
 		t.Fatalf("persisted session not found in bot workspace store")
 	}
 }
@@ -9201,7 +9201,7 @@ func TestHandleFeishuMessageStatusShowsPersistedSession(t *testing.T) {
 	svc.setRuntime(&fakeRuntime{newSessionID: "acp-session-1"})
 	workDir := t.TempDir()
 	if err := store.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"},
+		Key:          imSessionKey("bot-a", "oc_chat", "omt_thread"),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          workDir,
@@ -9453,7 +9453,7 @@ func TestHandleFeishuMessagePromptUsesPersistedSession(t *testing.T) {
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
 	if err := store.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"},
+		Key:          imSessionKey("bot-a", "oc_chat", "omt_thread"),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          workDir,
@@ -9514,7 +9514,7 @@ func TestHandleFeishuMessageInjectsTraceAttrsIntoPromptContext(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -9643,7 +9643,7 @@ func TestHandleSIDCommandRoutesPromptToSpecifiedSession(t *testing.T) {
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
 	workDir := t.TempDir()
-	sourceKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"})
+	sourceKey := normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source"))
 	sourceSession := Session{
 		Key:          sourceKey,
 		AgentName:    "traex",
@@ -9700,7 +9700,7 @@ func TestHandleSIDCommandCancelsRunningTaskBeforeSessionTransition(t *testing.T)
 	cfg.Bots[0].OwnerOpenIDs = []string{testOwnerOpenID}
 	svc := NewService(cfg, store)
 	workDir := t.TempDir()
-	sourceKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_source", SubID: "omt_source"})
+	sourceKey := normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source"))
 	targetSession := Session{
 		Key:          sourceKey,
 		AgentName:    "traex",
@@ -9792,7 +9792,7 @@ func TestHandleSIDCommandCancelsRunningTaskBeforeSessionTransition(t *testing.T)
 func TestHandleWikiCommandPersistsConfig(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("bot-a", "oc_chat", "omt_thread")
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -9914,7 +9914,7 @@ func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 	if !strings.Contains(reply, "已为当前会话创建 ACP 会话") {
 		t.Fatalf("reply = %q, want new session confirmation", reply)
 	}
-	session, ok := store.Get(SessionKey{BotID: msg.BotID, ChatID: msg.ChatID})
+	session, ok := store.Get(imSessionKey(msg.BotID, msg.ChatID, ""))
 	if !ok || session.WikiIntervalSec != 0 || session.WikiDisabled {
 		t.Fatalf("session = %+v, %v; wiki options should not be stored on session", session, ok)
 	}
@@ -9945,7 +9945,7 @@ func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
 	}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldSession := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10021,7 +10021,7 @@ func TestNewSessionRuntimeFailureRestoresPendingWiki(t *testing.T) {
 	}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldSession := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10068,7 +10068,7 @@ func TestNewSessionInvalidRequestKeepsPendingWiki(t *testing.T) {
 	rt := &fakeRuntime{newSessionID: "acp-session-new", promptReply: "NoReply"}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldSession := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10115,7 +10115,7 @@ func TestWikiOffCancelsRunningWikiRuntimeReflection(t *testing.T) {
 	}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldSession := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10174,7 +10174,7 @@ func TestWikiOffCancelsRunningWikiRuntimeReflection(t *testing.T) {
 func TestWikiStatusDoesNotCancelScheduledReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10226,7 +10226,7 @@ func TestWikiIntervalReschedulesScheduledReflection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(&fakeRuntime{promptReply: "NoReply"})
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10303,7 +10303,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -10465,7 +10465,7 @@ func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testin
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",
@@ -10564,7 +10564,7 @@ func TestHandleFeishuMessageStatusShowsRuntimeDiagnostics(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -10693,7 +10693,7 @@ func TestHandleFeishuMessageStatusShowsSanitizedACPError(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -10758,7 +10758,7 @@ func TestHandleFeishuMessageStatusIgnoresStaleACPErrorAfterNewSession(t *testing
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldDir := t.TempDir()
 	if err := store.Upsert(Session{
 		Key:          key,
@@ -10817,7 +10817,7 @@ func TestLoopCommandRunsUntilDoneAndUpdatesStartCard(t *testing.T) {
 	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "继续"}, {Text: "DONE"}}}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -10916,7 +10916,7 @@ func TestLoopCommandStopsWhenDoneComesFromStreamChunk(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11014,7 +11014,7 @@ func TestLoopCommandStopsWhenFinalCardTextIsDoneAfterProcessMessages(t *testing.
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11078,7 +11078,7 @@ func TestLoopRoundCardsReplyToStartMessageInThread(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11138,7 +11138,7 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 	rt := &fakeRuntime{promptReply: "继续"}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11191,7 +11191,7 @@ func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11259,7 +11259,7 @@ func TestLoopStopCancelsRunningLoopAndStatusReportsManualStop(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -11500,7 +11500,7 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:             key,
 		AgentName:       "traex",

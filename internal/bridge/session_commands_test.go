@@ -33,8 +33,8 @@ func TestHandleFeishuSessionListSelectionOptionsAreLimited(t *testing.T) {
 
 func TestFormatSessionListOnlyShowsCurrentIMHistory(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	imKey := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
-	otherIMKey := SessionKey{BotID: "bot-a", ChatID: "oc_other"}
+	imKey := imSessionKey("bot-a", "oc_chat", "")
+	otherIMKey := imSessionKey("bot-a", "oc_other", "")
 	scheduleKey := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "oc_chat", SubID: "run:1"}
 	commentKey := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "oc_chat", SubID: "comment-1"}
 	for _, session := range []Session{
@@ -110,7 +110,7 @@ func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
 	if display != "第一个" {
 		t.Fatalf("display = %q, want restored title", display)
 	}
-	session, ok := store.Get(SessionKey{BotID: base.BotID, ChatID: base.ChatID})
+	session, ok := store.Get(imSessionKey(base.BotID, base.ChatID, ""))
 	if !ok {
 		t.Fatalf("current session not found")
 	}
@@ -162,7 +162,7 @@ func TestHandleSessionSelectionRestoresSessionForOwnerOnly(t *testing.T) {
 
 func TestHandleSessionSelectionRejectsStaleCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 	for i := 1; i <= 3; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -180,7 +180,7 @@ func TestHandleSessionSelectionRejectsStaleCard(t *testing.T) {
 
 	_, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:               key.BotID,
-		ChatID:              key.ChatID,
+		ChatID:              sessionKeyMainID(key),
 		RequesterID:         testOwnerOpenID,
 		OperatorID:          testOwnerOpenID,
 		CurrentACPSessionID: "acp-session-2",
@@ -200,7 +200,7 @@ func TestHandleSessionSelectionRejectsStaleCard(t *testing.T) {
 
 func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_topic", SubID: "omt_topic"}
+	key := imSessionKey("bot-a", "oc_topic", "omt_topic")
 	for i := 1; i <= 2; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -218,7 +218,7 @@ func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 
 	display, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:               key.BotID,
-		ChatID:              key.ChatID,
+		ChatID:              sessionKeyMainID(key),
 		ThreadID:            key.SubID,
 		GroupMessageType:    "thread",
 		RequesterID:         testOwnerOpenID,
@@ -236,7 +236,7 @@ func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 	if !ok || current.ACPSessionID != "acp-topic-1" {
 		t.Fatalf("current topic session = %+v, %v; want acp-topic-1", current, ok)
 	}
-	if _, ok := store.Get(SessionKey{BotID: key.BotID, ChatID: key.ChatID}); ok {
+	if _, ok := store.Get(imSessionKey(key.BotID, sessionKeyMainID(key), "")); ok {
 		t.Fatal("topic card restore unexpectedly changed chat-level session")
 	}
 	if active := rt.activeSessionIDs[normalizeSessionKey(key)]; active != "acp-topic-1" {
@@ -246,7 +246,7 @@ func TestHandleSessionSelectionRestoresTopicSession(t *testing.T) {
 
 func TestHandleSessionSelectionOrdinaryGroupThreadIDUsesChatSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_group"}
+	key := imSessionKey("bot-a", "oc_group", "")
 	for i := 1; i <= 2; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -264,7 +264,7 @@ func TestHandleSessionSelectionOrdinaryGroupThreadIDUsesChatSession(t *testing.T
 
 	_, err := svc.HandleSessionSelection(context.Background(), feishu.SessionSelection{
 		BotID:               key.BotID,
-		ChatID:              key.ChatID,
+		ChatID:              sessionKeyMainID(key),
 		ThreadID:            "omt_reply_thread",
 		GroupMessageType:    "chat",
 		RequesterID:         testOwnerOpenID,
@@ -279,14 +279,14 @@ func TestHandleSessionSelectionOrdinaryGroupThreadIDUsesChatSession(t *testing.T
 	if !ok || current.ACPSessionID != "acp-group-1" {
 		t.Fatalf("current group session = %+v, %v; want acp-group-1", current, ok)
 	}
-	if _, ok := store.Get(SessionKey{BotID: key.BotID, ChatID: key.ChatID, SubID: "omt_reply_thread"}); ok {
+	if _, ok := store.Get(imSessionKey(key.BotID, sessionKeyMainID(key), "omt_reply_thread")); ok {
 		t.Fatal("ordinary group card restore unexpectedly created a topic session")
 	}
 }
 
 func TestResumeSessionSucceedsWhenOldRuntimeCloseFails(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 	for i := 1; i <= 2; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -307,7 +307,7 @@ func TestResumeSessionSucceedsWhenOldRuntimeCloseFails(t *testing.T) {
 
 	reply := svc.resumeSession(context.Background(), feishu.Message{
 		BotID:    key.BotID,
-		ChatID:   key.ChatID,
+		ChatID:   sessionKeyMainID(key),
 		ChatType: "p2p",
 	}, 2)
 	if !strings.Contains(reply, "已恢复会话 2") || !strings.Contains(reply, "session：acp-session-1") {
@@ -321,7 +321,7 @@ func TestResumeSessionSucceedsWhenOldRuntimeCloseFails(t *testing.T) {
 
 func TestResumeSessionDoesNotCloseConcurrentlyCreatedRuntime(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 	for i := 1; i <= 2; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -350,7 +350,7 @@ func TestResumeSessionDoesNotCloseConcurrentlyCreatedRuntime(t *testing.T) {
 	go func() {
 		resumeDone <- svc.resumeSession(context.Background(), feishu.Message{
 			BotID:    key.BotID,
-			ChatID:   key.ChatID,
+			ChatID:   sessionKeyMainID(key),
 			ChatType: "p2p",
 		}, 2)
 	}()
@@ -416,7 +416,7 @@ func TestSetSessionTitleOnlyUpdatesCurrentSessionTitle(t *testing.T) {
 	svc := newTestService(config.Default(), store)
 	msg := feishu.Message{
 		BotID:            stale.Key.BotID,
-		ChatID:           stale.Key.ChatID,
+		ChatID:           sessionKeyMainID(stale.Key),
 		ThreadID:         stale.Key.SubID,
 		GroupMessageType: "thread",
 	}

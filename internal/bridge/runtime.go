@@ -306,7 +306,6 @@ func (r *runtimeManager) snapshot() runtimeManagerSnapshot {
 		right := snapshot.Slots[j]
 		for _, pair := range [][2]string{
 			{left.Key.BotID, right.Key.BotID},
-			{left.Key.ChatID, right.Key.ChatID},
 			{left.Key.Source, right.Key.Source},
 			{left.Key.MainID, right.Key.MainID},
 			{left.Key.SubID, right.Key.SubID},
@@ -1149,7 +1148,7 @@ func (r *runtimeManager) setRuntimeSessionID(key runtimeKey, sessionID string) {
 func (r *runtimeManager) transitionLock(key runtimeKey) *sync.Mutex {
 	key = normalizeRuntimeKey(key)
 	hash := uint64(1469598103934665603)
-	for _, value := range []string{key.BotID, sessionKeySource(key.SessionKey), sessionKeyMainID(key.SessionKey), key.ChatID, key.SubID, key.Scope, key.RunID} {
+	for _, value := range []string{key.BotID, sessionKeySource(key.SessionKey), sessionKeyMainID(key.SessionKey), key.SubID, key.Scope, key.RunID} {
 		for i := 0; i < len(value); i++ {
 			hash ^= uint64(value[i])
 			hash *= 1099511628211

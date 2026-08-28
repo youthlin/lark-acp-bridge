@@ -609,7 +609,6 @@ func imSessionKey(botID, chatID, threadID string) SessionKey {
 		BotID:  botID,
 		Source: sessionSourceIM,
 		MainID: chatID,
-		ChatID: chatID,
 		SubID:  threadID,
 	})
 }

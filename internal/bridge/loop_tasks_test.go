@@ -112,7 +112,7 @@ func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -182,7 +182,7 @@ func TestLoopAddCommandAppendsSupplementToNextRoundOnce(t *testing.T) {
 
 func TestLoopStatusHelpersIgnoreStaleStarted(t *testing.T) {
 	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	oldStarted := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	newStarted := oldStarted.Add(time.Minute)
 	svc.markLoopStarted(key, oldStarted, loopRequest{Prompt: "旧 loop", MaxRounds: 5, Interval: time.Second})
@@ -222,9 +222,9 @@ func TestLoopStatusHelpersIgnoreStaleStarted(t *testing.T) {
 }
 
 func TestStartLoopStatusSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 10, 30, 0, 0, time.UTC)
 	cases := []struct {
 		name      string
@@ -293,9 +293,9 @@ func TestStartLoopStatusSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestAppendLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 10, 45, 0, 0, time.UTC)
 	cases := []struct {
 		name        string
@@ -365,9 +365,9 @@ func TestAppendLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 10, 50, 0, 0, time.UTC)
 	otherStarted := started.Add(time.Minute)
 	cases := []struct {
@@ -440,9 +440,9 @@ func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestUpdateLoopRoundStatusSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
 	otherStarted := started.Add(time.Minute)
 	cases := []struct {
@@ -524,9 +524,9 @@ func TestUpdateLoopRoundStatusSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestFinishLoopStatusSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 11, 30, 0, 0, time.UTC)
 	otherStarted := started.Add(time.Minute)
 	loopErr := errors.New("agent 调用失败")
@@ -636,7 +636,7 @@ func TestFinishLoopStatusSessionWorkBoundaries(t *testing.T) {
 
 func TestLoopStatusSnapshotNormalizesSessionKey(t *testing.T) {
 	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	started := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
 	svc.markLoopStarted(key, started, loopRequest{Prompt: "持续推进", MaxRounds: 2, Interval: time.Second})
 
@@ -654,7 +654,7 @@ func TestHandleLoopCancelAllowsOwnerAndCancelsRunningLoop(t *testing.T) {
 	rt := &fakeRuntime{}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -730,8 +730,8 @@ func TestCancelLoopTaskSessionWorkBoundaries(t *testing.T) {
 			rt := &fakeRuntime{}
 			svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
 			svc.setRuntime(rt)
-			targetKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_target"})
-			otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_other"})
+			targetKey := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_target"))
+			otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_other"))
 			targetSession := Session{Key: targetKey, AgentName: "traex", ACPSessionID: "acp-target"}
 			otherSession := Session{Key: otherKey, AgentName: "traex", ACPSessionID: "acp-other"}
 			targetCtx, targetFinish := svc.startTask(context.Background(), targetSession, agent, tt.targetKind)
@@ -812,7 +812,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -900,7 +900,7 @@ func TestHandleLoopCancelUpdatesRunningRoundCardWithDetachedContext(t *testing.T
 func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -923,7 +923,7 @@ func TestHandleLoopCancelRejectsNonOwner(t *testing.T) {
 func TestHandleLoopCancelRejectsExpiredCard(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := newTestService(config.Default(), store)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",

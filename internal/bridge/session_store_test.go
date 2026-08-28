@@ -22,7 +22,7 @@ func TestSessionStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
 	localPath := filepath.Join(workspace, ".local", "sessions.json")
 	legacy := NewSessionStore(legacyPath)
 	if err := legacy.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		Title:        "legacy",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
@@ -35,11 +35,11 @@ func TestSessionStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
 	if err := store.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}); !ok || session.ACPSessionID != "acp-session-1" {
+	if session, ok := store.Get(imSessionKey("bot-a", "oc_chat", "")); !ok || session.ACPSessionID != "acp-session-1" {
 		t.Fatalf("legacy session = %+v ok=%v, want loaded", session, ok)
 	}
 	if err := store.Upsert(Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		Title:        "local",
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-2",
@@ -52,13 +52,127 @@ func TestSessionStoreLoadsLegacyPathAndWritesLocalPath(t *testing.T) {
 	}
 }
 
+func TestSessionStoreLoadsLegacyIMSessionKeyShapeAndWritesNewShape(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	legacyData := []byte(`{
+  "version": 1,
+  "sessions": [
+    {
+      "key": {
+        "bot_id": "bot-a",
+        "chat_id": "oc_chat",
+        "thread_id": "omt_thread"
+      },
+      "agent_name": "traex",
+      "acp_session_id": "acp-session-current",
+      "cwd": "/repo"
+    }
+  ],
+  "history": [
+    {
+      "key": {
+        "bot_id": "bot-a",
+        "chat_id": "oc_chat",
+        "thread_id": "omt_old"
+      },
+      "agent_name": "traex",
+      "acp_session_id": "acp-session-old",
+      "cwd": "/repo"
+    }
+  ],
+  "messages": [
+    {
+      "bot_id": "bot-a",
+      "chat_id": "oc_chat",
+      "message_id": "om_prompt",
+      "session_key": {
+        "bot_id": "bot-a",
+        "chat_id": "oc_chat",
+        "thread_id": "omt_thread"
+      }
+    }
+  ]
+}`)
+	if err := os.WriteFile(storePath, legacyData, 0o600); err != nil {
+		t.Fatalf("WriteFile(legacy sessions.json) error = %v", err)
+	}
+
+	store := NewSessionStore(storePath)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	currentKey := imSessionKey("bot-a", "oc_chat", "omt_thread")
+	session, ok := store.Get(currentKey)
+	if !ok {
+		t.Fatalf("Get(legacy IM key mapped to new key) ok = false, want true")
+	}
+	if session.Key != currentKey {
+		t.Fatalf("session key = %+v, want %+v", session.Key, currentKey)
+	}
+
+	boundSession, binding, ok := store.SessionForMessage("bot-a", "oc_chat", "om_prompt")
+	if !ok {
+		t.Fatalf("SessionForMessage(legacy session_key) ok = false, want true")
+	}
+	if boundSession.Key != currentKey || binding.SessionKey != currentKey {
+		t.Fatalf("bound session = %+v binding = %+v, want key %+v", boundSession, binding, currentKey)
+	}
+
+	history := store.ListByChat("bot-a", "oc_chat")
+	if !sessionListContains(history, "acp-session-current") || !sessionListContains(history, "acp-session-old") {
+		t.Fatalf("history = %+v, want current and old legacy sessions", history)
+	}
+
+	writtenData, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(written sessions.json) error = %v", err)
+	}
+	var written struct {
+		Sessions []struct {
+			Key map[string]any `json:"key"`
+		} `json:"sessions"`
+		History []struct {
+			Key map[string]any `json:"key"`
+		} `json:"history"`
+		Messages []struct {
+			SessionKey map[string]any `json:"session_key"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(writtenData, &written); err != nil {
+		t.Fatalf("Unmarshal(written sessions.json) error = %v", err)
+	}
+	for _, item := range written.Sessions {
+		assertPersistedSessionKeyUsesNewShape(t, item.Key)
+	}
+	for _, item := range written.History {
+		assertPersistedSessionKeyUsesNewShape(t, item.Key)
+	}
+	for _, item := range written.Messages {
+		assertPersistedSessionKeyUsesNewShape(t, item.SessionKey)
+	}
+}
+
+func assertPersistedSessionKeyUsesNewShape(t *testing.T, key map[string]any) {
+	t.Helper()
+	if _, ok := key["chat_id"]; ok {
+		t.Fatalf("persisted session key = %+v, should not contain legacy chat_id", key)
+	}
+	if _, ok := key["thread_id"]; ok {
+		t.Fatalf("persisted session key = %+v, should not contain legacy thread_id", key)
+	}
+	if key["source"] != sessionSourceIM || key["main_id"] != "oc_chat" {
+		t.Fatalf("persisted session key = %+v, want source=im and main_id=oc_chat", key)
+	}
+}
+
 func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
 
 	for i := 0; i < maxSessionHistoryPerChat+2; i++ {
 		if err := store.Upsert(Session{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+			Key:          imSessionKey("bot-a", "oc_chat", ""),
 			Title:        fmt.Sprintf("session %d", i),
 			AgentName:    "traex",
 			ACPSessionID: fmt.Sprintf("acp-session-%02d", i),
@@ -69,7 +183,7 @@ func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 	}
 	for i := 0; i < maxSessionHistoryPerChat; i++ {
 		if err := store.Upsert(Session{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_other"},
+			Key:          imSessionKey("bot-a", "oc_other", ""),
 			Title:        fmt.Sprintf("other %d", i),
 			AgentName:    "traex",
 			ACPSessionID: fmt.Sprintf("other-session-%02d", i),
@@ -107,7 +221,7 @@ func TestSessionStoreTrimsHistoryPerChat(t *testing.T) {
 func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 
 	first, err := store.UpsertWithDefaultTitle(Session{
 		Key:          key,
@@ -134,7 +248,7 @@ func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
 	if second.Title != "session#2" {
 		t.Fatalf("second session title = %q, want session#2", second.Title)
 	}
-	chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: key.ChatID})
+	chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)})
 	if !ok || chat.NextSessionSeq != 3 {
 		t.Fatalf("chat = %+v ok=%v, want next sequence 3", chat, ok)
 	}
@@ -159,7 +273,7 @@ func TestSessionStoreUpsertWithDefaultTitlePersistsChatSequence(t *testing.T) {
 
 func TestSessionStoreListByMainIsolatesSources(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	imKey := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	imKey := imSessionKey("bot-a", "oc_chat", "")
 	scheduleKey := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:daily", SubID: "run:1"}
 	commentKey := SessionKey{BotID: "bot-a", Source: "drive_comment", MainID: "docx:token", SubID: "comment-1"}
 	for _, session := range []Session{
@@ -224,7 +338,7 @@ func TestSessionStoreUpsertWithDefaultTitleSupportsNonIMParent(t *testing.T) {
 func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	session := Session{
 		Key:               key,
 		Title:             "ready session",
@@ -289,8 +403,8 @@ func TestSessionStoreWritesCompactRecoverableSessionState(t *testing.T) {
 		t.Fatalf("len(file.Sessions) = %d, want 1", len(file.Sessions))
 	}
 	persisted := file.Sessions[0]
-	if persisted.Key.Source != "" || persisted.Key.MainID != "" || persisted.Key.ChatID != "oc_chat" {
-		t.Fatalf("persisted IM key = %+v, want legacy chat/thread JSON shape", persisted.Key)
+	if persisted.Key.Source != sessionSourceIM || persisted.Key.MainID != "oc_chat" || persisted.Key.SubID != "" {
+		t.Fatalf("persisted IM key = %+v, want source/main/sub JSON shape", persisted.Key)
 	}
 	if len(persisted.AvailableCommands) != 0 {
 		t.Fatalf("AvailableCommands persisted = %+v, want omitted", persisted.AvailableCommands)
@@ -434,7 +548,7 @@ func TestSessionStoreFirstMessageForSessionReturnsEarliestMatchingBinding(t *tes
 
 func TestSessionStorePrunesMessageBindings(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	if err := store.Upsert(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -457,7 +571,7 @@ func TestSessionStorePrunesMessageBindings(t *testing.T) {
 		BotID:      "bot-a",
 		ChatID:     "oc_trace",
 		MessageID:  "om_orphan",
-		SessionKey: SessionKey{BotID: "bot-a", ChatID: "oc_missing"},
+		SessionKey: imSessionKey("bot-a", "oc_missing", ""),
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -491,7 +605,7 @@ func TestSessionStorePrunesMessageBindings(t *testing.T) {
 
 func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	session := Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -546,7 +660,7 @@ func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
 	got.ConfigOptions[0].Options[0].Name = "get changed"
 	got.Models.AvailableModels[0].Name = "get changed"
 	got.Mode.CurrentModeID = "get changed"
-	history := store.ListByChat(key.BotID, key.ChatID)
+	history := store.ListByChat(key.BotID, sessionKeyMainID(key))
 	if len(history) != 1 {
 		t.Fatalf("ListByChat() = %+v, want one session", history)
 	}
@@ -569,7 +683,7 @@ func TestSessionStoreSessionCopiesDoNotShareMutableState(t *testing.T) {
 
 func TestSessionStoreResumeSessionIfCurrentRejectsStaleSelection(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	for i := 1; i <= 3; i++ {
 		if err := store.Upsert(Session{
 			Key:          key,
@@ -606,7 +720,7 @@ func TestSessionStoreResumeSessionIfCurrentRejectsStaleSelection(t *testing.T) {
 func TestSessionStoreWriteFailureRestoresMemoryState(t *testing.T) {
 	dir := t.TempDir()
 	store := NewSessionStore(filepath.Join(dir, "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	if _, err := store.UpsertWithDefaultTitle(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -615,7 +729,7 @@ func TestSessionStoreWriteFailureRestoresMemoryState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertWithDefaultTitle(initial) error = %v", err)
 	}
-	chatKey := ChatKey{BotID: key.BotID, ChatID: key.ChatID}
+	chatKey := ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)}
 	if _, err := store.UpdateChat(ChatConfig{Key: chatKey}, func(chat *ChatConfig) {
 		chat.HideTools = true
 	}); err != nil {
@@ -640,7 +754,7 @@ func TestSessionStoreWriteFailureRestoresMemoryState(t *testing.T) {
 	if !ok || current.ACPSessionID != "acp-session-1" || current.Title != "session#1" {
 		t.Fatalf("current after write failure = %+v, %v; want initial session", current, ok)
 	}
-	history := store.ListByChat(key.BotID, key.ChatID)
+	history := store.ListByChat(key.BotID, sessionKeyMainID(key))
 	if len(history) != 1 || history[0].ACPSessionID != "acp-session-1" {
 		t.Fatalf("history after write failure = %+v, want initial session only", history)
 	}
@@ -664,7 +778,7 @@ func TestSessionStoreWriteFailureRestoresMemoryState(t *testing.T) {
 func TestSessionStoreLoadMissingFileClearsState(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	store := NewSessionStore(storePath)
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	if _, err := store.UpsertWithDefaultTitle(Session{
 		Key:          key,
 		AgentName:    "traex",
@@ -674,7 +788,7 @@ func TestSessionStoreLoadMissingFileClearsState(t *testing.T) {
 		t.Fatalf("UpsertWithDefaultTitle() error = %v", err)
 	}
 	if err := store.UpsertChat(ChatConfig{
-		Key:       ChatKey{BotID: key.BotID, ChatID: key.ChatID},
+		Key:       ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)},
 		HideTools: true,
 	}); err != nil {
 		t.Fatalf("UpsertChat() error = %v", err)
@@ -692,7 +806,7 @@ func TestSessionStoreLoadMissingFileClearsState(t *testing.T) {
 	if sessions := store.ListByChat("bot-a", "oc_chat"); len(sessions) != 0 {
 		t.Fatalf("ListByChat() = %+v, want empty history", sessions)
 	}
-	if chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: key.ChatID}); ok {
+	if chat, ok := store.GetChat(ChatKey{BotID: key.BotID, ChatID: sessionKeyMainID(key)}); ok {
 		t.Fatalf("GetChat() = %+v, want no chat config", chat)
 	}
 }
@@ -802,7 +916,7 @@ func TestSessionStoreInsertChatIfAbsentPreservesExistingConfig(t *testing.T) {
 
 func TestSessionStoreReplaceCurrentACPSessionPreservesLatestState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	current := Session{
 		Key:          key,
 		Title:        "手动标题",
@@ -860,7 +974,7 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		Version: 1,
 		Sessions: []Session{
 			{
-				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " omt_thread "},
+				Key:          imSessionKey(" bot-a ", " oc_chat ", " omt_thread "),
 				AgentName:    " traex ",
 				ACPSessionID: " acp-session-current ",
 				Cwd:          "/repo",
@@ -868,7 +982,7 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		},
 		History: []Session{
 			{
-				Key:          SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " old_thread "},
+				Key:          imSessionKey(" bot-a ", " oc_chat ", " old_thread "),
 				AgentName:    " traex ",
 				ACPSessionID: " acp-session-old ",
 				Cwd:          "/repo",
@@ -895,17 +1009,17 @@ func TestSessionStoreLoadNormalizesIdentityFields(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	session, ok := store.Get(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"})
+	session, ok := store.Get(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	if !ok {
 		t.Fatalf("Get(normalized session key) ok = false, want true")
 	}
-	if session.Key != normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}) {
+	if session.Key != normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread")) {
 		t.Fatalf("session key = %+v, want normalized key", session.Key)
 	}
 	if session.AgentName != "traex" || session.ACPSessionID != "acp-session-current" {
 		t.Fatalf("session agent/session = %q/%q, want normalized values", session.AgentName, session.ACPSessionID)
 	}
-	if _, ok := store.Get(SessionKey{BotID: " bot-a ", ChatID: " oc_chat ", SubID: " omt_thread "}); !ok {
+	if _, ok := store.Get(imSessionKey(" bot-a ", " oc_chat ", " omt_thread ")); !ok {
 		t.Fatalf("Get(spaced session key) ok = false, want lookup to normalize key")
 	}
 
@@ -932,25 +1046,25 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 
 	sessions := []Session{
 		{
-			Key:          SessionKey{BotID: "bot-b", ChatID: "oc_1"},
+			Key:          imSessionKey("bot-b", "oc_1", ""),
 			AgentName:    "traex",
 			ACPSessionID: "session-b",
 			Cwd:          "/repo",
 		},
 		{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-b"},
+			Key:          imSessionKey("bot-a", "oc_2", "thread-b"),
 			AgentName:    "traex",
 			ACPSessionID: "session-a2b",
 			Cwd:          "/repo",
 		},
 		{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_1"},
+			Key:          imSessionKey("bot-a", "oc_1", ""),
 			AgentName:    "traex",
 			ACPSessionID: "session-a1",
 			Cwd:          "/repo",
 		},
 		{
-			Key:          SessionKey{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-a"},
+			Key:          imSessionKey("bot-a", "oc_2", "thread-a"),
 			AgentName:    "traex",
 			ACPSessionID: "session-a2a",
 			Cwd:          "/repo",
@@ -994,10 +1108,10 @@ func TestSessionStoreWriteUsesStableOrder(t *testing.T) {
 		gotSessions = append(gotSessions, session.Key)
 	}
 	wantSessions := []SessionKey{
-		{BotID: "bot-a", ChatID: "oc_1"},
-		{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-a"},
-		{BotID: "bot-a", ChatID: "oc_2", SubID: "thread-b"},
-		{BotID: "bot-b", ChatID: "oc_1"},
+		imSessionKey("bot-a", "oc_1", ""),
+		imSessionKey("bot-a", "oc_2", "thread-a"),
+		imSessionKey("bot-a", "oc_2", "thread-b"),
+		imSessionKey("bot-b", "oc_1", ""),
 	}
 	if !sessionKeysEqual(gotSessions, wantSessions) {
 		t.Fatalf("session order = %+v, want %+v", gotSessions, wantSessions)

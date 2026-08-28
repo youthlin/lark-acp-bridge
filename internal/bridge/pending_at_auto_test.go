@@ -11,7 +11,7 @@ func newPendingTestService() *Service {
 }
 
 func testPendingKey() SessionKey {
-	return normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"})
+	return normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 }
 
 func TestRestorePendingAtAutoMessagesPrepends(t *testing.T) {

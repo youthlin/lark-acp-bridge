@@ -48,7 +48,7 @@ func TestUpdateAutomaticSessionTitleKeepsNewerSessionState(t *testing.T) {
 
 			got := svc.updateAutomaticSessionTitle(context.Background(), feishu.Message{
 				BotID:    stale.Key.BotID,
-				ChatID:   stale.Key.ChatID,
+				ChatID:   sessionKeyMainID(stale.Key),
 				ThreadID: stale.Key.SubID,
 			}, stale, "自动标题")
 
@@ -204,7 +204,7 @@ func TestCommitCurrentACPSessionReplacementWithoutStore(t *testing.T) {
 func TestCreateSessionWriteFailureKeepsCurrentRuntime(t *testing.T) {
 	dir := t.TempDir()
 	store := NewSessionStore(filepath.Join(dir, "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_private"}
+	key := imSessionKey("bot-a", "oc_private", "")
 	current := Session{
 		Key:          key,
 		Title:        "当前会话",
@@ -231,7 +231,7 @@ func TestCreateSessionWriteFailureKeepsCurrentRuntime(t *testing.T) {
 
 	_, _, _, errText := svc.createSession(context.Background(), []string{"/new", newDir}, feishu.Message{
 		BotID:     key.BotID,
-		ChatID:    key.ChatID,
+		ChatID:    sessionKeyMainID(key),
 		ChatType:  "p2p",
 		Workspace: filepath.Join(t.TempDir(), "workspace"),
 	})

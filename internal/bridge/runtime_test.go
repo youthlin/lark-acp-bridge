@@ -17,7 +17,7 @@ import (
 
 func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
+	key := imSessionKey("bot-a", "oc_chat", "thread-a")
 	var updates []acp.SessionUpdate
 	unsub := r.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
 		if sessionID != "session-1" {
@@ -47,7 +47,7 @@ func TestRuntimeDispatchSessionInfoSendsStateUpdates(t *testing.T) {
 
 func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
+	key := imSessionKey("bot-a", "oc_chat", "thread-a")
 	var updates []acp.SessionUpdate
 	unsub := r.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
 		if sessionID != "session-1" {
@@ -71,7 +71,7 @@ func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 
 func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T) {
 	r := newRuntimeManager()
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"}
+	key := imSessionKey("bot-a", "oc_chat", "thread-a")
 	r.setRuntimeSessionID(currentRuntimeKey(key), "session-2")
 
 	session, changed, err := r.TransitionCurrentSession(key, "session-2", func() (Session, bool, error) {
@@ -106,7 +106,7 @@ func TestRuntimeCloseIdleRuntimeSlotsClosesInactiveClient(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.idleTimeout = 30 * time.Minute
-	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	key := currentRuntimeKey(imSessionKey("bot-a", "oc_chat", "thread-a"))
 	r.slots[key] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: "session-1",
@@ -126,7 +126,7 @@ func TestRuntimeCloseIdleRuntimeSlotsKeepsActiveClient(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.idleTimeout = 30 * time.Minute
-	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	key := currentRuntimeKey(imSessionKey("bot-a", "oc_chat", "thread-a"))
 	client := &acp.Client{}
 	r.slots[key] = runtimeClientSlot{
 		client:    client,
@@ -160,7 +160,7 @@ func TestRuntimeCloseIdleRuntimeSlotsKeepsBusyClient(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.idleTimeout = 30 * time.Minute
-	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	key := currentRuntimeKey(imSessionKey("bot-a", "oc_chat", "thread-a"))
 	r.slots[key] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: "session-1",
@@ -182,9 +182,9 @@ func TestRuntimeSnapshotReportsClientAndSlotState(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.idleTimeout = 30 * time.Minute
-	current := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	current := currentRuntimeKey(imSessionKey("bot-a", "oc_chat", "thread-a"))
 	wiki := wikiRuntimeKey(current.SessionKey, 1, "session-wiki")
-	marker := currentRuntimeKey(SessionKey{BotID: "bot-b", ChatID: "oc_other"})
+	marker := currentRuntimeKey(imSessionKey("bot-b", "oc_other", ""))
 	r.slots[current] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: "session-1",
@@ -218,9 +218,9 @@ func TestRuntimeReserveSlotReclaimsOldestIdleClientAtLimit(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.maxSlots = 2
-	oldKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "old"})
-	newerKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "newer"})
-	targetKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "target"})
+	oldKey := currentRuntimeKey(imSessionKey("bot-a", "old", ""))
+	newerKey := currentRuntimeKey(imSessionKey("bot-a", "newer", ""))
+	targetKey := currentRuntimeKey(imSessionKey("bot-a", "target", ""))
 	r.slots[oldKey] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: "old-session",
@@ -253,8 +253,8 @@ func TestRuntimeReserveSlotTracksMultipleReservationsForSameKey(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.maxSlots = 1
-	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "same"})
-	otherKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "other"})
+	key := currentRuntimeKey(imSessionKey("bot-a", "same", ""))
+	otherKey := currentRuntimeKey(imSessionKey("bot-a", "other", ""))
 
 	releaseOne, err := r.reserveRuntimeSlot(key)
 	if err != nil {
@@ -290,8 +290,8 @@ func TestRuntimeReserveSlotRejectsWhenLimitIsAllBusy(t *testing.T) {
 	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return base }
 	r.maxSlots = 1
-	busyKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "busy"})
-	targetKey := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "target"})
+	busyKey := currentRuntimeKey(imSessionKey("bot-a", "busy", ""))
+	targetKey := currentRuntimeKey(imSessionKey("bot-a", "target", ""))
 	r.slots[busyKey] = runtimeClientSlot{
 		client:    &acp.Client{},
 		sessionID: "busy-session",
@@ -316,7 +316,7 @@ func TestRuntimeReserveSlotRejectsWhenLimitIsAllBusy(t *testing.T) {
 
 func TestRuntimeClientForRuntimeSessionSingleflightsConcurrentBuilds(t *testing.T) {
 	r := newRuntimeManager()
-	key := currentRuntimeKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "thread-a"})
+	key := currentRuntimeKey(imSessionKey("bot-a", "oc_chat", "thread-a"))
 	session := Session{Key: key.SessionKey, ACPSessionID: "session-1", Cwd: "/repo"}
 	var starts atomic.Int32
 	var startedOnce sync.Once

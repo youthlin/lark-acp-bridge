@@ -64,7 +64,7 @@ func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
 		}},
 	}
 	session := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		AgentName:    "traex",
 		Cwd:          t.TempDir(),
 		Workspace:    workspace,
@@ -153,7 +153,7 @@ func TestStartUpgradesExistingWorkspaceBuiltinSkills(t *testing.T) {
 			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
 		}
 	}
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	session := Session{
 		Key:               key,
 		AgentName:         "traex",
@@ -259,7 +259,7 @@ func TestShutdownCancelsRuntimeTasksBeforeRuntimeShutdown(t *testing.T) {
 	rt := &fakeRuntime{blockPrompt: make(chan struct{})}
 	svc.setRuntime(rt)
 	session := Session{
-		Key:          SessionKey{BotID: "bot-a", ChatID: "oc_chat"},
+		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		AgentName:    "traex",
 		Cwd:          t.TempDir(),
 		ACPSessionID: "acp-session-1",

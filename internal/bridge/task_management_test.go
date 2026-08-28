@@ -100,7 +100,7 @@ func TestStartTaskWithOptionsWaitsForReplacedTaskDone(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
 	previousCtx, previousFinish := svc.startTask(context.Background(), session, agent, taskKindUser)
@@ -140,7 +140,7 @@ func TestStartTaskWithOptionsClosesRuntimeWhenReplacedTaskNeverCompletes(t *test
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
-	key := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"})
+	key := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
 	previousCtx, _ := svc.startTask(context.Background(), session, agent, taskKindUser)
@@ -181,7 +181,7 @@ func TestStartTaskWithOptionsWaitsForReplacedTaskChain(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
 	previousCtx, previousFinish := svc.startTask(context.Background(), session, agent, taskKindUser)
@@ -241,7 +241,7 @@ func TestStartTaskWithOptionsDetachesTimedOutPredecessorChain(t *testing.T) {
 	})
 
 	svc := NewService(config.Config{}, NewSessionStore(""))
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	session := Session{Key: key, AgentName: "traex", ACPSessionID: "acp-running"}
 	agent := config.AgentConfig{Command: "traex"}
 	previousCtx, _ := svc.startTask(context.Background(), session, agent, taskKindUser)
@@ -311,7 +311,7 @@ func TestRunPromptTaskSharesUserTaskLifecycle(t *testing.T) {
 }
 
 func TestStartTaskWithOptionsSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", Source: "im", ChatID: "chat-a", MainID: "chat-a"}
+	key := SessionKey{BotID: "bot-a", Source: "im", MainID: "chat-a"}
 	agent := config.AgentConfig{Command: "traex"}
 	cases := []struct {
 		name                 string
@@ -416,9 +416,9 @@ func TestStartTaskWithOptionsSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestBeginRunningTaskSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name            string
 		setup           func(svc *Service, existing *runningTask)
@@ -495,9 +495,9 @@ func TestBeginRunningTaskSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestSessionHasRunningUserTaskSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name  string
 		setup func(svc *Service)
@@ -551,9 +551,9 @@ func TestSessionHasRunningUserTaskSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestSetTaskCancelHandlerSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	handler := func(context.Context, string) {}
 	cases := []struct {
 		name                string
@@ -642,9 +642,9 @@ func TestSetTaskCancelHandlerSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestTakeRunningTaskSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name             string
 		setup            func(svc *Service, task *runningTask)
@@ -698,9 +698,9 @@ func TestTakeRunningTaskSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestTakeRunningTaskOfKindSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name             string
 		existingKind     taskKind
@@ -767,9 +767,9 @@ func TestTakeRunningTaskOfKindSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestFinishRunningTaskSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name             string
 		storedTask       func(current *runningTask) *runningTask
@@ -836,7 +836,7 @@ func TestFinishRunningTaskSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestCancelTaskSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	agent := config.AgentConfig{Command: "traex"}
 	cases := []struct {
@@ -920,9 +920,9 @@ func TestCancelTaskSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestCancelRunningSessionWorkSyncSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	agent := config.AgentConfig{Command: "traex"}
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
@@ -983,9 +983,9 @@ func TestCancelRunningSessionWorkSyncSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestCancelRunningSessionWorkSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	agent := config.AgentConfig{Command: "traex"}
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
@@ -1055,9 +1055,9 @@ func TestCancelRunningSessionWorkSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	agent := config.AgentConfig{Command: "traex"}
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
@@ -1190,9 +1190,9 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestMarkCanceledTaskLoopStatusBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_other"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	started := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name           string
@@ -1288,8 +1288,8 @@ func TestMarkCanceledTaskLoopStatusBoundaries(t *testing.T) {
 
 func TestTakeAllSessionWorkClearsRuntimeState(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
-	foregroundKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"})
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	foregroundKey := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	foregroundTask := &runningTask{kind: taskKindUser}
 	wikiTask := &runningTask{kind: taskKindWiki}
 	timer := time.NewTimer(time.Hour)
@@ -1341,8 +1341,8 @@ func TestCancelAllSessionWorkClearsRuntimeState(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
 	svc.setRuntime(rt)
-	foregroundKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-a"})
-	wikiKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	foregroundKey := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
+	wikiKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	foregroundCtx, foregroundCancel := context.WithCancel(context.Background())
 	wikiCtx, wikiCancel := context.WithCancel(context.Background())
 	foregroundCanceled := make(chan string, 1)

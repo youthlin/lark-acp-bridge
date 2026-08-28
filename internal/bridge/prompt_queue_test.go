@@ -342,9 +342,9 @@ func TestFinishPromptQueueDrainRestartsWhenItemArrivesBeforeFinish(t *testing.T)
 }
 
 func TestEnqueuePromptSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name           string
 		setup          func(svc *Service)
@@ -427,7 +427,7 @@ func TestEnqueuePromptSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestBeginPromptQueueDrainSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	cases := []struct {
 		name         string
@@ -488,7 +488,7 @@ func TestBeginPromptQueueDrainSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestTakeQueuedPromptSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	cases := []struct {
 		name      string
@@ -548,7 +548,7 @@ func TestTakeQueuedPromptSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestPrependQueuedPromptSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	cases := []struct {
 		name      string
@@ -601,7 +601,7 @@ func TestPrependQueuedPromptSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestFinishPromptQueueDrainSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
 	cases := []struct {
 		name      string
@@ -648,9 +648,9 @@ func TestFinishPromptQueueDrainSessionWorkBoundaries(t *testing.T) {
 }
 
 func TestCanRestartPromptQueueDrainSessionWorkBoundaries(t *testing.T) {
-	key := SessionKey{BotID: "bot-a", ChatID: "chat-a"}
+	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)
-	otherKey := normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "chat-b"})
+	otherKey := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
 	cases := []struct {
 		name  string
 		setup func(svc *Service)
@@ -806,7 +806,7 @@ func TestHandleQueueCommandRecordsACPErrorForQueuedPromptFailure(t *testing.T) {
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     session.Key.BotID,
 		MessageID: "om_queue",
-		ChatID:    session.Key.ChatID,
+		ChatID:    sessionKeyMainID(session.Key),
 		ChatType:  "topic_group",
 		ThreadID:  session.Key.SubID,
 		Mentions:  testBotMentions(),
@@ -825,7 +825,7 @@ func TestHandleQueueCommandRecordsACPErrorForQueuedPromptFailure(t *testing.T) {
 
 	status, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ChatType: "topic_group",
 		ThreadID: session.Key.SubID,
 		Mentions: testBotMentions(),
@@ -938,7 +938,7 @@ func TestHandleQueueCommandRunningQueuedPromptIsInterruptedByNormalPrompt(t *tes
 func TestHandleQueueCommandUsesQueuedSessionAfterSessionResume(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat", SubID: "omt_thread"}
+	key := imSessionKey("bot-a", "oc_chat", "omt_thread")
 	oldSession := Session{
 		Key:          key,
 		Title:        "old session",

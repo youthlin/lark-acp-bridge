@@ -138,7 +138,7 @@ func TestHandleModelSelectionSetsModelAndRejectsStaleOrOtherUser(t *testing.T) {
 	svc.setRuntime(rt)
 	selection := feishu.ModelSelection{
 		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
+		ChatID:       sessionKeyMainID(session.Key),
 		ThreadID:     session.Key.SubID,
 		ACPSessionID: session.ACPSessionID,
 		RequesterID:  "ou_requester",
@@ -219,7 +219,7 @@ func TestHandleModeSelectionSetsModeAndRejectsStaleOrOtherUser(t *testing.T) {
 	svc.setRuntime(rt)
 	selection := feishu.ModeSelection{
 		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
+		ChatID:       sessionKeyMainID(session.Key),
 		ThreadID:     session.Key.SubID,
 		ACPSessionID: session.ACPSessionID,
 		RequesterID:  "ou_requester",
@@ -282,7 +282,7 @@ func TestHandleModeSelectionFallsBackToLegacySetMode(t *testing.T) {
 
 	display, err := svc.HandleModeSelection(context.Background(), feishu.ModeSelection{
 		BotID:        session.Key.BotID,
-		ChatID:       session.Key.ChatID,
+		ChatID:       sessionKeyMainID(session.Key),
 		ThreadID:     session.Key.SubID,
 		ACPSessionID: session.ACPSessionID,
 		RequesterID:  "ou_requester",
@@ -314,7 +314,7 @@ func TestSelectionSessionUsesCallbackSessionKey(t *testing.T) {
 
 	got, err := svc.selectionSession(feishu.Message{
 		BotID:    session.Key.BotID,
-		ChatID:   session.Key.ChatID,
+		ChatID:   sessionKeyMainID(session.Key),
 		ThreadID: session.Key.SubID,
 	}, session.ACPSessionID, "card expired")
 	if err != nil {

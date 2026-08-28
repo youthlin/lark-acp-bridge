@@ -86,7 +86,7 @@ func TestTraceStoreForSessionConcurrentWithTraceConfigUpdate(t *testing.T) {
 		Workspace: workspace,
 		Trace:     config.TraceConfig{Enabled: true, RetentionDays: 7},
 	}}}, NewSessionStore(""))
-	session := Session{Key: SessionKey{BotID: "bot-a", ChatID: "oc_chat"}, ACPSessionID: "acp-session-1"}
+	session := Session{Key: imSessionKey("bot-a", "oc_chat", ""), ACPSessionID: "acp-session-1"}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {

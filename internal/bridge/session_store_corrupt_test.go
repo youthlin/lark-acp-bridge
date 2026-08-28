@@ -14,7 +14,7 @@ func TestSessionStoreLoadCorruptFileBacksUpAndStartsEmpty(t *testing.T) {
 
 	store := NewSessionStore(storePath)
 	// 预置内存状态并写出正常文件，确认损坏加载后内存会被清空。
-	key := SessionKey{BotID: "bot-a", ChatID: "oc_chat"}
+	key := imSessionKey("bot-a", "oc_chat", "")
 	if _, err := store.UpsertWithDefaultTitle(Session{
 		Key:          key,
 		AgentName:    "traex",

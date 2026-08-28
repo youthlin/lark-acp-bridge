@@ -18,7 +18,7 @@ import (
 func TestPromptWritesJSONLTrace(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -142,7 +142,7 @@ func TestPromptWritesJSONLTrace(t *testing.T) {
 func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -185,7 +185,7 @@ func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -254,7 +254,7 @@ func TestTraceRecordTimestampMarshalsAsFixedTS(t *testing.T) {
 func TestTraceToolOutputCompactsRepeatedFields(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -321,7 +321,7 @@ func TestTraceToolOutputCompactsRepeatedFields(t *testing.T) {
 func TestTraceTurnResultCompactsRawResult(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -504,7 +504,7 @@ func TestNonIMTraceMessageIDBuilders(t *testing.T) {
 func TestAgentMessageUpdateWritesFinalAssistantOnly(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
@@ -540,7 +540,7 @@ func TestAgentMessageUpdateWritesFinalAssistantOnly(t *testing.T) {
 func TestTraceSeparatesIntermediateAssistantFromFinalAssistant(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
-		Key:          normalizeSessionKey(SessionKey{BotID: "bot-a", ChatID: "oc_chat"}),
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-session-1",
 		Cwd:          t.TempDir(),
