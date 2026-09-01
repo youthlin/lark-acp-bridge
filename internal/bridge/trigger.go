@@ -171,12 +171,11 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 		prepared.session = refreshSession
 		return s.refreshTriggerSession(refreshCtx, prepared)
 	})
-	agent, agentOK := s.registry.Get(out.session.AgentName)
+	agent, _ := s.registry.Get(out.session.AgentName)
 	post := s.finishPromptPostWork(ctx, out, promptPostWorkOptions{
 		botID:                    req.BotID,
 		operation:                "trigger prompt",
 		agent:                    agent,
-		scheduleWiki:             req.EnableWikiReflection && agentOK,
 		updateTitleOnSuccessOnly: true,
 		recordACPError:           true,
 		updateTitle: func(titleCtx context.Context, current Session) Session {
@@ -398,7 +397,12 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 				return s.requestTriggerPermission(permCtx, req, session, permission), nil
 			},
 		}))
-		recorder.Complete(result, err)
+		terminalSeq := recorder.Complete(result, err)
+		if req.EnableWikiReflection && recorder != nil {
+			if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+				coordinator.onTurnCompleted(session, recorder.firstSeq, terminalSeq, time.Now())
+			}
+		}
 		return result, false, err
 	})
 	text, textSet := chunks.finalText()

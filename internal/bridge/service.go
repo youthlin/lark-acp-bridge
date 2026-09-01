@@ -41,6 +41,7 @@ type serviceStores struct {
 	usageStores            map[string]*TokenUsageStore
 	traceStoreMu           sync.RWMutex
 	traceStores            map[string]*traceStore
+	wikiCoordinators       map[string]*wikiCoordinator
 }
 
 type serviceOutbounds struct {
@@ -91,6 +92,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
 			usageStores:            make(map[string]*TokenUsageStore),
 			traceStores:            make(map[string]*traceStore),
+			wikiCoordinators:       make(map[string]*wikiCoordinator),
 		},
 		serviceOutbounds: serviceOutbounds{
 			outbounds: make(map[string]feishu.Outbound),
@@ -141,7 +143,13 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 				workspaceLocalPath(bot.Workspace, "token_usage.json"),
 				workspaceLegacyPath(bot.Workspace, "token_usage.json"),
 			)
-			s.setTraceStore(bot.ID, newTraceStore(bot.Workspace, bot.Trace))
+			trace := newTraceStore(bot.Workspace, bot.Trace)
+			s.setTraceStore(bot.ID, trace)
+			if coordinator := newWikiCoordinator(s, bot, trace); coordinator != nil {
+				s.wikiCoordinators[strings.TrimSpace(bot.ID)] = coordinator
+				trace.canPrune = coordinator.canPruneTrace
+				trace.canCompact = coordinator.canPruneTrace
+			}
 		}
 	}
 	if store != nil {

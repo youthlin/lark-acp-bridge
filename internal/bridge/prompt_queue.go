@@ -212,7 +212,6 @@ func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (stri
 		msg:                   item.msg,
 		agent:                 item.agent,
 		operation:             "queue prompt",
-		scheduleWiki:          true,
 		allowReplySuppression: true,
 		updateTitle: func(titleCtx context.Context, current Session) Session {
 			return s.updateAutomaticSessionTitle(titleCtx, item.msg, current, item.userText)

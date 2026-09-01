@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -23,6 +24,7 @@ type wikiTraceObserver struct {
 	store          *SessionStore
 	starter        scheduledTaskStreamStarter
 	traceMessageID string
+	job            *wikiJob
 
 	stream *promptCardStream
 	chunks *promptChunkAccumulator
@@ -38,6 +40,18 @@ func wikiTracePromptOptions(observer *wikiTraceObserver) acp.PromptOptions {
 }
 
 func (s *Service) wikiTraceObserver(session Session, generation int64) *wikiTraceObserver {
+	return s.newWikiTraceObserver(session, wikiTraceMessageID(session, generation))
+}
+
+func (s *Service) wikiTraceObserverForJob(session Session, job wikiJob) *wikiTraceObserver {
+	observer := s.newWikiTraceObserver(session, wikiJobTraceMessageID(job))
+	if observer != nil {
+		observer.job = &job
+	}
+	return observer
+}
+
+func (s *Service) newWikiTraceObserver(session Session, traceMessageID string) *wikiTraceObserver {
 	bot, ok := s.botConfig(session.Key.BotID)
 	if !ok || !bot.WikiTrace.Enabled || strings.TrimSpace(bot.WikiTrace.ChatID) == "" {
 		return nil
@@ -53,7 +67,7 @@ func (s *Service) wikiTraceObserver(session Session, generation int64) *wikiTrac
 		show:           s.chatConfigForMessage(msg),
 		store:          s.storeForBotID(session.Key.BotID),
 		starter:        s.scheduleStreamStarter(session.Key.BotID),
-		traceMessageID: wikiTraceMessageID(session, generation),
+		traceMessageID: traceMessageID,
 	}
 }
 
@@ -178,9 +192,13 @@ func (o *wikiTraceObserver) bindStreamMessage(ctx context.Context, sent feishu.S
 }
 
 func (o *wikiTraceObserver) streamCardMeta(title string) feishu.StreamCardMeta {
+	metadata := wikiTraceMetadata(o.session)
+	if o.job != nil {
+		metadata += fmt.Sprintf("\n**Trace 区间：** (%d, %d]", o.job.FromSeq, o.job.ToSeq)
+	}
 	return feishu.StreamCardMeta{
 		Title:          title,
-		Metadata:       wikiTraceMetadata(o.session),
+		Metadata:       metadata,
 		Footer:         wikiTraceCardFooter,
 		HideHeaderIcon: true,
 	}

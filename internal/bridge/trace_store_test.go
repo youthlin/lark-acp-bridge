@@ -170,16 +170,16 @@ func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 	}
 
 	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
-	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,user,assistant" {
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,turn_result,user,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
-	for i, want := range []string{"om_first", "om_first", "om_second", "om_second"} {
+	for i, want := range []string{"om_first", "om_first", "om_first", "om_second", "om_second", "om_second"} {
 		if records[i]["message_id"] != want {
 			t.Fatalf("record[%d] message_id = %v, want %s; record = %+v", i, records[i]["message_id"], want, records[i])
 		}
 	}
 	assertTraceRecordFinal(t, records[1], true)
-	assertTraceRecordFinal(t, records[3], true)
+	assertTraceRecordFinal(t, records[4], true)
 }
 
 func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
@@ -287,7 +287,7 @@ func TestTraceToolOutputCompactsRepeatedFields(t *testing.T) {
 	recorder.Complete(acp.PromptResult{}, nil)
 
 	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
-	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,tool" {
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,tool,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
 	tool := records[1]
@@ -525,7 +525,7 @@ func TestAgentMessageUpdateWritesFinalAssistantOnly(t *testing.T) {
 	recorder.Complete(acp.PromptResult{}, nil)
 
 	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
-	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant" {
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,assistant,turn_result" {
 		t.Fatalf("record types = %v, records = %+v", got, records)
 	}
 	assertTraceRecordFinal(t, records[1], true)

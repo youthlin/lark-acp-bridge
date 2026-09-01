@@ -29,9 +29,7 @@ type newSessionPlan struct {
 }
 
 type sessionTransition struct {
-	Key            SessionKey
-	PendingWiki    pendingWikiRun
-	HasPendingWiki bool
+	Key SessionKey
 }
 
 func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
@@ -110,17 +108,12 @@ func (s *Service) resolveNewSessionPlan(fields []string, msg feishu.Message) (ne
 func (s *Service) prepareSessionTransition(ctx context.Context, msg feishu.Message) sessionTransition {
 	key := sessionKeyFromMessage(msg)
 	s.migrateSessionShowConfigToChat(ctx, msg)
-	pendingWiki, hasPendingWiki := s.takePendingWiki(key)
 	s.cancelRunningSessionWork(ctx, key)
 	s.subscribeACPStateUpdates(ctx, msg, key)
-	return sessionTransition{Key: key, PendingWiki: pendingWiki, HasPendingWiki: hasPendingWiki}
+	return sessionTransition{Key: key}
 }
 
-func (s *Service) restoreSessionTransition(transition sessionTransition) {
-	if transition.HasPendingWiki {
-		s.restorePendingWiki(transition.PendingWiki)
-	}
-}
+func (s *Service) restoreSessionTransition(sessionTransition) {}
 
 func (s *Service) startACPSessionCandidate(ctx context.Context, key SessionKey, msg feishu.Message, plan newSessionPlan) (acpSessionCandidate, error) {
 	return s.runtime.NewSession(ctx, key, plan.AgentName, plan.Agent, filepath.Clean(plan.Cwd), msg.Workspace)
@@ -235,9 +228,6 @@ func (s *Service) applyInheritedSessionConfig(ctx context.Context, msg feishu.Me
 }
 
 func (s *Service) afterSessionCommitted(transition sessionTransition, session Session) {
-	if transition.HasPendingWiki {
-		s.runPendingWikiAsync(transition.PendingWiki)
-	}
 	s.clearACPError(session)
 }
 

@@ -43,14 +43,38 @@ func (t traceTimestamp) MarshalJSON() ([]byte, error) {
 	return json.Marshal(ts.Format(traceTimestampLayout))
 }
 
+func (t *traceTimestamp) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if strings.TrimSpace(raw) == "" {
+		*t = traceTimestamp(time.Time{})
+		return nil
+	}
+	parsed, err := time.Parse(traceTimestampLayout, raw)
+	if err != nil {
+		parsed, err = time.Parse(time.RFC3339Nano, raw)
+	}
+	if err != nil {
+		return err
+	}
+	*t = traceTimestamp(parsed)
+	return nil
+}
+
 type traceStore struct {
 	dir           string
 	retention     time.Duration
 	mu            sync.Mutex
 	lastPrunedDay string
+	nextSeq       map[string]uint64
+	canPrune      func(string) bool
+	canCompact    func(string) bool
 }
 
 type traceRecord struct {
+	Seq           uint64                 `json:"seq,omitempty"`
 	TS            traceTimestamp         `json:"ts"`
 	Type          string                 `json:"type"`
 	IsFinal       bool                   `json:"is_final,omitempty"`
@@ -94,6 +118,7 @@ func newTraceStore(workspace string, cfg config.TraceConfig) *traceStore {
 	return &traceStore{
 		dir:       workspaceLocalPath(workspace, traceDirName),
 		retention: time.Duration(cfg.RetentionDays) * 24 * time.Hour,
+		nextSeq:   make(map[string]uint64),
 	}
 }
 
@@ -112,49 +137,105 @@ func effectiveTraceConfig(cfg config.TraceConfig) config.TraceConfig {
 }
 
 func (s *traceStore) Append(session Session, record traceRecord) error {
+	_, err := s.AppendSeq(session, record)
+	return err
+}
+
+// AppendSeq 追加一条 trace，并返回该文件内严格递增的序号。
+// 返回 0 表示 store 未启用或记录被忽略。
+func (s *traceStore) AppendSeq(session Session, record traceRecord) (uint64, error) {
 	if s == nil {
-		return nil
+		return 0, nil
 	}
 	record = normalizeTraceRecord(session, record)
 	if strings.TrimSpace(record.Type) == "" {
-		return nil
+		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return fmt.Errorf("创建 trace 目录: %w", err)
+		return 0, fmt.Errorf("创建 trace 目录: %w", err)
 	}
 	s.pruneLocked(time.Now())
+	path := s.sessionPath(session)
+	seq, err := s.allocateSeqLocked(path)
+	if err != nil {
+		return 0, fmt.Errorf("读取 trace 序号: %w", err)
+	}
+	record.Seq = seq
 	data, err := json.Marshal(record)
 	if err != nil {
-		return fmt.Errorf("编码 trace 记录: %w", err)
+		return 0, fmt.Errorf("编码 trace 记录: %w", err)
 	}
 	data = append(data, '\n')
-	path := s.sessionPath(session)
-	compacted, err := compactTraceFileIfNeeded(path, int64(len(data)))
+	compacted := false
+	if s.canCompact == nil || s.canCompact(path) {
+		compacted, err = compactTraceFileIfNeeded(path, int64(len(data)))
+	}
 	if err != nil {
 		slog.Warn("压缩 ACP trace 文件失败", "path", path, "错误", err)
 	}
 	if compacted && !traceRecordKeptAfterCompaction(record) {
 		slog.Debug("跳过触发压缩的非摘要 ACP trace 记录", "path", path, "type", record.Type, "message_id", record.MessageID)
-		return nil
+		return seq, nil
 	}
 	if !traceRecordKeptAfterCompaction(record) && traceFileWouldExceed(path, int64(len(data))) {
 		slog.Debug("跳过非摘要 ACP trace 记录以限制文件大小", "path", path, "type", record.Type, "message_id", record.MessageID)
-		return nil
+		return seq, nil
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("打开 trace 文件: %w", err)
+		return 0, fmt.Errorf("打开 trace 文件: %w", err)
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("写入 trace 文件: %w", err)
+		return 0, fmt.Errorf("写入 trace 文件: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("关闭 trace 文件: %w", err)
+		return 0, fmt.Errorf("关闭 trace 文件: %w", err)
 	}
-	return nil
+	return seq, nil
+}
+
+func (s *traceStore) allocateSeqLocked(path string) (uint64, error) {
+	if s.nextSeq == nil {
+		s.nextSeq = make(map[string]uint64)
+	}
+	if next, ok := s.nextSeq[path]; ok {
+		s.nextSeq[path] = next + 1
+		return next, nil
+	}
+	maxSeq, err := traceFileMaxSeq(path)
+	if err != nil {
+		return 0, err
+	}
+	next := maxSeq + 1
+	s.nextSeq[path] = next + 1
+	return next, nil
+}
+
+func traceFileMaxSeq(path string) (uint64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer file.Close()
+	var maxSeq uint64
+	scanner := bufio.NewScanner(file)
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, 4*1024*1024)
+	for scanner.Scan() {
+		var record struct {
+			Seq uint64 `json:"seq"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) == nil && record.Seq > maxSeq {
+			maxSeq = record.Seq
+		}
+	}
+	return maxSeq, scanner.Err()
 }
 
 func compactTraceFileIfNeeded(path string, incomingBytes int64) (bool, error) {
@@ -247,6 +328,8 @@ func traceRecordKeptAfterCompaction(record traceRecord) bool {
 		return true
 	case "assistant":
 		return record.IsFinal
+	case "turn_result", "error":
+		return true
 	default:
 		return false
 	}
@@ -276,6 +359,9 @@ func (s *traceStore) pruneLocked(now time.Time) {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
+			if s.canPrune != nil && !s.canPrune(path) {
+				continue
+			}
 			_ = os.Remove(path)
 		}
 	}
@@ -337,6 +423,9 @@ type traceRecorder struct {
 	toolSequence      int
 	updateMu          sync.Mutex
 	update            *traceUpdateAggregate
+	firstSeq          uint64
+	terminalSeq       uint64
+	onComplete        func(uint64, uint64, time.Time)
 }
 
 type traceToolAggregate struct {
@@ -409,8 +498,36 @@ func (s *Service) newTraceRecorderForMessage(session Session, msg feishu.Message
 	return newTraceRecorderWithMessageID(s.traceStoreForSession(session), session, prompt, msg.MessageID)
 }
 
+func (s *Service) newTraceRecorderForPrompt(session Session, msg feishu.Message, prompt string, triggerWiki bool) *traceRecorder {
+	recorder := s.newTraceRecorderForMessage(session, msg, prompt)
+	if triggerWiki {
+		return s.configureTraceRecorder(recorder)
+	}
+	return recorder
+}
+
 func (s *Service) newTraceRecorderWithMessageID(session Session, prompt string, messageID string) *traceRecorder {
 	return newTraceRecorderWithMessageID(s.traceStoreForSession(session), session, prompt, messageID)
+}
+
+func (s *Service) configureTraceRecorder(recorder *traceRecorder) *traceRecorder {
+	if recorder == nil || strings.EqualFold(recorder.session.Key.Source, "wiki") {
+		return recorder
+	}
+	coordinator := s.wikiCoordinator(recorder.session.Key.BotID)
+	if coordinator != nil {
+		recorder.onComplete = func(firstSeq, terminalSeq uint64, completedAt time.Time) {
+			coordinator.onTurnCompleted(recorder.session, firstSeq, terminalSeq, completedAt)
+		}
+	}
+	return recorder
+}
+
+func (s *Service) wikiCoordinator(botID string) *wikiCoordinator {
+	if s == nil {
+		return nil
+	}
+	return s.wikiCoordinators[strings.TrimSpace(botID)]
 }
 
 func traceMessageID(prefix string, parts ...string) string {
@@ -505,9 +622,9 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 	}
 }
 
-func (r *traceRecorder) Complete(result acp.PromptResult, err error) {
+func (r *traceRecorder) Complete(result acp.PromptResult, err error) uint64 {
 	if r == nil {
-		return
+		return 0
 	}
 	r.flushProcessUpdates()
 	r.flushTools()
@@ -517,21 +634,29 @@ func (r *traceRecorder) Complete(result acp.PromptResult, err error) {
 		r.append(traceRecord{Type: "assistant", IsFinal: true, Content: result.Text})
 	}
 	if err != nil {
-		r.append(traceRecord{Type: "error", Error: err.Error()})
+		r.terminalSeq = r.append(traceRecord{Type: "error", Error: err.Error()})
+		return r.terminalSeq
 	}
-	if promptResultHasUsageDetail(result) || len(result.Raw) > 0 || strings.TrimSpace(result.StopReason) != "" {
-		r.append(traceTurnResultRecord(result))
-	}
+	r.terminalSeq = r.append(traceTurnResultRecord(result))
+	r.notifyComplete()
+	return r.terminalSeq
 }
 
-func (r *traceRecorder) Interrupted(reason string) {
+func (r *traceRecorder) Interrupted(reason string) uint64 {
 	if r == nil {
-		return
+		return 0
 	}
 	r.flushProcessUpdates()
 	r.flushTools()
 	r.flushAssistant()
-	r.append(traceRecord{Type: "error", Error: reason, Interrupted: true})
+	r.terminalSeq = r.append(traceRecord{Type: "error", Error: reason, Interrupted: true})
+	return r.terminalSeq
+}
+
+func (r *traceRecorder) notifyComplete() {
+	if r != nil && r.terminalSeq > 0 && r.onComplete != nil {
+		r.onComplete(r.firstSeq, r.terminalSeq, time.Now())
+	}
 }
 
 func (r *traceRecorder) recordToolChunk(kind string, u acp.SessionUpdate, text string) {
@@ -1086,14 +1211,20 @@ func marshalTraceValue(value any) json.RawMessage {
 	return raw
 }
 
-func (r *traceRecorder) append(record traceRecord) {
+func (r *traceRecorder) append(record traceRecord) uint64 {
 	if r == nil || r.store == nil {
-		return
+		return 0
 	}
 	if strings.TrimSpace(record.MessageID) == "" {
 		record.MessageID = r.messageID
 	}
-	if err := r.store.Append(r.session, record); err != nil {
+	seq, err := r.store.AppendSeq(r.session, record)
+	if err != nil {
 		slog.Warn("写入 ACP trace 失败", "session", r.session.ACPSessionID, "错误", err)
+		return 0
 	}
+	if r.firstSeq == 0 {
+		r.firstSeq = seq
+	}
+	return seq
 }

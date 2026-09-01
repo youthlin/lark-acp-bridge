@@ -53,8 +53,8 @@ type runningTaskOptions struct {
 	queuePendingAtAuto  bool
 	queuedContinuation  bool
 	skipPostPromptWork  bool
+	triggerWiki         bool
 	silentPrompt        bool
-	keepWikiTimer       bool
 	blockWorkspaceTasks bool
 	replacementWait     replacedTaskWaitObserver
 	replacementTimeout  time.Duration
@@ -83,6 +83,7 @@ func queuedPromptTaskOptions() runningTaskOptions {
 	return runningTaskOptions{
 		queuedContinuation: true,
 		skipPostPromptWork: true,
+		triggerWiki:        true,
 	}
 }
 
@@ -103,7 +104,6 @@ func loopTaskOptions() runningTaskOptions {
 
 func wikiLintTaskOptions() runningTaskOptions {
 	return runningTaskOptions{
-		keepWikiTimer:       true,
 		queuedContinuation:  true,
 		blockWorkspaceTasks: true,
 	}
@@ -111,7 +111,6 @@ func wikiLintTaskOptions() runningTaskOptions {
 
 func wikiReflectionTaskOptions() runningTaskOptions {
 	return runningTaskOptions{
-		keepWikiTimer:       true,
 		blockWorkspaceTasks: true,
 	}
 }
@@ -166,9 +165,6 @@ func defaultTaskOptions(kind taskKind) runningTaskOptions {
 func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func(), error) {
 	session.Key = normalizeSessionKey(session.Key)
 	session.Workspace = s.workspaceForSessionTask(session)
-	if !opts.keepWikiTimer {
-		s.cancelWikiTimer(session.Key)
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
 		kind:                kind,
@@ -664,9 +660,7 @@ func (s *Service) markExistingLoopStatusCanceled(key SessionKey, reason string) 
 
 func (s *Service) cancelSessionWork(ctx context.Context, key SessionKey) {
 	key = normalizeSessionKey(key)
-	s.cancelWikiTimer(key)
 	s.cancelRunningSessionWork(ctx, key)
-	s.cancelWikiTasks(ctx, key)
 }
 
 func (s *Service) cancelAllSessionWork(ctx context.Context) {

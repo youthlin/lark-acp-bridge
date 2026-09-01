@@ -6854,6 +6854,7 @@ func TestHandleFeishuMessageForwardsPromptProgress(t *testing.T) {
 }
 
 func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T) {
+	workspace := t.TempDir()
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{
 		newSessionID: "acp-session-1",
@@ -6866,6 +6867,8 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 		},
 	}
 	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
 	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = t.TempDir()
 	cfg.SetAgent("traex", agent)
@@ -6887,6 +6890,7 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 		ChatID:    "oc_private",
 		ChatType:  "p2p",
 		Text:      "结合引用回答",
+		Workspace: workspace,
 		Reply: &feishu.ReplyContext{
 			MessageID:  "om_parent",
 			SenderID:   "ou_parent",
@@ -6920,9 +6924,10 @@ func TestHandleFeishuMessageIMPromptKeepsReplyStreamAndWikiBehavior(t *testing.T
 	if !ok {
 		t.Fatal("IM session not stored")
 	}
-	t.Cleanup(func() { svc.cancelWikiTimer(session.Key) })
-	if !svc.hasWikiTimer(session.Key) {
-		t.Fatal("wiki timer not scheduled after successful IM prompt")
+	coordinator := svc.wikiCoordinator("bot-a")
+	t.Cleanup(coordinator.stop)
+	if snapshot := coordinator.snapshotForSession(session.ACPSessionID); !snapshot.Waiting {
+		t.Fatalf("wiki snapshot = %+v, want waiting companion job", snapshot)
 	}
 }
 
@@ -9932,7 +9937,7 @@ func TestHandleWikiCommandSurvivesNewSession(t *testing.T) {
 	}
 }
 
-func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
+func TestNewSessionDoesNotControlWikiCompanion(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	cfg := config.Default()
 	agent := mustConfigAgent(t, cfg, "traex")
@@ -9975,37 +9980,14 @@ func TestNewSessionRunsPendingWikiReflectionWithRuntimeKey(t *testing.T) {
 	if !strings.Contains(reply, "session：acp-session-new") {
 		t.Fatalf("reply = %q, want new session reply without waiting for wiki runtime", reply)
 	}
-	waitForCondition(t, time.Second, func() bool { return rt.wikiRuntimeCallCount() == 1 })
-	rt.mu.Lock()
-	if len(rt.wikiRuntimeCalls) != 1 {
-		t.Fatalf("wikiRuntimeCalls = %+v, want one old wiki reflection", rt.wikiRuntimeCalls)
-	}
-	wikiCall := rt.wikiRuntimeCalls[0]
-	rt.mu.Unlock()
-	if wikiCall.Session.ACPSessionID != "acp-session-old" {
-		t.Fatalf("wiki runtime session = %q, want old acp session", wikiCall.Session.ACPSessionID)
-	}
-	if wikiCall.Runtime.Scope != runtimeScopeWiki {
-		t.Fatalf("wiki runtime scope = %q, want wiki", wikiCall.Runtime.Scope)
-	}
-	if wikiCall.Runtime.SessionKey != key {
-		t.Fatalf("wiki runtime session key = %+v, want %+v", wikiCall.Runtime.SessionKey, key)
-	}
-	if !strings.Contains(wikiCall.Text, "请对刚才的对话进行反思") {
-		t.Fatalf("wiki runtime prompt = %q, want wiki reflection prompt", wikiCall.Text)
-	}
-	if got := rt.promptCallCount(); got != 0 {
-		t.Fatalf("prompt calls = %d, want no normal prompt for wiki runtime", got)
+	if got := rt.wikiRuntimeCallCount(); got != 0 {
+		t.Fatalf("wiki runtime calls = %d, want /new not to control companion", got)
 	}
 	svc.taskMu.Lock()
 	_, hasTimer := svc.wikiTimers[key]
-	status := svc.wikiStatuses[key]
 	svc.taskMu.Unlock()
-	if hasTimer {
-		t.Fatal("pending wiki timer should be consumed by /new")
-	}
-	if !status.running {
-		t.Fatalf("wiki status = %+v, want wiki runtime reflection running while blocked", status)
+	if !hasTimer {
+		t.Fatal("legacy timer fixture should remain untouched by /new")
 	}
 }
 
@@ -10132,15 +10114,12 @@ func TestWikiOffCancelsRunningWikiRuntimeReflection(t *testing.T) {
 		svc.cancelSessionWork(context.Background(), key)
 		close(rt.blockWikiRuntime)
 	})
-
-	if _, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
-		BotID:    "bot-a",
-		ChatID:   "oc_chat",
-		ChatType: "p2p",
-		Text:     "/new",
-	}); err != nil {
-		t.Fatalf("HandleFeishuMessage(/new) error = %v", err)
+	pending, ok := svc.takePendingWiki(key)
+	if !ok {
+		t.Fatal("takePendingWiki() = false")
 	}
+	svc.runPendingWikiAsync(pending)
+
 	waitForCondition(t, time.Second, func() bool { return rt.wikiRuntimeCallCount() == 1 })
 	rt.mu.Lock()
 	wikiKey := rt.wikiRuntimeCalls[0].Runtime
@@ -11745,6 +11724,10 @@ type fakeModeCall struct {
 }
 
 func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
+	return f.NewSessionWithRuntimeKey(ctx, currentRuntimeKey(key), key, agentName, agent, cwd, workspace)
+}
+
+func (f *fakeRuntime) NewSessionWithRuntimeKey(ctx context.Context, runtime runtimeKey, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	key = normalizeSessionKey(key)
 	f.mu.Lock()
 	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
@@ -11831,7 +11814,7 @@ func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.
 func (f *fakeRuntime) PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
-	return f.prompt(ctx, key, session, text, opts, key.Scope == runtimeScopeWiki)
+	return f.prompt(ctx, key, session, text, opts, key.Scope == runtimeScopeWiki || key.Scope == runtimeScopeWikiCompanion)
 }
 
 func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Session, text string, opts acp.PromptOptions, wiki bool) (acp.PromptResult, error) {

@@ -466,18 +466,27 @@ func (s *Service) applyOverviewWikiToggle(ctx context.Context, msg feishu.Messag
 		return fmt.Errorf("wiki 配置取值无效")
 	}
 	chat := s.chatConfigForMessage(msg)
-	if !enabled {
-		if session, ok := s.findSession(msg); ok {
-			s.cancelWikiTimer(session.Key)
-			s.cancelWikiTasks(ctx, session.Key)
-		}
-	}
+	wasDisabled := chat.WikiDisabled
 	_, err := store.UpdateChat(chat, func(current *ChatConfig) {
 		current.WikiDisabled = !enabled
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "保存全览卡 wiki 配置失败", "错误", err)
 		return fmt.Errorf("保存 wiki 配置失败：%w", err)
+	}
+	if !enabled {
+		if session, ok := s.findSession(msg); ok {
+			if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+				coordinator.cancelChat(session.Key, true)
+			}
+		}
+	}
+	if enabled && wasDisabled {
+		if session, ok := s.findSession(msg); ok {
+			if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+				coordinator.enableSource(session)
+			}
+		}
 	}
 	return nil
 }

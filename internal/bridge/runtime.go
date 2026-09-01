@@ -30,6 +30,7 @@ var errACPRuntimeLimitReached = errors.New("acp runtime limit reached")
 
 type acpRuntime interface {
 	NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error)
+	NewSessionWithRuntimeKey(ctx context.Context, runtime runtimeKey, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error)
 	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error
@@ -57,8 +58,9 @@ type runtimeKey struct {
 }
 
 const (
-	runtimeScopeCurrent = "current"
-	runtimeScopeWiki    = "wiki"
+	runtimeScopeCurrent       = "current"
+	runtimeScopeWiki          = "wiki" // 兼容旧版 runtime key 与持久化测试。
+	runtimeScopeWikiCompanion = "wiki-companion"
 )
 
 func currentRuntimeKey(key SessionKey) runtimeKey {
@@ -322,11 +324,15 @@ func (r *runtimeManager) snapshot() runtimeManagerSnapshot {
 }
 
 func (r *runtimeManager) NewSession(ctx context.Context, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
+	return r.NewSessionWithRuntimeKey(ctx, currentRuntimeKey(key), key, agentName, agent, cwd, workspace)
+}
+
+func (r *runtimeManager) NewSessionWithRuntimeKey(ctx context.Context, runtime runtimeKey, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	key = normalizeSessionKey(key)
+	runtime = normalizeRuntimeKey(runtime)
 	ctx, cancel := context.WithTimeout(ctx, acpRequestTimeout)
 	defer cancel()
 
-	runtime := currentRuntimeKey(key)
 	releaseReservation, err := r.reserveRuntimeSlot(runtime)
 	if err != nil {
 		return nil, err

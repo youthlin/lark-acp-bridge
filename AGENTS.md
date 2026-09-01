@@ -37,7 +37,7 @@
 - 普通文本在当前会话没有 ACP session 时自动创建；`/new [cwd] [title]` 仅作为手动重开或指定 cwd/标题的入口。
 - 自动创建会话时用首条消息截断生成标题；`/new` 未指定标题时使用 `session#N`。`/session title <title>` 修改当前标题，`/session list` 列出当前聊天历史 session，`/session resume <index>` 恢复历史项。
 - 多个 agent 通过配置里的有序 `agent_list` 声明，通过 chat 维度的 `/agent <name>` 切换；选择持久化在 bot workspace 的 `.local/sessions.json`，后续 `/new` 和自动创建使用当前聊天默认 agent。若当前会话 agent 与聊天默认 agent 不一致，普通文本会基于当前 cwd 自动创建新 agent 的 session。
-- 同一会话中新普通消息优先级最高：新消息会取消上一轮正在执行的 prompt 或当前会话 wiki 反思，再处理新消息。
+- 同一会话中新普通消息优先级最高：新消息会取消上一轮正在执行的用户 prompt，再处理新消息；自动 wiki 使用独立伴生会话，不受原会话新消息影响。
 - 群聊默认需要 at 当前 bot 才响应；`/at off`、`/at off auto`、`/at off auto-reaction` 可改为免 at，`/at on` 恢复。私聊始终响应，不支持 `/at`。
 
 斜杠命令仅限 bot owner 执行（sender open_id 命中 `owner_open_ids` 或启动时解析到的应用所有者/管理员）。完整命令以 `internal/bridge/service_commands.go` 的 `slashRoutedCommandTable` 为准，当前包含：`/help`、`/new`、`/agent`、`/session`、`/wiki`、`/drive_comment`、`/loop`、`/queue`、`/schedule`、`/card`、`/cmds`、`//command`、`/compact`、`/config`、`/model`、`/mode`、`/usage`、`/show`、`/at`、`/debug`、`/update`、`/restart`、`/status`。`/update` 只替换二进制，不自动重启，完成后需再用 `/restart`。
@@ -47,8 +47,8 @@
 - 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json`、`processed_messages.json` 和图片 `cache/`。服务启动和 workspace 初始化时会确保 `.gitignore` 包含 `.local/`，并把旧根目录运行态一次性移动进 `.local/`，但如果目标已存在则不覆盖旧副本。
 - 首次对话且 workspace 未 ready 时，bridge 创建基础模板文件和 `Bootstrap.md`；第一条 `session/prompt` 把 ready workspace 内容注入给 ACP agent，由 agent 完成一次性初始化询问并写入文件后删除 `Bootstrap.md`。bridge 不实现多轮 onboarding 状态机，也不做旧记忆文件名迁移。
 - bridge 只负责创建模板、注入 workspace 内容和提供受限 workspace 文件读写能力；长期记忆、知识和技能文件由 ACP agent 用自身本地工具维护。新增/删除/重命名知识或技能文件需同步 `knowledge/index.md` 并追加 `knowledge/log.md`。
-- 自动知识沉淀（wiki）默认开启，普通消息完整回复后启动分钟级定时器（默认 5 分钟），向同一 ACP session 发送 internal/silent 反思 prompt，不向来源聊天转发输出。bot 级 `wiki_trace` 默认关闭；开启后只把过程旁路到指定群的流式卡片，不改变 runtime、取消和 workspace 锁语义。bridge 按个人使用场景设计，`wiki_trace` 过程卡片按目的群 `/show` 配置展示 agent 正文、思考、计划、工具状态和最终审计摘要，不做私聊或来源内容脱敏。
-- `/new` 重开时若旧会话存在尚未触发的 wiki 定时器，必须用独立 wiki runtime key 放到后台执行，不阻塞新会话创建和消息处理；该后台轮次属于上一轮收尾，不被新会话后续普通消息取消，但仍纳入 service/runtime 生命周期，可由 `/wiki off`、会话关闭或服务退出取消并关闭对应 ACP client。若新 session 创建或持久化失败，需恢复原 pending wiki 定时器。
+- 自动知识沉淀（wiki）默认开启。普通消息的完整终止记录落入 `.local/traces/<acp_session_id>.jsonl` 后，workspace 级 coordinator 默认等待 5 分钟，再由独立 `wiki-companion` ACP session 按冻结的 `seq` 区间增量读取 trace 并维护知识。原用户 session 不接收 wiki prompt；新消息与 `/new` 不取消、不搬运 companion job。成功或 `NoReply` 后才推进 `.local/wiki/state.json` 的 cursor，失败保持原 cursor 并有限重试；同一 workspace 的自动 wiki 和 `/wiki lint` 串行写入。
+- trace 的 `seq` 在单文件内严格递增，`turn_result`/`error` 是完整轮次边界；压缩必须保留 `user`、final assistant 和终止记录，且未消费 trace 不得压缩或按 retention 删除。companion 自身 trace 使用 `source=wiki`，禁止再次作为知识沉淀来源。bot 级 `wiki_trace` 默认关闭；开启后把 companion 执行过程旁路到指定群的流式卡片。
 
 ## 配置
 

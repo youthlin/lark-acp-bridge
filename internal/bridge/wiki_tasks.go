@@ -63,6 +63,7 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 	chat := s.chatConfigForMessage(msg)
 	switch strings.ToLower(strings.TrimSpace(fields[1])) {
 	case "on":
+		wasDisabled := chat.WikiDisabled
 		_, err := store.UpdateChat(chat, func(current *ChatConfig) {
 			current.WikiDisabled = false
 		})
@@ -70,18 +71,30 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
 		}
+		if wasDisabled {
+			if session, ok := s.findSession(msg); ok {
+				if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+					coordinator.enableSource(session)
+				}
+			}
+		}
 		return "已开启当前聊天的自动知识沉淀。"
 	case "off":
-		if session, ok := s.findSession(msg); ok {
-			s.cancelWikiTimer(session.Key)
-			s.cancelWikiTasks(ctx, session.Key)
-		}
 		_, err := store.UpdateChat(chat, func(current *ChatConfig) {
 			current.WikiDisabled = true
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "保存 wiki 配置失败", "错误", err)
 			return "保存 wiki 配置失败：" + err.Error()
+		}
+		if session, ok := s.findSession(msg); ok {
+			if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+				coordinator.cancelChat(session.Key, true)
+			} else {
+				// 兼容未配置 bot workspace 的旧 1.0 内存状态。
+				s.cancelWikiTimer(session.Key)
+				s.cancelWikiTasks(ctx, session.Key)
+			}
 		}
 		return "已关闭当前聊天的自动知识沉淀。"
 	case "status":
@@ -107,9 +120,14 @@ func (s *Service) handleWikiCommand(ctx context.Context, text string, msg feishu
 			slog.ErrorContext(ctx, "保存 wiki interval 失败", "错误", err)
 			return "保存 wiki interval 失败：" + err.Error()
 		}
-		if session, ok := s.findSession(msg); ok && s.hasWikiTimer(session.Key) {
-			if agent, ok := s.registry.Get(session.AgentName); ok {
-				s.scheduleWikiAfterUserPrompt(session, agent)
+		if session, ok := s.findSession(msg); ok {
+			if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+				coordinator.rescheduleSource(session)
+			} else if s.hasWikiTimer(session.Key) {
+				// 兼容未配置 bot workspace 的旧 1.0 内存 timer。
+				if agent, ok := s.registry.Get(session.AgentName); ok {
+					s.scheduleWikiAfterUserPrompt(session, agent)
+				}
 			}
 		}
 		return "已设置当前聊天自动知识沉淀延迟：" + formatDuration(interval) + "。"
@@ -165,34 +183,47 @@ func (s *Service) wikiStatus(msg feishu.Message, chat ChatConfig) string {
 		"延迟：" + formatDuration(wikiInterval(chat)),
 	}
 	session, hasSession := s.findSession(msg)
-	var snapshot wikiStatusSnapshot
+	var snapshot wikiCoordinatorSnapshot
 	if hasSession {
-		snapshot = s.wikiStatusSnapshot(session.Key)
+		if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+			snapshot = coordinator.snapshotForSession(session.ACPSessionID)
+		}
 	}
-	if snapshot.timerSet {
+	if hasSession && snapshot.Source == (wikiSourceState{}) && !snapshot.Waiting && !snapshot.Queued && !snapshot.Running {
+		legacy := s.wikiStatusSnapshot(session.Key)
+		if legacy.timerSet {
+			snapshot.Waiting = true
+		} else if legacy.status.running || legacy.backgroundTask || (legacy.foregroundTask != nil && legacy.foregroundTask.kind == taskKindWiki) {
+			snapshot.Running = true
+		} else if !legacy.status.lastStarted.IsZero() {
+			snapshot.Source.LastSuccessAt = legacy.status.lastEnded
+			snapshot.Source.LastSummary = legacy.status.lastSummary
+			snapshot.Source.LastError = legacy.status.lastError
+		}
+	}
+	if snapshot.Waiting {
 		lines = append(lines, "状态：等待定时触发")
-	} else if snapshot.status.running || snapshot.backgroundTask || (snapshot.foregroundTask != nil && snapshot.foregroundTask.kind == taskKindWiki) {
+	} else if snapshot.Queued {
+		lines = append(lines, "状态：已排队")
+	} else if snapshot.Running {
 		lines = append(lines, "状态：正在反思")
-	} else if !snapshot.status.lastStarted.IsZero() {
-		state := "成功"
-		if !snapshot.status.lastSuccess {
-			state = "失败"
-		}
-		lines = append(lines, "最近一次："+state)
-		lines = append(lines, "开始："+snapshot.status.lastStarted.Format(time.RFC3339))
-		if !snapshot.status.lastEnded.IsZero() {
-			lines = append(lines, "结束："+snapshot.status.lastEnded.Format(time.RFC3339))
-		}
-		if snapshot.status.lastError != "" {
-			lines = append(lines, "错误："+snapshot.status.lastError)
-		}
-		if snapshot.status.lastSummary != "" {
-			lines = append(lines, "最近摘要："+snapshot.status.lastSummary)
+		lines = append(lines, fmt.Sprintf("处理区间：(%d, %d]", snapshot.Job.FromSeq, snapshot.Job.ToSeq))
+	} else if snapshot.Source.CursorLost {
+		lines = append(lines, "状态：游标数据丢失")
+	} else if snapshot.Source.LastError != "" {
+		lines = append(lines, "最近一次：失败", "错误："+snapshot.Source.LastError)
+	} else if !snapshot.Source.LastSuccessAt.IsZero() {
+		lines = append(lines, "最近一次：成功", "结束："+snapshot.Source.LastSuccessAt.Format(time.RFC3339))
+		if snapshot.Source.LastSummary != "" {
+			lines = append(lines, "最近摘要："+snapshot.Source.LastSummary)
 		}
 	} else {
 		lines = append(lines, "状态：尚未触发")
 	}
 	if bot, ok := s.botConfig(msg.BotID); ok {
+		if s.wikiCoordinator(msg.BotID) == nil {
+			lines = append(lines, "告警：本地 trace 未启用，自动知识沉淀不会运行")
+		}
 		lines = append(lines, formatWikiTraceStatus(bot.WikiTrace))
 	}
 	return strings.Join(lines, "\n")
@@ -310,6 +341,10 @@ func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
 
 func (s *Service) runWikiLintTask(replyCtx context.Context, taskCtx context.Context, finish func(), msg feishu.Message, session Session, agent config.AgentConfig) {
 	defer finish()
+	if coordinator := s.wikiCoordinator(session.Key.BotID); coordinator != nil {
+		coordinator.writeMu.Lock()
+		defer coordinator.writeMu.Unlock()
+	}
 	key := normalizeSessionKey(session.Key)
 	s.markWikiStarted(key)
 	result, sentProgress, rawResult, _, err := s.promptRuntimeWithProgressRaw(taskCtx, msg, session, agent, wikiLintPrompt(sessionWorkspace(session, msg)))
@@ -347,6 +382,10 @@ func (s *Service) runWikiUpgrade(ctx context.Context, msg feishu.Message) string
 		return "当前会话正在忙碌，稍后再执行 /wiki upgrade。"
 	}
 	defer finish()
+	if coordinator := s.wikiCoordinator(msg.BotID); coordinator != nil {
+		coordinator.writeMu.Lock()
+		defer coordinator.writeMu.Unlock()
+	}
 	workspaceStatus, err := ensureWorkspaceWithOptions(workspace, msg.BotID, ensureWorkspaceOptions{})
 	if err != nil {
 		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", workspace, "错误", err)

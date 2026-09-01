@@ -64,7 +64,6 @@ type promptPostWorkOptions struct {
 	agent                    config.AgentConfig
 	operation                string
 	skipPostPromptWork       bool
-	scheduleWiki             bool
 	allowReplySuppression    bool
 	updateTitle              func(context.Context, Session) Session
 	updateTitleOnSuccessOnly bool
@@ -175,9 +174,6 @@ func (s *Service) finishPromptPostWork(ctx context.Context, out promptRunOutcome
 	reply := out.replyText()
 	session := out.session
 	s.recordPromptTokenUsage(ctx, opts.botID, session, out.result)
-	if !opts.skipPostPromptWork && opts.scheduleWiki && out.err == nil {
-		s.scheduleWikiAfterUserPrompt(session, opts.agent)
-	}
 	if opts.allowReplySuppression && s.shouldSuppressAtAutoReply(opts.msg, reply) {
 		return promptPostWorkResult{session: session, suppressed: true}
 	}
@@ -269,6 +265,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		} else if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
 			runOpts = atAutoUserPromptTaskOptions()
 		}
+		runOpts.triggerWiki = !opts.SkipPostPromptWork
 		return s.runUserPromptWithWorkspaceContext(runCtx, msg, runSession, agent, text, runOpts)
 	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
 		return s.refreshACPSession(refreshCtx, msg, refreshSession, agent)
@@ -279,7 +276,6 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 		agent:                 agent,
 		operation:             "prompt",
 		skipPostPromptWork:    opts.SkipPostPromptWork,
-		scheduleWiki:          true,
 		allowReplySuppression: true,
 		updateTitle: func(titleCtx context.Context, current Session) Session {
 			return s.updateAutomaticSessionTitle(titleCtx, msg, current, userText)
@@ -423,7 +419,7 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 		return s.runUserPromptWithStreamOptionsDetailed(ctx, msg, session, agent, text, opts, stream, delayed)
 	}
 	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
-		recorder := s.newTraceRecorderForMessage(session, msg, text)
+		recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
 		result, err := s.runtime.Prompt(taskCtx, session, agent, text, tracePromptOptions(recorder, acp.PromptOptions{}))
 		if recorder != nil {
 			recorder.Complete(result, err)
@@ -435,7 +431,7 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 
 func (s *Service) runUserPromptWithStreamOptionsDetailed(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions, stream *promptCardStream, delayed bool) promptRuntimeResult {
 	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
-		run := s.promptRuntimeWithProgressRawStatusPrefixAndStream(taskCtx, msg, session, agent, text, stream, delayed)
+		run := s.promptRuntimeWithProgressRawStatusPrefixAndStream(taskCtx, msg, session, agent, text, stream, delayed, opts)
 		return run, run.err
 	})
 	return promptRuntimeResult{result: out.result, sentProgress: out.sentProgress, reply: out.reply, replySet: out.replySet, err: err}
@@ -452,12 +448,12 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefix(ctx context.Context, 
 	if delayed {
 		stream.delayCardCreation()
 	}
-	return s.promptRuntimeWithProgressRawStatusPrefixAndStream(ctx, msg, session, agent, text, stream, delayed)
+	return s.promptRuntimeWithProgressRawStatusPrefixAndStream(ctx, msg, session, agent, text, stream, delayed, runningTaskOptions{})
 }
 
-func (s *Service) promptRuntimeWithProgressRawStatusPrefixAndStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream, delayed bool) promptRuntimeResult {
+func (s *Service) promptRuntimeWithProgressRawStatusPrefixAndStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream, delayed bool, opts runningTaskOptions) promptRuntimeResult {
 	if delayed {
-		run := s.runPromptWithStream(ctx, msg, session, agent, text, stream)
+		run := s.runPromptWithStreamOptions(ctx, msg, session, agent, text, stream, opts)
 		result := run.result
 		if run.chunks.hasFinalBoundary() {
 			result.Text = run.streamedReply
@@ -477,7 +473,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefixAndStream(ctx context.
 		return promptRuntimeResult{result: result, sentProgress: run.stream.hasStarted(), rawResult: result, reply: reply, replySet: replySet, err: run.err}
 	}
 
-	run := s.runPromptWithStream(ctx, msg, session, agent, text, stream)
+	run := s.runPromptWithStreamOptions(ctx, msg, session, agent, text, stream, opts)
 	result := run.result
 	if run.stream.hasStarted() {
 		finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), promptCardFinalUpdateLimit)
@@ -522,10 +518,14 @@ func delayedPromptReply(run promptStreamRun, result acp.PromptResult) (string, b
 }
 
 func (s *Service) runPromptWithStream(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream) promptStreamRun {
+	return s.runPromptWithStreamOptions(ctx, msg, session, agent, text, stream, runningTaskOptions{})
+}
+
+func (s *Service) runPromptWithStreamOptions(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, stream *promptCardStream, opts runningTaskOptions) promptStreamRun {
 	if stream == nil {
 		stream = newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg), s.streamCardStarterForMessage(msg))
 	}
-	recorder := s.newTraceRecorderForMessage(session, msg, text)
+	recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
 	chunks := newPromptChunkAccumulator(stream)
 	stopStatusRefresh := stream.startStatusRefresh(ctx)
 	result, err := s.runtime.Prompt(ctx, session, agent, text, tracePromptOptions(recorder, s.promptStreamOptions(msg, stream, chunks)))

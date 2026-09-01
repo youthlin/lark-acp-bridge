@@ -1119,8 +1119,8 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 	if foregroundCtx.Err() != context.Canceled {
 		t.Fatalf("foreground ctx err = %v, want context.Canceled", foregroundCtx.Err())
 	}
-	if wikiCtx.Err() != context.Canceled {
-		t.Fatalf("wiki ctx err = %v, want context.Canceled", wikiCtx.Err())
+	if wikiCtx.Err() != nil {
+		t.Fatalf("wiki ctx err = %v, want nil because session work does not control companion wiki", wikiCtx.Err())
 	}
 	if otherForegroundCtx.Err() != nil {
 		t.Fatalf("other foreground ctx err = %v, want nil", otherForegroundCtx.Err())
@@ -1129,7 +1129,7 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 		t.Fatalf("other wiki ctx err = %v, want nil", otherWikiCtx.Err())
 	}
 	gotReasons := map[string]bool{}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {
 		select {
 		case reason := <-canceled:
 			gotReasons[reason] = true
@@ -1137,8 +1137,8 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 			t.Fatalf("cancel handlers called %d times, want 2", i)
 		}
 	}
-	if !gotReasons["foreground:已取消"] || !gotReasons["wiki:已取消"] {
-		t.Fatalf("cancel reasons = %+v, want foreground and wiki canceled", gotReasons)
+	if !gotReasons["foreground:已取消"] || gotReasons["wiki:已取消"] {
+		t.Fatalf("cancel reasons = %+v, want only foreground canceled", gotReasons)
 	}
 	if svc.tasks[normalizedKey] != nil {
 		t.Fatalf("current task = %+v, want removed", svc.tasks[normalizedKey])
@@ -1146,20 +1146,20 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 	if svc.tasks[otherKey] == nil {
 		t.Fatal("other foreground task was removed")
 	}
-	if _, ok := svc.wikiTasks[wikiRuntime]; ok {
-		t.Fatal("current wiki task was not removed")
+	if _, ok := svc.wikiTasks[wikiRuntime]; !ok {
+		t.Fatal("current wiki task was removed by session cancellation")
 	}
 	if _, ok := svc.wikiTasks[otherWikiRuntime]; !ok {
 		t.Fatal("other wiki task was removed")
 	}
-	if svc.wikiTimers[normalizedKey] != nil {
-		t.Fatalf("current wiki timer = %+v, want removed", svc.wikiTimers[normalizedKey])
+	if svc.wikiTimers[normalizedKey] == nil {
+		t.Fatalf("current wiki timer = nil, want untouched")
 	}
 	if svc.wikiTimers[otherKey] == nil {
 		t.Fatal("other wiki timer was removed")
 	}
-	if svc.wikiGenerations[normalizedKey] != 6 {
-		t.Fatalf("current wiki generation = %d, want 6", svc.wikiGenerations[normalizedKey])
+	if svc.wikiGenerations[normalizedKey] != 5 {
+		t.Fatalf("current wiki generation = %d, want unchanged 5", svc.wikiGenerations[normalizedKey])
 	}
 	if svc.wikiGenerations[otherKey] != 8 {
 		t.Fatalf("other wiki generation = %d, want 8", svc.wikiGenerations[otherKey])
@@ -1170,19 +1170,15 @@ func TestCancelSessionWorkSessionWorkBoundaries(t *testing.T) {
 		rt.mu.Lock()
 		cancelCalls := append([]fakeCancelCall(nil), rt.cancelCalls...)
 		rt.mu.Unlock()
-		if len(cancelCalls) == 2 {
-			gotSessions := map[string]bool{}
-			for _, call := range cancelCalls {
-				gotSessions[call.Session.ACPSessionID] = true
-			}
-			if !gotSessions["acp-current"] || !gotSessions["acp-wiki-current"] {
-				t.Fatalf("cancelCalls = %+v, want current foreground and wiki runtime cancels", cancelCalls)
+		if len(cancelCalls) == 1 {
+			if cancelCalls[0].Session.ACPSessionID != "acp-current" {
+				t.Fatalf("cancelCalls = %+v, want only current foreground runtime cancel", cancelCalls)
 			}
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("cancelCalls = %+v, want current foreground and wiki runtime cancels", cancelCalls)
+			t.Fatalf("cancelCalls = %+v, want current foreground runtime cancel", cancelCalls)
 		default:
 			time.Sleep(time.Millisecond)
 		}

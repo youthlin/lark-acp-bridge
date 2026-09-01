@@ -861,8 +861,10 @@ func TestRunTriggerPromptDoesNotScheduleWikiByDefault(t *testing.T) {
 }
 
 func TestRunTriggerPromptSchedulesWikiWhenEnabled(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
 	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, Trace: config.TraceConfig{Enabled: true, RetentionDays: 7}}},
 		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
 	}
 	svc := NewService(cfg, store)
@@ -872,7 +874,7 @@ func TestRunTriggerPromptSchedulesWikiWhenEnabled(t *testing.T) {
 	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
 		BotID:                "bot-a",
 		Key:                  key,
-		Workspace:            t.TempDir(),
+		Workspace:            workspace,
 		AgentName:            "traex",
 		Cwd:                  t.TempDir(),
 		Prompt:               "handle comment",
@@ -881,8 +883,11 @@ func TestRunTriggerPromptSchedulesWikiWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runTriggerPrompt() error = %v", err)
 	}
-	if !svc.hasWikiTimer(key) {
-		t.Fatal("wiki timer not scheduled when EnableWikiReflection is true")
+	coordinator := svc.wikiCoordinator("bot-a")
+	t.Cleanup(coordinator.stop)
+	snapshot := coordinator.snapshotForSession("acp-trigger")
+	if !snapshot.Waiting || snapshot.Source.LastCompleteSeq == 0 {
+		t.Fatalf("wiki snapshot = %+v, want waiting trace-driven job", snapshot)
 	}
 }
 

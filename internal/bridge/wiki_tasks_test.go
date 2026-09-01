@@ -619,20 +619,25 @@ func TestWikiUpgradeReportsBusyDuringBackgroundWikiTask(t *testing.T) {
 }
 
 func TestWikiStatusIncludesLastSummary(t *testing.T) {
-	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
-	svc := newTestService(config.Default(), store)
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	svc := newTestService(cfg, store)
 	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
 	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
 	}
-	svc.taskMu.Lock()
-	svc.wikiStatuses[key] = wikiRunStatus{
-		lastStarted: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
-		lastEnded:   time.Date(2026, 8, 5, 12, 0, 2, 0, time.UTC),
-		lastSuccess: true,
-		lastSummary: "changed: yes files: knowledge/core.md",
+	coordinator := svc.wikiCoordinator("bot-a")
+	if err := coordinator.state.update(func(state *wikiState) {
+		state.Sources["acp-session-1"] = wikiSourceState{
+			LastSuccessAt: time.Date(2026, 8, 5, 12, 0, 2, 0, time.UTC),
+			LastSummary:   "changed: yes files: knowledge/core.md",
+		}
+	}); err != nil {
+		t.Fatal(err)
 	}
-	svc.taskMu.Unlock()
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:    "bot-a",

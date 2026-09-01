@@ -79,6 +79,9 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.loadAndStartScheduledTasks(ctx); err != nil {
 		return err
 	}
+	for _, coordinator := range s.wikiCoordinators {
+		coordinator.restore()
+	}
 	if runtime, ok := s.runtime.(*runtimeManager); ok {
 		runtime.startIdleCleaner(ctx, s.runtimeKeyBusy)
 	}
@@ -147,6 +150,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		runtime.stopIdleCleaner()
 	}
 	s.stopScheduledTasks()
+	for _, coordinator := range s.wikiCoordinators {
+		coordinator.stop()
+	}
 	s.cancelAllSessionWork(ctx)
 	waitCtx, cancel := context.WithTimeout(ctx, shutdownBackgroundWait)
 	s.waitBackgroundShutdown(waitCtx)
