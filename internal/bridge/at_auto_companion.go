@@ -400,16 +400,27 @@ func (s *Service) atAutoSourceTracePath(source Session) string {
 }
 
 func formatAtAutoPendingResponsePrompt(messages []pendingAtMessage) string {
-	history := formatPendingAtMessageBlock(pendingAtAutoHeader, messages)
+	history := formatPendingAtMessageBlock("下面是需要处理的群消息：", messages)
 	if history == "" {
 		return ""
 	}
-	return promptWithUserMessage([]string{
-		"## 群聊未 at 消息\n" + strings.Join([]string{
-			"下面这些未 at bot 的群消息已由 at-auto 伴生会话判断为需要响应。",
-			"请只回复一次，综合处理这些消息，不要解释自动判断规则。",
-		}, "\n"),
-	}, history)
+	return promptWithUserMessage(nil, history+"\n\n请结合上下文综合处理，并只回复一次。")
+}
+
+func pendingAtAutoReplyMessage(base feishu.Message, messages []pendingAtMessage) feishu.Message {
+	reply := base
+	if len(messages) == 0 {
+		return reply
+	}
+	last := messages[len(messages)-1]
+	reply.MessageID = strings.TrimSpace(last.MessageID)
+	reply.ThreadID = strings.TrimSpace(last.ThreadID)
+	reply.RootID = strings.TrimSpace(last.RootID)
+	reply.ParentID = strings.TrimSpace(last.ParentID)
+	reply.SenderID = strings.TrimSpace(last.SenderID)
+	reply.Reply = nil
+	reply.ForceReplyInThread = last.ForceReplyInThread
+	return reply
 }
 
 func atAutoTraceMessageID(msg feishu.Message, companion Session) string {

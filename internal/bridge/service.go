@@ -399,8 +399,6 @@ func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingProm
 	promptText := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
 	if s.shouldQueueAtAutoMessage(incoming.msg) {
 		return s.handleAtAutoPromptMessage(ctx, incoming, promptText)
-	} else {
-		promptText = s.promptTextWithAtAutoMention(incoming.msg, promptText)
 	}
 	return s.prompt(ctx, incoming.msg, promptText)
 }

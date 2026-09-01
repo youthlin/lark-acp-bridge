@@ -483,7 +483,7 @@ func TestAdapterHydratesChatInfoAndCachesByChatID(t *testing.T) {
 	handler := &countingHandler{}
 	chatInfo := &fakeChatInfoClient{
 		infos: map[string]chatInfo{
-			"oc_topic": {Name: "话题群", ChatMode: "group", ChatType: "private", GroupMessageType: "thread"},
+			"oc_topic": {Name: "话题群", ChatMode: "topic", ChatType: "private"},
 		},
 	}
 	adapter := NewAdapter(config.BotConfig{ID: "bot-a"}, handler)
@@ -495,8 +495,8 @@ func TestAdapterHydratesChatInfoAndCachesByChatID(t *testing.T) {
 	if err := adapter.handleMessage(context.Background(), first); err != nil {
 		t.Fatalf("handleMessage(first) error = %v", err)
 	}
-	if handler.msg.GroupMessageType != "thread" || !handler.msg.IsTopicThread() {
-		t.Fatalf("message = %+v, want topic thread from chat info", handler.msg)
+	if handler.msg.ChatMode != "topic" || handler.msg.GroupMessageType != "" || !handler.msg.IsTopicThread() {
+		t.Fatalf("message = %+v, want topic thread from real chat info shape", handler.msg)
 	}
 
 	second := textEvent("om_topic_2", "oc_topic", "hello again")
@@ -508,8 +508,8 @@ func TestAdapterHydratesChatInfoAndCachesByChatID(t *testing.T) {
 	if len(chatInfo.calls) != 1 || chatInfo.calls[0] != "oc_topic" {
 		t.Fatalf("chat info calls = %+v, want one cached lookup", chatInfo.calls)
 	}
-	if handler.msg.GroupMessageType != "thread" || !handler.msg.IsTopicThread() {
-		t.Fatalf("second message = %+v, want cached topic thread info", handler.msg)
+	if handler.msg.ChatMode != "topic" || handler.msg.GroupMessageType != "" || !handler.msg.IsTopicThread() {
+		t.Fatalf("second message = %+v, want cached topic thread info from real chat info shape", handler.msg)
 	}
 }
 

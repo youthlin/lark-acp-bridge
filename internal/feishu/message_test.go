@@ -147,6 +147,11 @@ func TestReplyInThreadForMessage(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "topic chat mode replies in topic without group message type",
+			msg:  Message{ChatType: "group", ChatMode: "topic", MessageID: "om_topic", ThreadID: "omt_topic"},
+			want: true,
+		},
+		{
 			name: "private chat root id does not force topic reply",
 			msg:  Message{ChatType: "p2p", MessageID: "om_private_reply", RootID: "om_root"},
 			want: false,

@@ -3831,6 +3831,11 @@ func TestSessionKeysFromMessageUsesThreadKeyForGroupTopics(t *testing.T) {
 			want: []SessionKey{imSessionKey("bot-a", "oc_group", "omt_group_thread")},
 		},
 		{
+			name: "topic chat mode without group message type uses topic scoped keys",
+			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_group", ChatType: "group", ChatMode: "topic", ThreadID: "omt_group_thread"},
+			want: []SessionKey{imSessionKey("bot-a", "oc_group", "omt_group_thread")},
+		},
+		{
 			name: "private chat with thread id stays chat scoped",
 			msg:  feishu.Message{BotID: "bot-a", ChatID: "oc_private", ChatType: "p2p", ThreadID: "omt_private_thread"},
 			want: []SessionKey{imSessionKey("bot-a", "oc_private", "")},
@@ -4060,8 +4065,8 @@ func TestHandleFeishuGroupChatCachesMessagesUntilNextMention(t *testing.T) {
 	prompt := rt.promptCalls[1].Text
 	for _, want := range []string{
 		"## 以下是当前对话历史消息",
-		"用户(ou_b)：b 的补充",
-		"用户(ou_c)：c 的补充",
+		"- （om_group_cached_1）（ou_b）b 的补充",
+		"- （om_group_cached_2）（ou_c）c 的补充",
 		"## User Message",
 		"sender：用户(ou_a)",
 		"content：第二轮，你说得对 @用户b(ou_b),你也看看 @用户c(ou_c)",
@@ -4070,8 +4075,8 @@ func TestHandleFeishuGroupChatCachesMessagesUntilNextMention(t *testing.T) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
 	}
-	if strings.Index(prompt, "用户(ou_b)：b 的补充") > strings.Index(prompt, "content：第二轮") ||
-		strings.Index(prompt, "用户(ou_c)：c 的补充") > strings.Index(prompt, "content：第二轮") {
+	if strings.Index(prompt, "（om_group_cached_1）") > strings.Index(prompt, "content：第二轮") ||
+		strings.Index(prompt, "（om_group_cached_2）") > strings.Index(prompt, "content：第二轮") {
 		t.Fatalf("prompt = %q, want cached messages before current mention", prompt)
 	}
 	if strings.Contains(prompt, "/at off") {
@@ -4151,8 +4156,8 @@ func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *tes
 		t.Fatalf("prompt = %q, should drop oldest cached message", prompt)
 	}
 	for _, want := range []string{
-		"用户(ou_001)：cached-001",
-		"用户(ou_100)：cached-100",
+		"- （om_group_cached_001）（ou_001）cached-001",
+		"- （om_group_cached_100）（ou_100）cached-100",
 		"content：汇总一下",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -4523,17 +4528,13 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	mentionPrompt := rt.promptCalls[len(rt.promptCalls)-1].Text
 	promptCallCountAfterMention := len(rt.promptCalls)
 	rt.mu.Unlock()
-	for _, want := range []string{
-		"## 群聊明确提及",
-		"当前群聊已启用 /at off auto，但本轮用户明确 at 了你。",
-		"`SILENT` 只用于未 at bot 的自动判断；本轮必须按普通用户消息正常回复，不能输出 SILENT。",
-		"请处理",
-	} {
-		if !strings.Contains(mentionPrompt, want) {
-			t.Fatalf("mention prompt = %q, want %q", mentionPrompt, want)
-		}
+	if !strings.Contains(mentionPrompt, "请处理") {
+		t.Fatalf("mention prompt = %q, want original user message", mentionPrompt)
 	}
 	for _, unexpected := range []string{
+		"## 群聊明确提及",
+		"当前群聊已启用 /at off auto",
+		"不能输出 SILENT",
 		"请先判断这条未 at bot 的群消息是否需要你回复",
 		"如果消息与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT",
 	} {
@@ -4688,10 +4689,16 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 		t.Fatalf("UpsertChat() error = %v", err)
 	}
 	var intermediate queueIntermediateReplies
+	type sentAutoReply struct {
+		msg  feishu.Message
+		text string
+	}
+	sentAutoReplies := make(chan sentAutoReply, 1)
 	ctx := context.Background()
 	client := newFakeSentMessageClient("")
 	client.replySender = func(ctx context.Context, msg feishu.Message, text string) error {
 		intermediate.append(text)
+		sentAutoReplies <- sentAutoReply{msg: msg, text: text}
 		return nil
 	}
 	svc.setOutbound("bot-a", client)
@@ -4776,12 +4783,23 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	if !intermediate.equal([]string{"需要回复一次"}) {
 		t.Fatal("intermediate replies should contain one batched auto reply")
 	}
+	select {
+	case sent := <-sentAutoReplies:
+		if sent.text != "需要回复一次" {
+			t.Fatalf("sent auto reply = %q, want batched reply", sent.text)
+		}
+		if sent.msg.MessageID != "om_auto_pending_2" || sent.msg.ForceReplyInThread {
+			t.Fatalf("sent auto reply target = %+v, want ordinary reply to last pending message", sent.msg)
+		}
+	default:
+		t.Fatal("missing sent auto reply target")
+	}
 	autoDecisionPrompt := autoCalls[0].Text
 	for _, want := range []string{
 		"# 群聊自动响应判断",
 		"## 以下是待判断是否需要响应的群消息",
-		"用户(ou_b)：无 at 补充 1",
-		"用户(ou_c)：无 at 补充 2",
+		"- （om_auto_pending_1）（ou_b）无 at 补充 1",
+		"- （om_auto_pending_2）（ou_c）无 at 补充 2",
 		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
 	} {
 		if !strings.Contains(autoDecisionPrompt, want) {
@@ -4790,11 +4808,11 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	}
 	autoResponsePrompt := calls[1].Text
 	for _, want := range []string{
-		"## 群聊未 at 消息",
-		"## 以下是待判断是否需要响应的群消息",
-		"用户(ou_b)：无 at 补充 1",
-		"用户(ou_c)：无 at 补充 2",
-		"请只回复一次",
+		"## User Message",
+		"下面是需要处理的群消息：",
+		"- （om_auto_pending_1）（ou_b）无 at 补充 1",
+		"- （om_auto_pending_2）（ou_c）无 at 补充 2",
+		"请结合上下文综合处理，并只回复一次。",
 	} {
 		if !strings.Contains(autoResponsePrompt, want) {
 			t.Fatalf("auto response prompt = %q, want %q", autoResponsePrompt, want)
@@ -4905,8 +4923,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	for _, want := range []string{
 		"# 群聊自动响应判断",
 		"## 以下是待判断是否需要响应的群消息",
-		"用户(ou_b)：无 at 第二条",
-		"用户(ou_c)：无 at 第三条",
+		"- （om_auto_2）（ou_b）无 at 第二条",
+		"- （om_auto_3）（ou_c）无 at 第三条",
 		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
 	} {
 		if !strings.Contains(autoPrompt, want) {
@@ -4916,6 +4934,15 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	mainPrompt := calls[0].Text
 	if strings.Contains(mainPrompt, "群聊自动响应判断") || strings.Contains(mainPrompt, "最终只输出 SILENT") {
 		t.Fatalf("main prompt = %q, should not contain auto decision rules", mainPrompt)
+	}
+	for _, want := range []string{
+		"- （om_auto_2）（ou_b）无 at 第二条",
+		"- （om_auto_3）（ou_c）无 at 第三条",
+		"请结合上下文综合处理，并只回复一次。",
+	} {
+		if !strings.Contains(mainPrompt, want) {
+			t.Fatalf("main prompt = %q, want %q", mainPrompt, want)
+		}
 	}
 }
 

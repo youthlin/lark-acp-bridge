@@ -79,6 +79,9 @@ func (m Message) IsPrivateChat() bool {
 }
 
 func (m Message) IsTopicGroup() bool {
+	if strings.EqualFold(strings.TrimSpace(m.ChatMode), "topic") {
+		return true
+	}
 	groupMessageType := strings.TrimSpace(m.GroupMessageType)
 	if strings.EqualFold(groupMessageType, "thread") {
 		return true

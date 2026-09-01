@@ -20,8 +20,13 @@ const (
 )
 
 type pendingAtMessage struct {
-	SenderID string
-	Text     string
+	MessageID          string
+	ThreadID           string
+	RootID             string
+	ParentID           string
+	SenderID           string
+	Text               string
+	ForceReplyInThread bool
 }
 
 func (s *Service) handleShowCommand(ctx context.Context, msg feishu.Message, text string) string {
@@ -281,8 +286,13 @@ func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText st
 
 func pendingAtMessageFromMessage(msg feishu.Message) pendingAtMessage {
 	return pendingAtMessage{
-		SenderID: strings.TrimSpace(msg.SenderID),
-		Text:     strings.TrimSpace(msg.PromptText()),
+		MessageID:          strings.TrimSpace(msg.MessageID),
+		ThreadID:           strings.TrimSpace(msg.ThreadID),
+		RootID:             strings.TrimSpace(msg.RootID),
+		ParentID:           strings.TrimSpace(msg.ParentID),
+		SenderID:           strings.TrimSpace(msg.SenderID),
+		Text:               strings.TrimSpace(msg.PromptText()),
+		ForceReplyInThread: msg.ForceReplyInThread,
 	}
 }
 
@@ -297,7 +307,7 @@ func formatPendingAtMessageBlock(header string, messages []pendingAtMessage) str
 		if text == "" {
 			continue
 		}
-		lines = append(lines, formatPendingAtMessageLine(message.SenderID, text))
+		lines = append(lines, formatPendingAtMessageLine(message.MessageID, message.SenderID, text))
 	}
 	if len(lines) == 1 {
 		return ""
@@ -317,8 +327,16 @@ func formatCurrentAtUserMessage(msg feishu.Message, promptText string) string {
 	return strings.Join(lines, "\n")
 }
 
-func formatPendingAtMessageLine(senderID string, text string) string {
-	return fmt.Sprintf("%s：%s", formatPendingAtSender(senderID), text)
+func formatPendingAtMessageLine(messageID string, senderID string, text string) string {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		messageID = "unknown-message"
+	}
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		senderID = "unknown-sender"
+	}
+	return fmt.Sprintf("- （%s）（%s）%s", messageID, senderID, text)
 }
 
 func formatPendingAtSender(senderID string) string {
@@ -327,22 +345,6 @@ func formatPendingAtSender(senderID string) string {
 		return "用户"
 	}
 	return "用户(" + senderID + ")"
-}
-
-func (s *Service) promptTextWithAtAutoMention(msg feishu.Message, promptText string) string {
-	if !s.shouldHandleAtAutoMentionMessage(msg) {
-		return promptText
-	}
-	promptText = strings.TrimSpace(promptText)
-	if promptText == "" {
-		return promptText
-	}
-	return promptWithUserMessage([]string{
-		"## 群聊明确提及\n" + strings.Join([]string{
-			"当前群聊已启用 /at off auto，但本轮用户明确 at 了你。",
-			"`SILENT` 只用于未 at bot 的自动判断；本轮必须按普通用户消息正常回复，不能输出 SILENT。",
-		}, "\n"),
-	}, promptText)
 }
 
 func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {

@@ -97,6 +97,40 @@ func TestIsAtAutoDecisionPositiveRequiresRespondSentinel(t *testing.T) {
 	}
 }
 
+func TestPendingAtAutoReplyMessageUsesLastPendingMessage(t *testing.T) {
+	base := feishu.Message{
+		MessageID:          "om_base",
+		ThreadID:           "omt_base",
+		RootID:             "om_root_base",
+		ParentID:           "om_parent_base",
+		SenderID:           "ou_base",
+		Reply:              &feishu.ReplyContext{MessageID: "om_reply"},
+		ForceReplyInThread: false,
+	}
+	messages := []pendingAtMessage{
+		{MessageID: "om_first", SenderID: "ou_first"},
+		{
+			MessageID:          "om_last",
+			ThreadID:           "omt_last",
+			RootID:             "om_root_last",
+			ParentID:           "om_parent_last",
+			SenderID:           "ou_last",
+			ForceReplyInThread: false,
+		},
+	}
+
+	got := pendingAtAutoReplyMessage(base, messages)
+	if got.MessageID != "om_last" || got.ThreadID != "omt_last" || got.RootID != "om_root_last" || got.ParentID != "om_parent_last" || got.SenderID != "ou_last" {
+		t.Fatalf("reply target = %+v, want last pending message context", got)
+	}
+	if got.Reply != nil {
+		t.Fatalf("reply context = %+v, want cleared inherited context", got.Reply)
+	}
+	if got.ForceReplyInThread {
+		t.Fatal("ForceReplyInThread = true, should not force a topic reply")
+	}
+}
+
 func TestRunAtAutoCompanionPromptCreatesAndReusesCompanionSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workspace := t.TempDir()

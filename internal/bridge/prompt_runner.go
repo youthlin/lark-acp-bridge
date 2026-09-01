@@ -356,10 +356,10 @@ func (s *Service) runClaimedPendingAtAutoAsync(ctx context.Context, msg feishu.M
 			return
 		}
 		autoMsg := msg
+		autoMsg = pendingAtAutoReplyMessage(autoMsg, pending)
 		autoMsg.Text = decisionPrompt
 		autoMsg.Mentions = nil
 		autoMsg.Reply = nil
-		autoMsg.ForceReplyInThread = true
 		respond, err := s.shouldAtAutoCompanionRespond(context.WithoutCancel(ctx), autoMsg, session, agent, decisionPrompt)
 		if err != nil {
 			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
