@@ -32,6 +32,17 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 	afterWrite func(),
 	cancelWait time.Duration,
 ) (json.RawMessage, error) {
+	return c.callWithLifecycle(ctx, method, params, afterWrite, cancelWait, nil)
+}
+
+func (c *Client) callWithLifecycle(
+	ctx context.Context,
+	method string,
+	params any,
+	afterWrite func(),
+	cancelWait time.Duration,
+	onLifecycle PromptLifecycleHandler,
+) (json.RawMessage, error) {
 	// 仅当调用方未设置 deadline 时套用方法级默认超时，避免握手/会话操作永久挂起。
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		if timeout := defaultRPCTimeout(method); timeout > 0 {
@@ -46,49 +57,84 @@ func (c *Client) callWithAfterWriteAndCancelWait(
 		return nil, err
 	}
 	slog.DebugContext(ctx, "Call ACP", "method", method, "req", req)
+	startedAt := time.Now()
+	emit := func(stage string, err error, cause error, waitDuration time.Duration) {
+		if onLifecycle == nil {
+			return
+		}
+		onLifecycle(PromptLifecycleEvent{
+			Stage:        stage,
+			Method:       method,
+			RequestID:    req.ID.Key(),
+			Err:          err,
+			Cause:        cause,
+			Elapsed:      time.Since(startedAt),
+			WaitDuration: waitDuration,
+		})
+	}
 	ch := make(chan rpcResponse, 1)
 	c.pendingMu.Lock()
 	c.pending[req.ID.Key()] = ch
 	c.pendingMu.Unlock()
 	if err := c.write(req); err != nil {
 		c.removePending(req.ID)
+		emit("request_write_failed", err, nil, 0)
 		return nil, err
 	}
+	emit("request_written", nil, nil, 0)
 	if afterWrite != nil {
 		afterWrite()
 	}
 	select {
 	case <-ctx.Done():
-		c.cancelRequest(ctx, req.ID)
+		ctxErr := ctx.Err()
+		cause := context.Cause(ctx)
+		emit("context_done", ctxErr, cause, 0)
+		c.cancelRequest(ctx, req.ID, func(err error) {
+			if err != nil {
+				emit("cancel_send_failed", err, cause, 0)
+				return
+			}
+			emit("cancel_sent", nil, cause, 0)
+		})
 		if cancelWait == 0 {
 			c.removePending(req.ID)
-			return nil, ctx.Err()
+			return nil, ctxErr
 		}
 		if cancelWait < 0 {
 			// session/prompt must not release promptMu until the server has
 			// answered the cancelled request or the read loop fails all pending
 			// calls. This prevents a later prompt from being written while an ACP
 			// agent is still busy finishing the old turn.
-			<-ch
-			return nil, ctx.Err()
+			waitStartedAt := time.Now()
+			emit("cancel_wait_started", ctxErr, cause, 0)
+			res := <-ch
+			waitDuration := time.Since(waitStartedAt)
+			emit("cancel_wait_finished", res.err, cause, waitDuration)
+			return nil, ctxErr
 		}
 		// Prompt cancellation often races with the final server response. Waiting
 		// briefly lets the read loop consume that response and keeps the pending
 		// map from being reused while the server still refers to the old id.
 		timer := time.NewTimer(cancelWait)
 		defer timer.Stop()
+		waitStartedAt := time.Now()
+		emit("cancel_wait_started", ctxErr, cause, 0)
 		select {
-		case <-ch:
+		case res := <-ch:
+			emit("cancel_wait_finished", res.err, cause, time.Since(waitStartedAt))
 		case <-timer.C:
 			c.removePending(req.ID)
+			emit("cancel_wait_timeout", ctxErr, cause, time.Since(waitStartedAt))
 		}
-		return nil, ctx.Err()
+		return nil, ctxErr
 	case res := <-ch:
+		emit("response_received", res.err, nil, 0)
 		return res.result, res.err
 	}
 }
 
-func (c *Client) cancelRequest(ctx context.Context, id *RequestID) {
+func (c *Client) cancelRequest(ctx context.Context, id *RequestID, afterWrite func(error)) {
 	if id == nil {
 		return
 	}
@@ -96,10 +142,16 @@ func (c *Client) cancelRequest(ctx context.Context, id *RequestID) {
 		"id": id,
 	})
 	if err != nil {
+		if afterWrite != nil {
+			afterWrite(err)
+		}
 		return
 	}
 	slog.DebugContext(ctx, "Notify ACP", "method", "$/cancel_request", "req", msg)
-	_ = c.write(msg)
+	err = c.write(msg)
+	if afterWrite != nil {
+		afterWrite(err)
+	}
 }
 
 func (c *Client) write(msg Message) error {

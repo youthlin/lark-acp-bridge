@@ -2194,6 +2194,73 @@ func TestClientPromptWaitsForServerResponseAfterContextCancellation(t *testing.T
 	}
 }
 
+func TestClientPromptLifecycleReportsCancellationWait(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{ProtocolVersion: 1}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan PromptLifecycleEvent, 16)
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.PromptWithOptions(ctx, "session-1", "开始 review", PromptOptions{
+			OnLifecycle: func(event PromptLifecycleEvent) {
+				events <- event
+			},
+		})
+		result <- err
+		close(events)
+	}()
+
+	req := server.readRequest(t)
+	if req.Method != "session/prompt" {
+		t.Fatalf("method = %q, want session/prompt", req.Method)
+	}
+	cancel()
+	cancelReq := server.readRequest(t)
+	if cancelReq.Method != "$/cancel_request" {
+		t.Fatalf("cancel method = %q, want $/cancel_request", cancelReq.Method)
+	}
+	server.writeResponse(t, req.ID, map[string]any{"stopReason": "cancelled"})
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PromptWithOptions() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PromptWithOptions() did not return")
+	}
+
+	var got []PromptLifecycleEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	stages := make([]string, 0, len(got))
+	byStage := make(map[string]PromptLifecycleEvent)
+	for _, event := range got {
+		stages = append(stages, event.Stage)
+		byStage[event.Stage] = event
+		if event.SessionID != "session-1" {
+			t.Fatalf("event %+v session id, want session-1", event)
+		}
+	}
+	wantStages := []string{"request_written", "context_done", "cancel_sent", "cancel_wait_started", "cancel_wait_finished"}
+	for _, want := range wantStages {
+		if _, ok := byStage[want]; !ok {
+			t.Fatalf("lifecycle stages = %v, want %s", stages, want)
+		}
+	}
+	if byStage["request_written"].Method != "session/prompt" || byStage["request_written"].RequestID == "" {
+		t.Fatalf("request_written event = %+v, want method and request id", byStage["request_written"])
+	}
+	if !errors.Is(byStage["context_done"].Err, context.Canceled) {
+		t.Fatalf("context_done err = %v, want context.Canceled", byStage["context_done"].Err)
+	}
+	if byStage["cancel_wait_finished"].Elapsed <= 0 {
+		t.Fatalf("cancel_wait_finished event = %+v, want elapsed", byStage["cancel_wait_finished"])
+	}
+}
+
 func TestClientPromptIncludesJSONRPCErrorDetail(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()

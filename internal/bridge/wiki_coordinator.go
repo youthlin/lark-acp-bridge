@@ -44,21 +44,23 @@ type wikiCoordinator struct {
 	writeMu     sync.Mutex
 }
 
-func newWikiCoordinator(service *Service, bot config.BotConfig, trace *traceStore) *wikiCoordinator {
+func newWikiCoordinator(service *Service, bot config.BotConfig, trace *traceStore, state *wikiStateStore) *wikiCoordinator {
 	workspace := strings.TrimSpace(bot.Workspace)
 	if workspace == "" || trace == nil {
 		return nil
 	}
-	store := newWikiStateStore(workspace)
-	if err := store.Load(); err != nil {
-		slog.Warn("加载 wiki 状态失败", "bot", displayBotID(bot.ID), "错误", err)
+	if state == nil {
+		state = newWikiStateStore(workspace)
+		if err := state.Load(); err != nil {
+			slog.Warn("加载 wiki 状态失败", "bot", displayBotID(bot.ID), "错误", err)
+		}
 	}
 	return &wikiCoordinator{
 		service:     service,
 		botID:       strings.TrimSpace(bot.ID),
 		workspace:   workspace,
 		trace:       trace,
-		state:       store,
+		state:       state,
 		timers:      make(map[string]*time.Timer),
 		queued:      make(map[string]bool),
 		dirty:       make(map[string]bool),
@@ -281,7 +283,7 @@ func (c *wikiCoordinator) runCompanionPrompt(ctx context.Context, source Session
 	}
 	c.service.markWikiStarted(source.Key)
 	prompt := wikiCompanionPrompt(c.workspace, tracePath, job)
-	observer := c.service.wikiTraceObserverForJob(source, job)
+	observer := c.service.wikiTraceObserverForJob(source, companion, job)
 	observer.start(ctx)
 	recorder := newTraceRecorderWithMessageID(c.trace, companion, prompt, wikiJobTraceMessageID(job))
 	result, err := c.service.runtime.PromptWithRuntimeKey(ctx, runtime, companion, agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(observer)))
@@ -291,6 +293,7 @@ func (c *wikiCoordinator) runCompanionPrompt(ctx context.Context, source Session
 	if errors.Is(err, errACPSessionUnavailable) {
 		companion, runtime, err = c.createCompanionSession(ctx, agent, job.AgentName)
 		if err == nil {
+			observer.setStreamSession(ctx, companion)
 			recorder = newTraceRecorderWithMessageID(c.trace, companion, prompt, wikiJobTraceMessageID(job))
 			result, err = c.service.runtime.PromptWithRuntimeKey(ctx, runtime, companion, agent, prompt, tracePromptOptions(recorder, wikiTracePromptOptions(observer)))
 			if recorder != nil {

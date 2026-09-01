@@ -120,16 +120,26 @@ func TestWikiCoordinatorUsesCompanionAndCommitsFrozenCursor(t *testing.T) {
 	cfg.Bots[0].ID = "bot-a"
 	cfg.Bots[0].Workspace = workspace
 	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
+	cfg.Bots[0].WikiTrace = config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"}
 	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
 	svc := newTestService(cfg, store)
 	runtime := &fakeRuntime{newSessionID: "acp-wiki-companion", promptReply: "NoReply"}
 	svc.setRuntime(runtime)
+	var traceInitialProcess string
+	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}}
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		traceInitialProcess = options.InitialProcess
+		return card, nil
+	}
 	session := Session{
 		Key:             normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
 		AgentName:       "traex",
 		ACPSessionID:    "acp-source",
 		Workspace:       workspace,
 		WikiIntervalSec: 60,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(source session) error = %v", err)
 	}
 	recorder := svc.newTraceRecorderForPrompt(session, feishu.Message{MessageID: "om-1"}, "请记住方案", true)
 	terminalSeq := recorder.Complete(acp.PromptResult{Text: "好的"}, nil)
@@ -150,8 +160,79 @@ func TestWikiCoordinatorUsesCompanionAndCommitsFrozenCursor(t *testing.T) {
 	if !strings.Contains(call.Text, "seq: (0, 3]") || !strings.Contains(call.Text, "acp-source.jsonl") {
 		t.Fatalf("companion prompt = %q", call.Text)
 	}
+	if !strings.Contains(traceInitialProcess, "sid: acp-wiki-companion") || strings.Contains(traceInitialProcess, "sid: acp-source") {
+		t.Fatalf("trace initial process = %q, want companion sid and not source sid", traceInitialProcess)
+	}
+	if !strings.Contains(traceInitialProcess, "msg: wiki\\_acp-source\\_0\\_3") {
+		t.Fatalf("trace initial process = %q, want source trace message id", traceInitialProcess)
+	}
+	got, binding, ok := store.SessionForMessage("bot-a", "oc_trace", "om_wiki_trace")
+	if !ok {
+		t.Fatalf("SessionForMessage(wiki trace card) ok=false binding=%+v", binding)
+	}
+	if got.Key != session.Key || got.ACPSessionID != session.ACPSessionID {
+		t.Fatalf("bound session = %+v, want source session %+v", got, session)
+	}
 	if runtime.promptCallCount() != 0 {
 		t.Fatalf("ordinary prompt calls = %d, want no original-session wiki prompt", runtime.promptCallCount())
+	}
+}
+
+func TestWikiCoordinatorTraceUpdatesSIDAfterCompanionRecreate(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
+	cfg.Bots[0].WikiTrace = config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"}
+	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+	svc := newTestService(cfg, store)
+	runtime := &fakeRuntime{
+		newSessionID: "acp-wiki-new",
+		promptReply:  "NoReply",
+		promptErrors: []error{errACPSessionUnavailable},
+	}
+	svc.setRuntime(runtime)
+	var traceInitialProcess string
+	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}}
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		traceInitialProcess = options.InitialProcess
+		return card, nil
+	}
+	session := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
+		AgentName:    "traex",
+		ACPSessionID: "acp-source",
+		Workspace:    workspace,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert(source session) error = %v", err)
+	}
+	recorder := svc.newTraceRecorderForPrompt(session, feishu.Message{MessageID: "om-1"}, "请记住方案", true)
+	recorder.Complete(acp.PromptResult{Text: "好的"}, nil)
+	coordinator := svc.wikiCoordinator("bot-a")
+	t.Cleanup(coordinator.stop)
+	if err := coordinator.state.update(func(state *wikiState) {
+		state.Companions["traex"] = wikiCompanionState{AgentName: "traex", ACPSessionID: "acp-wiki-old"}
+	}); err != nil {
+		t.Fatalf("save old companion state error = %v", err)
+	}
+	coordinator.cancelSource(session.ACPSessionID, false)
+
+	if err := coordinator.runSource(context.Background(), session.ACPSessionID); err != nil {
+		t.Fatalf("runSource() error = %v", err)
+	}
+
+	if !strings.Contains(traceInitialProcess, "sid: acp-wiki-old") {
+		t.Fatalf("trace initial process = %q, want old companion sid before recreate", traceInitialProcess)
+	}
+	process := strings.Join(card.processUpdatesSnapshot(), "\n")
+	if !strings.Contains(process, "sid: acp-wiki-new") || strings.Contains(process, "sid: acp-source") {
+		t.Fatalf("process updates = %q, want recreated companion sid and not source sid", process)
+	}
+	calls := runtime.wikiRuntimeCallsSnapshot()
+	if len(calls) != 2 || calls[0].Session.ACPSessionID != "acp-wiki-old" || calls[1].Session.ACPSessionID != "acp-wiki-new" {
+		t.Fatalf("wiki runtime calls = %+v, want old companion then recreated companion", calls)
 	}
 }
 
@@ -352,24 +433,29 @@ func TestPendingAtAutoDrainPromptDoesNotTriggerWikiCoordinator(t *testing.T) {
 		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
 		AgentName:    "traex",
 		ACPSessionID: "acp-source",
+		Cwd:          t.TempDir(),
 		Workspace:    workspace,
 	}
 
-	run := svc.runUserPromptWithOptionsDetailed(context.Background(), feishu.Message{
+	result, err := svc.runAtAutoCompanionPrompt(context.Background(), feishu.Message{
 		BotID:     "bot-a",
 		ChatID:    "oc-chat",
+		ChatType:  "group",
 		MessageID: "om-auto",
 		Workspace: workspace,
-	}, session, config.AgentConfig{}, "请判断是否需要回复", atAutoPromptTaskOptions())
-	if run.err != nil {
-		t.Fatalf("runUserPromptWithOptionsDetailed() error = %v", run.err)
+	}, session, config.AgentConfig{}, "请判断是否需要回复")
+	if err != nil {
+		t.Fatalf("runAtAutoCompanionPrompt() error = %v", err)
 	}
-	path := filepath.Join(workspace, ".local", "traces", "acp-source.jsonl")
+	if result.Text != "SILENT" {
+		t.Fatalf("result = %+v, want SILENT", result)
+	}
+	path := filepath.Join(workspace, ".local", "traces", "acp-session.jsonl")
 	if records := readTraceRecords(t, path); len(records) == 0 {
-		t.Fatal("pending at-auto prompt should still write trace records")
+		t.Fatal("at-auto companion prompt should still write trace records")
 	}
 	if _, ok := svc.wikiCoordinator("bot-a").state.snapshot().Sources[session.ACPSessionID]; ok {
-		t.Fatal("pending at-auto drain should not create wiki source state")
+		t.Fatal("at-auto companion prompt should not create wiki source state")
 	}
 	svc.wikiCoordinator("bot-a").stop()
 }
@@ -434,7 +520,7 @@ func TestAtAutoDirectMessageTriggersWikiCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := newTestService(cfg, store)
-	svc.setRuntime(&fakeRuntime{promptReply: "需要处理"})
+	svc.setRuntime(&fakeRuntime{promptResults: []acp.PromptResult{{Text: "RESPOND"}, {Text: "需要处理"}}})
 	t.Cleanup(func() { svc.wikiCoordinator("bot-a").stop() })
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
@@ -454,6 +540,55 @@ func TestAtAutoDirectMessageTriggersWikiCoordinator(t *testing.T) {
 	source := svc.wikiCoordinator("bot-a").state.snapshot().Sources[session.ACPSessionID]
 	if source.LastCompleteSeq == 0 || source.DueAt.IsZero() {
 		t.Fatalf("source = %+v, want direct at-auto prompt scheduled for wiki", source)
+	}
+}
+
+func TestAtAutoCompanionSilentDoesNotTriggerWikiCoordinator(t *testing.T) {
+	workspace := t.TempDir()
+	markWorkspaceBootstrapped(t, workspace)
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
+	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+	session := Session{
+		Key:               normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
+		AgentName:         "traex",
+		ACPSessionID:      "acp-source",
+		Cwd:               t.TempDir(),
+		Workspace:         workspace,
+		WorkspacePrompted: true,
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertChat(ChatConfig{
+		Key:             ChatKey{BotID: "bot-a", ChatID: "oc-chat"},
+		MentionOptional: true,
+		AtMode:          atModeAuto,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(&fakeRuntime{promptReply: "SILENT"})
+	t.Cleanup(func() { svc.wikiCoordinator("bot-a").stop() })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc-chat",
+		ChatType:  "group",
+		MessageID: "om-direct-auto-silent",
+		Text:      "路过闲聊",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent", reply)
+	}
+	if _, ok := svc.wikiCoordinator("bot-a").state.snapshot().Sources[session.ACPSessionID]; ok {
+		t.Fatal("silent at-auto companion decision should not create source wiki state")
 	}
 }
 

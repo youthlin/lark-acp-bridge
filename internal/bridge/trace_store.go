@@ -86,6 +86,9 @@ type traceRecord struct {
 	Name          string                 `json:"name,omitempty"`
 	Kind          string                 `json:"kind,omitempty"`
 	Status        string                 `json:"status,omitempty"`
+	Stage         string                 `json:"stage,omitempty"`
+	Method        string                 `json:"method,omitempty"`
+	RequestID     string                 `json:"request_id,omitempty"`
 	Input         json.RawMessage        `json:"input,omitempty"`
 	Output        json.RawMessage        `json:"output,omitempty"`
 	Entries       []acp.PlanEntry        `json:"entries,omitempty"`
@@ -101,6 +104,9 @@ type traceRecord struct {
 	RawUpdate     json.RawMessage        `json:"raw_update,omitempty"`
 	RawResult     json.RawMessage        `json:"raw_result,omitempty"`
 	Error         string                 `json:"error,omitempty"`
+	Cause         string                 `json:"cause,omitempty"`
+	Elapsed       string                 `json:"elapsed,omitempty"`
+	Wait          string                 `json:"wait,omitempty"`
 	Interrupted   bool                   `json:"interrupted,omitempty"`
 }
 
@@ -315,11 +321,12 @@ func traceLineKeptAfterCompaction(line []byte) bool {
 	var record struct {
 		Type    string `json:"type"`
 		IsFinal bool   `json:"is_final,omitempty"`
+		Stage   string `json:"stage,omitempty"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(line), &record); err != nil {
 		return false
 	}
-	return traceRecordKeptAfterCompaction(traceRecord{Type: record.Type, IsFinal: record.IsFinal})
+	return traceRecordKeptAfterCompaction(traceRecord{Type: record.Type, IsFinal: record.IsFinal, Stage: record.Stage})
 }
 
 func traceRecordKeptAfterCompaction(record traceRecord) bool {
@@ -330,9 +337,23 @@ func traceRecordKeptAfterCompaction(record traceRecord) bool {
 		return record.IsFinal
 	case "turn_result", "error":
 		return true
+	case "lifecycle":
+		return traceLifecycleRecordKeptAfterCompaction(record)
 	default:
 		return false
 	}
+}
+
+func traceLifecycleRecordKeptAfterCompaction(record traceRecord) bool {
+	stage := strings.TrimSpace(record.Stage)
+	return strings.HasPrefix(stage, "timeout_") ||
+		stage == "request_write_failed" ||
+		stage == "context_done" ||
+		stage == "cancel_sent" ||
+		stage == "cancel_send_failed" ||
+		stage == "cancel_wait_started" ||
+		stage == "cancel_wait_finished" ||
+		stage == "cancel_wait_timeout"
 }
 
 func (s *traceStore) pruneLocked(now time.Time) {
@@ -389,9 +410,15 @@ func normalizeTraceRecord(session Session, record traceRecord) traceRecord {
 	record.Name = strings.TrimSpace(record.Name)
 	record.Kind = strings.TrimSpace(record.Kind)
 	record.Status = strings.TrimSpace(record.Status)
+	record.Stage = strings.TrimSpace(record.Stage)
+	record.Method = strings.TrimSpace(record.Method)
+	record.RequestID = strings.TrimSpace(record.RequestID)
 	record.UpdateKind = strings.TrimSpace(record.UpdateKind)
 	record.StopReason = strings.TrimSpace(record.StopReason)
 	record.Error = strings.TrimSpace(record.Error)
+	record.Cause = strings.TrimSpace(record.Cause)
+	record.Elapsed = strings.TrimSpace(record.Elapsed)
+	record.Wait = strings.TrimSpace(record.Wait)
 	return record
 }
 
@@ -556,6 +583,13 @@ func tracePromptOptions(recorder *traceRecorder, opts acp.PromptOptions) acp.Pro
 			onUpdate(update)
 		}
 	}
+	onLifecycle := opts.OnLifecycle
+	opts.OnLifecycle = func(event acp.PromptLifecycleEvent) {
+		recorder.OnLifecycle(event)
+		if onLifecycle != nil {
+			onLifecycle(event)
+		}
+	}
 	return opts
 }
 
@@ -620,6 +654,42 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 			r.recordProcessUpdate(traceRecordTypeForUpdate(kind), kind, u)
 		}
 	}
+}
+
+func (r *traceRecorder) OnLifecycle(event acp.PromptLifecycleEvent) {
+	if r == nil {
+		return
+	}
+	stage := strings.TrimSpace(event.Stage)
+	if stage == "" {
+		return
+	}
+	record := traceRecord{
+		Type:      "lifecycle",
+		Stage:     stage,
+		Method:    strings.TrimSpace(event.Method),
+		RequestID: strings.TrimSpace(event.RequestID),
+	}
+	if !event.At.IsZero() {
+		record.TS = traceTimestamp(event.At)
+	}
+	if event.Elapsed > 0 {
+		record.Elapsed = event.Elapsed.String()
+	}
+	if event.WaitDuration > 0 {
+		record.Wait = event.WaitDuration.String()
+	}
+	if event.Err != nil {
+		record.Error = event.Err.Error()
+	}
+	if event.Cause != nil {
+		cause := event.Cause.Error()
+		if cause != record.Error {
+			record.Cause = cause
+		}
+	}
+	r.flushProcessUpdates()
+	r.append(record)
 }
 
 func (r *traceRecorder) Complete(result acp.PromptResult, err error) uint64 {

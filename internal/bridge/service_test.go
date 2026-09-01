@@ -4442,6 +4442,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 
 	rt.mu.Lock()
 	rt.promptCalls = nil
+	rt.atAutoRuntimeCalls = nil
 	rt.promptResults = []acp.PromptResult{
 		{Text: "Context compacted Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.SILENT"},
 		{Text: "需要回复"},
@@ -4471,24 +4472,33 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want SILENT suppressed in auto mode", reply)
 	}
-	if len(rt.promptCalls) != 1 {
-		t.Fatalf("promptCalls = %+v, want one prompt after /at off auto", rt.promptCalls)
+	rt.mu.Lock()
+	autoCalls := append([]fakePromptCall(nil), rt.atAutoRuntimeCalls...)
+	promptCalls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if len(promptCalls) != 0 {
+		t.Fatalf("promptCalls = %+v, want no main prompt for SILENT auto mode decision", promptCalls)
+	}
+	if len(autoCalls) != 1 {
+		t.Fatalf("atAutoRuntimeCalls = %+v, want one companion decision after /at off auto", autoCalls)
 	}
 	if len(cards) != 0 {
-		t.Fatalf("cards = %+v, want no stream card for SILENT auto mode prompt", cards)
+		t.Fatalf("cards = %+v, want no stream card for SILENT auto mode decision", cards)
 	}
-	rt.mu.Lock()
-	autoPrompt := rt.promptCalls[0].Text
-	rt.mu.Unlock()
+	autoPrompt := autoCalls[0].Text
 	for _, want := range []string{
-		"## 群聊自动响应判断",
-		"当前群聊已启用 /at off auto",
+		"# 群聊自动响应判断",
+		"at-auto 伴生判断会话",
 		"最终只输出 SILENT",
+		"最终只输出 RESPOND",
 		"路过闲聊",
 	} {
 		if !strings.Contains(autoPrompt, want) {
 			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
 		}
+	}
+	if autoCalls[0].Runtime.Scope != runtimeScopeAtAuto {
+		t.Fatalf("auto runtime = %+v, want at-auto companion scope", autoCalls[0].Runtime)
 	}
 
 	rt.mu.Lock()
@@ -4511,6 +4521,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	}
 	rt.mu.Lock()
 	mentionPrompt := rt.promptCalls[len(rt.promptCalls)-1].Text
+	promptCallCountAfterMention := len(rt.promptCalls)
 	rt.mu.Unlock()
 	for _, want := range []string{
 		"## 群聊明确提及",
@@ -4551,7 +4562,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	}
 
 	rt.mu.Lock()
-	rt.promptResults = []acp.PromptResult{{Text: "需要回复"}}
+	rt.promptResults = []acp.PromptResult{{Text: "RESPOND"}, {Text: "需要回复"}}
 	rt.mu.Unlock()
 	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     msg.BotID,
@@ -4566,8 +4577,22 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want empty final reply because delayed auto card was sent", reply)
 	}
-	if len(rt.promptCalls) != 4 {
-		t.Fatalf("promptCalls = %+v, want second auto prompt", rt.promptCalls)
+	rt.mu.Lock()
+	autoCalls = append([]fakePromptCall(nil), rt.atAutoRuntimeCalls...)
+	promptCalls = append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if len(autoCalls) != 2 {
+		t.Fatalf("atAutoRuntimeCalls = %+v, want two companion decisions", autoCalls)
+	}
+	if len(promptCalls) != promptCallCountAfterMention+2 {
+		t.Fatalf("promptCalls = %+v, want mention prompts plus one main auto response", promptCalls)
+	}
+	mainAutoPrompt := promptCalls[len(promptCalls)-1].Text
+	if strings.Contains(mainAutoPrompt, "群聊自动响应判断") || strings.Contains(mainAutoPrompt, "最终只输出 SILENT") {
+		t.Fatalf("main auto prompt = %q, should not contain auto decision rules", mainAutoPrompt)
+	}
+	if !strings.Contains(mainAutoPrompt, "这个可能需要回复") {
+		t.Fatalf("main auto prompt = %q, want original user text", mainAutoPrompt)
 	}
 	if len(cards) != 1 {
 		t.Fatalf("cards = %+v, want one delayed auto stream card when reply is needed", cards)
@@ -4638,7 +4663,7 @@ func TestHandleFeishuGroupChatAtCommandConfiguresMentionRequirement(t *testing.T
 	if reply != "" {
 		t.Fatalf("reply = %q, want silent ignore after /at on", reply)
 	}
-	if len(rt.promptCalls) != 4 {
+	if len(rt.promptCalls) != len(promptCalls) {
 		t.Fatalf("promptCalls = %+v, want no extra prompt after /at on", rt.promptCalls)
 	}
 }
@@ -4652,7 +4677,7 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
 		newSessionID:  "acp-session-1",
-		promptResults: []acp.PromptResult{{Text: "正常回复"}, {Text: "需要回复一次"}},
+		promptResults: []acp.PromptResult{{Text: "正常回复"}, {Text: "RESPOND"}, {Text: "需要回复一次"}},
 		blockPrompt:   make(chan struct{}),
 		blockPromptAt: 1,
 	}
@@ -4737,26 +4762,42 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("mention prompt did not finish")
 	}
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	waitForCondition(t, time.Second, func() bool { return rt.atAutoRuntimeCallCount() == 1 && rt.promptCallCount() == 2 })
 	rt.mu.Lock()
 	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	autoCalls := append([]fakePromptCall(nil), rt.atAutoRuntimeCalls...)
 	rt.mu.Unlock()
 	if len(calls) != 2 {
-		t.Fatalf("promptCalls = %+v, want mention prompt and one batched auto prompt", calls)
+		t.Fatalf("promptCalls = %+v, want mention prompt and one batched auto response prompt", calls)
+	}
+	if len(autoCalls) != 1 {
+		t.Fatalf("atAutoRuntimeCalls = %+v, want one batched auto companion decision", autoCalls)
 	}
 	if !intermediate.equal([]string{"需要回复一次"}) {
 		t.Fatal("intermediate replies should contain one batched auto reply")
 	}
-	autoPrompt := calls[1].Text
+	autoDecisionPrompt := autoCalls[0].Text
 	for _, want := range []string{
-		"## 群聊自动响应判断",
+		"# 群聊自动响应判断",
+		"## 以下是待判断是否需要响应的群消息",
+		"用户(ou_b)：无 at 补充 1",
+		"用户(ou_c)：无 at 补充 2",
+		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
+	} {
+		if !strings.Contains(autoDecisionPrompt, want) {
+			t.Fatalf("auto decision prompt = %q, want %q", autoDecisionPrompt, want)
+		}
+	}
+	autoResponsePrompt := calls[1].Text
+	for _, want := range []string{
+		"## 群聊未 at 消息",
 		"## 以下是待判断是否需要响应的群消息",
 		"用户(ou_b)：无 at 补充 1",
 		"用户(ou_c)：无 at 补充 2",
 		"请只回复一次",
 	} {
-		if !strings.Contains(autoPrompt, want) {
-			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
+		if !strings.Contains(autoResponsePrompt, want) {
+			t.Fatalf("auto response prompt = %q, want %q", autoResponsePrompt, want)
 		}
 	}
 }
@@ -4769,10 +4810,11 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	agent.DefaultCwd = workDir
 	cfg.SetAgent("traex", agent)
 	rt := &fakeRuntime{
-		newSessionID:  "acp-session-1",
-		promptResults: []acp.PromptResult{{Text: "SILENT"}, {Text: "第二轮回复"}},
-		blockPrompt:   make(chan struct{}),
-		blockPromptAt: 1,
+		newSessionID:     "acp-session-1",
+		promptResults:    []acp.PromptResult{{Text: "SILENT"}, {Text: "RESPOND"}, {Text: "第二轮回复"}},
+		blockPrompt:      make(chan struct{}),
+		blockPromptAt:    1,
+		blockPromptScope: runtimeScopeAtAuto,
 	}
 	svc := NewService(cfg, store)
 	svc.setRuntime(rt)
@@ -4799,7 +4841,7 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 			err   error
 		}{reply: reply, err: err}
 	}()
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	waitForCondition(t, time.Second, func() bool { return rt.atAutoRuntimeCallCount() == 1 })
 
 	for _, msg := range []feishu.Message{
 		{
@@ -4827,8 +4869,11 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 			t.Fatalf("reply = %q, want queued auto prompt to stay silent", reply)
 		}
 	}
-	if got := rt.promptCallCount(); got != 1 {
-		t.Fatalf("prompt calls = %d, want later auto messages queued while first auto prompt runs", got)
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no main prompts while first auto decision runs", got)
+	}
+	if got := rt.atAutoRuntimeCallCount(); got != 1 {
+		t.Fatalf("at-auto calls = %d, want later auto messages queued while first auto decision runs", got)
 	}
 	if got := rt.cancelCallCount(); got != 0 {
 		t.Fatalf("cancel calls = %d, want queued auto messages not to cancel running auto prompt", got)
@@ -4845,23 +4890,84 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first auto prompt did not finish")
 	}
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
+	waitForCondition(t, time.Second, func() bool { return rt.atAutoRuntimeCallCount() == 2 && rt.promptCallCount() == 1 })
 	rt.mu.Lock()
 	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	autoCalls := append([]fakePromptCall(nil), rt.atAutoRuntimeCalls...)
 	rt.mu.Unlock()
-	if len(calls) != 2 {
-		t.Fatalf("promptCalls = %+v, want original auto prompt and one batched auto prompt", calls)
+	if len(autoCalls) != 2 {
+		t.Fatalf("atAutoRuntimeCalls = %+v, want original and batched auto companion decisions", autoCalls)
 	}
-	autoPrompt := calls[1].Text
+	if len(calls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one batched main auto response prompt", calls)
+	}
+	autoPrompt := autoCalls[1].Text
 	for _, want := range []string{
-		"## 群聊自动响应判断",
+		"# 群聊自动响应判断",
 		"## 以下是待判断是否需要响应的群消息",
 		"用户(ou_b)：无 at 第二条",
 		"用户(ou_c)：无 at 第三条",
-		"请只回复一次",
+		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
 	} {
 		if !strings.Contains(autoPrompt, want) {
 			t.Fatalf("auto prompt = %q, want %q", autoPrompt, want)
+		}
+	}
+	mainPrompt := calls[0].Text
+	if strings.Contains(mainPrompt, "群聊自动响应判断") || strings.Contains(mainPrompt, "最终只输出 SILENT") {
+		t.Fatalf("main prompt = %q, should not contain auto decision rules", mainPrompt)
+	}
+}
+
+func TestHandleFeishuGroupChatAtAutoRespondsViaMainSessionAfterCompanionDecision(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID:  "acp-session-1",
+		promptResults: []acp.PromptResult{{Text: "RESPOND"}, {Text: "主会话回复"}},
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := ChatKey{BotID: "bot-a", ChatID: "oc_group"}
+	if err := store.UpsertChat(ChatConfig{Key: key, MentionOptional: true, AtMode: atModeAuto}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_auto_respond",
+		ChatID:    key.ChatID,
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "这条需要你处理",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "主会话回复" {
+		t.Fatalf("reply = %q, want main session reply", reply)
+	}
+	autoCalls := rt.atAutoRuntimeCallsSnapshot()
+	if len(autoCalls) != 1 || autoCalls[0].Runtime.Scope != runtimeScopeAtAuto {
+		t.Fatalf("atAutoRuntimeCalls = %+v, want one companion decision", autoCalls)
+	}
+	mainCalls := rt.promptCallsSnapshot()
+	if len(mainCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one main session prompt", mainCalls)
+	}
+	if !strings.Contains(autoCalls[0].Text, "最终只输出 RESPOND") || !strings.Contains(autoCalls[0].Text, "这条需要你处理") {
+		t.Fatalf("companion prompt = %q, want decision rules and user text", autoCalls[0].Text)
+	}
+	if !strings.Contains(mainCalls[0].Text, "这条需要你处理") {
+		t.Fatalf("main prompt = %q, want original user text", mainCalls[0].Text)
+	}
+	for _, unexpected := range []string{"群聊自动响应判断", "最终只输出 SILENT", "最终只输出 RESPOND"} {
+		if strings.Contains(mainCalls[0].Text, unexpected) {
+			t.Fatalf("main prompt = %q, should not contain %q", mainCalls[0].Text, unexpected)
 		}
 	}
 }
@@ -4966,47 +5072,52 @@ func TestHandleFeishuGroupChatAtAutoUsesFinalTextAfterLastToolInDelayedStreamCar
 	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
 	cfg.SetAgent("traex", agent)
+	updates := []acp.PromptUpdate{
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "我会查成员。"},
+			},
+		},
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "List chat members",
+			},
+		},
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "接口是只读的。"},
+			},
+		},
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Fetch all pages",
+			},
+		},
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "能查。当前群有 5 个成员。"},
+			},
+		},
+	}
 	rt := &fakeRuntime{
 		newSessionID: "acp-session-1",
-		promptResult: acp.PromptResult{
-			Text: "我会查成员。\n接口是只读的。\n能查。当前群有 5 个成员。",
+		promptResults: []acp.PromptResult{
+			{Text: "RESPOND"},
+			{Text: "我会查成员。\n接口是只读的。\n能查。当前群有 5 个成员。"},
 		},
-		promptUpdates: []acp.PromptUpdate{
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "agent_message_chunk",
-					Content:       &acp.ContentBlock{Type: "text", Text: "我会查成员。"},
-				},
-			},
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "tool_call",
-					Title:         "List chat members",
-				},
-			},
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "agent_message_chunk",
-					Content:       &acp.ContentBlock{Type: "text", Text: "接口是只读的。"},
-				},
-			},
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "tool_call",
-					Title:         "Fetch all pages",
-				},
-			},
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "agent_message_chunk",
-					Content:       &acp.ContentBlock{Type: "text", Text: "能查。当前群有 5 个成员。"},
-				},
-			},
+		promptUpdatesByCall: [][]acp.PromptUpdate{
+			nil,
+			updates,
 		},
 	}
 	svc := NewService(cfg, store)
@@ -5068,19 +5179,24 @@ func TestHandleFeishuGroupChatAtAutoSuppressesExplicitEmptyFinalText(t *testing.
 	agent := mustConfigAgent(t, cfg, "traex")
 	agent.DefaultCwd = workDir
 	cfg.SetAgent("traex", agent)
+	updates := []acp.PromptUpdate{
+		{
+			SessionID: "acp-session-1",
+			Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				Title:         "Check context",
+			},
+		},
+	}
 	rt := &fakeRuntime{
 		newSessionID: "acp-session-1",
-		promptResult: acp.PromptResult{
-			Text: "raw result should not be sent",
+		promptResults: []acp.PromptResult{
+			{Text: "RESPOND"},
+			{Text: "raw result should not be sent"},
 		},
-		promptUpdates: []acp.PromptUpdate{
-			{
-				SessionID: "acp-session-1",
-				Update: acp.SessionUpdate{
-					SessionUpdate: "tool_call",
-					Title:         "Check context",
-				},
-			},
+		promptUpdatesByCall: [][]acp.PromptUpdate{
+			nil,
+			updates,
 		},
 	}
 	svc := NewService(cfg, store)
@@ -11664,6 +11780,7 @@ type fakeRuntime struct {
 	permissionOutcome      acp.PermissionOutcome
 	blockPrompt            chan struct{}
 	blockPromptAt          int
+	blockPromptScope       string
 	blockAfterPromptCancel bool
 	promptResult           acp.PromptResult
 	promptResults          []acp.PromptResult
@@ -11673,6 +11790,7 @@ type fakeRuntime struct {
 	newCalls               []fakeNewCall
 	promptCalls            []fakePromptCall
 	wikiRuntimeCalls       []fakePromptCall
+	atAutoRuntimeCalls     []fakePromptCall
 	cancelCalls            []fakeCancelCall
 	callSeq                int
 	blockCancel            chan struct{}
@@ -11689,6 +11807,7 @@ type fakeRuntime struct {
 }
 
 type fakeNewCall struct {
+	Runtime   runtimeKey
 	Key       SessionKey
 	AgentName string
 	Cwd       string
@@ -11729,8 +11848,9 @@ func (f *fakeRuntime) NewSession(ctx context.Context, key SessionKey, agentName 
 
 func (f *fakeRuntime) NewSessionWithRuntimeKey(ctx context.Context, runtime runtimeKey, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error) {
 	key = normalizeSessionKey(key)
+	runtime = normalizeRuntimeKey(runtime)
 	f.mu.Lock()
-	f.newCalls = append(f.newCalls, fakeNewCall{Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
+	f.newCalls = append(f.newCalls, fakeNewCall{Runtime: runtime, Key: key, AgentName: agentName, Cwd: cwd, Workspace: workspace})
 	if f.newSessionError != nil {
 		err := f.newSessionError
 		f.mu.Unlock()
@@ -11808,16 +11928,16 @@ func (c *fakeSessionCandidate) Abort() {
 
 func (f *fakeRuntime) Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	session.Key = normalizeSessionKey(session.Key)
-	return f.prompt(ctx, currentRuntimeKey(session.Key), session, text, opts, false)
+	return f.prompt(ctx, currentRuntimeKey(session.Key), session, text, opts, runtimeScopeCurrent)
 }
 
 func (f *fakeRuntime) PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
-	return f.prompt(ctx, key, session, text, opts, key.Scope == runtimeScopeWiki || key.Scope == runtimeScopeWikiCompanion)
+	return f.prompt(ctx, key, session, text, opts, key.Scope)
 }
 
-func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Session, text string, opts acp.PromptOptions, wiki bool) (acp.PromptResult, error) {
+func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Session, text string, opts acp.PromptOptions, scope string) (acp.PromptResult, error) {
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
 	f.mu.Lock()
@@ -11830,12 +11950,15 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 		HasPermissionHandler: opts.OnPermissionRequest != nil,
 		Seq:                  f.nextCallSeqLocked(),
 	}
-	if wiki {
+	switch scope {
+	case runtimeScopeWiki, runtimeScopeWikiCompanion:
 		f.wikiRuntimeCalls = append(f.wikiRuntimeCalls, call)
-	} else {
+	case runtimeScopeAtAuto:
+		f.atAutoRuntimeCalls = append(f.atAutoRuntimeCalls, call)
+	default:
 		f.promptCalls = append(f.promptCalls, call)
 	}
-	callNumber := len(f.promptCalls)
+	callNumber := len(f.promptCalls) + len(f.atAutoRuntimeCalls)
 	updates := append([]acp.PromptUpdate(nil), f.promptUpdates...)
 	if len(f.promptUpdatesByCall) > 0 {
 		updates = append([]acp.PromptUpdate(nil), f.promptUpdatesByCall[0]...)
@@ -11843,7 +11966,9 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	}
 	afterUpdates := f.afterUpdates
 	blockPrompt := f.blockPrompt
-	blockThisPrompt := blockPrompt != nil && (f.blockPromptAt == 0 || f.blockPromptAt == callNumber)
+	blockThisPrompt := blockPrompt != nil &&
+		(f.blockPromptAt == 0 || f.blockPromptAt == callNumber) &&
+		(f.blockPromptScope == "" || f.blockPromptScope == scope)
 	blockWikiRuntime := f.blockWikiRuntime
 	result := f.promptResult
 	if len(f.promptResults) > 0 {
@@ -11873,7 +11998,7 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 		f.permissionOutcome = outcome
 		f.mu.Unlock()
 	}
-	if wiki && blockWikiRuntime != nil {
+	if (scope == runtimeScopeWiki || scope == runtimeScopeWikiCompanion) && blockWikiRuntime != nil {
 		select {
 		case <-ctx.Done():
 			return acp.PromptResult{}, ctx.Err()
@@ -12046,6 +12171,24 @@ func (f *fakeRuntime) wikiRuntimeCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.wikiRuntimeCalls)
+}
+
+func (f *fakeRuntime) wikiRuntimeCallsSnapshot() []fakePromptCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakePromptCall(nil), f.wikiRuntimeCalls...)
+}
+
+func (f *fakeRuntime) atAutoRuntimeCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.atAutoRuntimeCalls)
+}
+
+func (f *fakeRuntime) atAutoRuntimeCallsSnapshot() []fakePromptCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakePromptCall(nil), f.atAutoRuntimeCalls...)
 }
 
 func (f *fakeRuntime) cancelCallCount() int {

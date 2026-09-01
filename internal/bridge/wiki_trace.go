@@ -20,6 +20,7 @@ const (
 type wikiTraceObserver struct {
 	message        feishu.Message
 	session        Session
+	streamSession  Session
 	show           ChatConfig
 	store          *SessionStore
 	starter        scheduledTaskStreamStarter
@@ -40,21 +41,24 @@ func wikiTracePromptOptions(observer *wikiTraceObserver) acp.PromptOptions {
 }
 
 func (s *Service) wikiTraceObserver(session Session, generation int64) *wikiTraceObserver {
-	return s.newWikiTraceObserver(session, wikiTraceMessageID(session, generation))
+	return s.newWikiTraceObserver(session, session, wikiTraceMessageID(session, generation))
 }
 
-func (s *Service) wikiTraceObserverForJob(session Session, job wikiJob) *wikiTraceObserver {
-	observer := s.newWikiTraceObserver(session, wikiJobTraceMessageID(job))
+func (s *Service) wikiTraceObserverForJob(source Session, execution Session, job wikiJob) *wikiTraceObserver {
+	observer := s.newWikiTraceObserver(source, execution, wikiJobTraceMessageID(job))
 	if observer != nil {
 		observer.job = &job
 	}
 	return observer
 }
 
-func (s *Service) newWikiTraceObserver(session Session, traceMessageID string) *wikiTraceObserver {
+func (s *Service) newWikiTraceObserver(session Session, streamSession Session, traceMessageID string) *wikiTraceObserver {
 	bot, ok := s.botConfig(session.Key.BotID)
 	if !ok || !bot.WikiTrace.Enabled || strings.TrimSpace(bot.WikiTrace.ChatID) == "" {
 		return nil
+	}
+	if strings.TrimSpace(streamSession.ACPSessionID) == "" {
+		streamSession = session
 	}
 	msg := feishu.Message{
 		BotID:     session.Key.BotID,
@@ -64,6 +68,7 @@ func (s *Service) newWikiTraceObserver(session Session, traceMessageID string) *
 	return &wikiTraceObserver{
 		message:        msg,
 		session:        session,
+		streamSession:  streamSession,
 		show:           s.chatConfigForMessage(msg),
 		store:          s.storeForBotID(session.Key.BotID),
 		starter:        s.scheduleStreamStarter(session.Key.BotID),
@@ -105,6 +110,16 @@ func (o *wikiTraceObserver) streamContext() context.Context {
 		return o.stream.ctx
 	}
 	return context.Background()
+}
+
+func (o *wikiTraceObserver) setStreamSession(ctx context.Context, session Session) {
+	if o == nil || strings.TrimSpace(session.ACPSessionID) == "" {
+		return
+	}
+	o.streamSession = session
+	if o.stream != nil {
+		o.stream.setSessionWithContext(ctx, session)
+	}
 }
 
 func (o *wikiTraceObserver) complete(ctx context.Context, result acp.PromptResult, err error) {
@@ -160,7 +175,7 @@ func (o *wikiTraceObserver) ensureStream(ctx context.Context) *promptCardStream 
 	if o.starter == nil || strings.TrimSpace(o.message.ChatID) == "" {
 		return nil
 	}
-	stream := newPromptCardStream(ctx, o.message, o.session, o.show, streamCardStarterFunc(o.starter))
+	stream := newPromptCardStream(ctx, o.message, o.streamSession, o.show, streamCardStarterFunc(o.starter))
 	stream.setProcessMessageID(o.traceMessageID)
 	stream.setInitialMeta(o.streamCardMeta(wikiTraceCardRunning))
 	card := stream.ensureCardWithContext(ctx)

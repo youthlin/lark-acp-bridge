@@ -41,6 +41,7 @@ type serviceStores struct {
 	usageStores            map[string]*TokenUsageStore
 	traceStoreMu           sync.RWMutex
 	traceStores            map[string]*traceStore
+	companionStateStores   map[string]*wikiStateStore // key=规范化 workspace 路径
 	wikiCoordinators       map[string]*wikiCoordinator
 }
 
@@ -61,6 +62,7 @@ type serviceTasks struct {
 	acpErrors       map[SessionKey]acpErrorSnapshot
 	pendingAtTexts  map[ChatKey][]pendingAtMessage
 	pendingAtAuto   map[SessionKey][]pendingAtMessage
+	atAutoFlows     map[SessionKey]bool
 	promptQueues    map[SessionKey]*promptQueue
 }
 
@@ -92,6 +94,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
 			usageStores:            make(map[string]*TokenUsageStore),
 			traceStores:            make(map[string]*traceStore),
+			companionStateStores:   make(map[string]*wikiStateStore),
 			wikiCoordinators:       make(map[string]*wikiCoordinator),
 		},
 		serviceOutbounds: serviceOutbounds{
@@ -108,6 +111,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			acpErrors:       make(map[SessionKey]acpErrorSnapshot),
 			pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
 			pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
+			atAutoFlows:     make(map[SessionKey]bool),
 			promptQueues:    make(map[SessionKey]*promptQueue),
 		},
 		serviceScheduleRuns: serviceScheduleRuns{
@@ -135,6 +139,15 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			)
 		}
 		if strings.TrimSpace(bot.Workspace) != "" {
+			workspaceKey := normalizeWorkspaceLockPath(bot.Workspace)
+			state := s.companionStateStores[workspaceKey]
+			if state == nil {
+				state = newWikiStateStore(bot.Workspace)
+				if err := state.Load(); err != nil {
+					slog.Warn("加载 companion 状态失败", "bot", displayBotID(bot.ID), "错误", err)
+				}
+				s.companionStateStores[workspaceKey] = state
+			}
 			s.scheduleStores[bot.ID] = NewScheduledTaskStoreWithFallback(
 				workspaceLocalPath(bot.Workspace, "scheduled_tasks.json"),
 				workspaceLegacyPath(bot.Workspace, "scheduled_tasks.json"),
@@ -145,7 +158,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			)
 			trace := newTraceStore(bot.Workspace, bot.Trace)
 			s.setTraceStore(bot.ID, trace)
-			if coordinator := newWikiCoordinator(s, bot, trace); coordinator != nil {
+			if coordinator := newWikiCoordinator(s, bot, trace, state); coordinator != nil {
 				s.wikiCoordinators[strings.TrimSpace(bot.ID)] = coordinator
 				trace.canPrune = coordinator.canPruneTrace
 				trace.canCompact = coordinator.canPruneTrace
@@ -385,10 +398,7 @@ func firstSlashCommandName(text string) string {
 func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingPromptMessage) (string, error) {
 	promptText := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
 	if s.shouldQueueAtAutoMessage(incoming.msg) {
-		if s.queueAtAutoMessageIfBusy(incoming.msg) {
-			return "", nil
-		}
-		promptText = s.promptTextWithAtAuto(incoming.msg, promptText)
+		return s.handleAtAutoPromptMessage(ctx, incoming, promptText)
 	} else {
 		promptText = s.promptTextWithAtAutoMention(incoming.msg, promptText)
 	}

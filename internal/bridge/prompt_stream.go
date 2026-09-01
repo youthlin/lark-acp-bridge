@@ -87,6 +87,26 @@ func (s *promptCardStream) setProcessMessageID(messageID string) {
 	s.processMessageID = strings.TrimSpace(messageID)
 }
 
+func (s *promptCardStream) setSessionWithContext(ctx context.Context, session Session) {
+	if s == nil || strings.TrimSpace(session.ACPSessionID) == "" {
+		return
+	}
+	s.mu.Lock()
+	s.session = session
+	card := s.card
+	delayed := s.delayed
+	processPanelEnabled := s.showStepMessages || s.showThoughts || s.showTools
+	processText := ""
+	if card != nil && processPanelEnabled {
+		processText = s.processPanelTextLocked()
+	}
+	s.mu.Unlock()
+	if delayed || card == nil || strings.TrimSpace(processText) == "" {
+		return
+	}
+	s.queueProcessUpdateWithContext(ctx, card, processText, true)
+}
+
 func (s *promptCardStream) delayCardCreation() {
 	s.mu.Lock()
 	s.delayed = true

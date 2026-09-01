@@ -329,24 +329,6 @@ func formatPendingAtSender(senderID string) string {
 	return "用户(" + senderID + ")"
 }
 
-func (s *Service) promptTextWithAtAuto(msg feishu.Message, promptText string) string {
-	if !s.shouldHandleAtAutoMessage(msg) {
-		return promptText
-	}
-	promptText = strings.TrimSpace(promptText)
-	if promptText == "" {
-		return promptText
-	}
-	return promptWithUserMessage([]string{
-		"## 群聊自动响应判断\n" + strings.Join([]string{
-			"当前群聊已启用 /at off auto。",
-			"请先判断这条未 at bot 的群消息是否需要你回复。",
-			"如果消息与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT。",
-			"如果需要回复，请正常处理用户消息，不要解释本判断规则。",
-		}, "\n"),
-	}, promptText)
-}
-
 func (s *Service) promptTextWithAtAutoMention(msg feishu.Message, promptText string) string {
 	if !s.shouldHandleAtAutoMentionMessage(msg) {
 		return promptText
@@ -372,11 +354,14 @@ func (s *Service) queueAtAutoMessageIfBusy(msg feishu.Message) bool {
 	if strings.TrimSpace(entry.Text) == "" {
 		return false
 	}
+	key := normalizeSessionKey(sessionKeyFromMessage(msg))
 	session, ok := s.findSession(msg)
-	if !ok {
+	if ok {
+		key = normalizeSessionKey(session.Key)
+	}
+	if !key.Valid() {
 		return false
 	}
-	key := normalizeSessionKey(session.Key)
 	return s.appendPendingAtAutoMessage(key, entry)
 }
 
@@ -385,7 +370,7 @@ func (s *Service) appendPendingAtAutoMessage(key SessionKey, entry pendingAtMess
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 	task := s.tasks[key]
-	if task == nil || !task.queuePendingAtAuto {
+	if (task == nil || !task.queuePendingAtAuto) && !s.atAutoFlows[key] {
 		return false
 	}
 	pending := append(s.pendingAtAuto[key], entry)
@@ -420,22 +405,6 @@ func (s *Service) restorePendingAtAutoMessages(key SessionKey, messages []pendin
 		combined = append([]pendingAtMessage(nil), combined[len(combined)-maxPendingAtAuto:]...)
 	}
 	s.pendingAtAuto[key] = combined
-}
-
-func formatAtAutoPendingPrompt(messages []pendingAtMessage) string {
-	history := formatPendingAtMessageBlock(pendingAtAutoHeader, messages)
-	if history == "" {
-		return ""
-	}
-	return promptWithUserMessage([]string{
-		"## 群聊自动响应判断\n" + strings.Join([]string{
-			"当前群聊已启用 /at off auto。",
-			"请判断下面这些未 at bot 的群消息是否需要你回复。",
-			"这些消息是在上一轮正常用户消息执行期间累积的，请结合当前会话上下文整体判断。",
-			"如果它们与当前会话、你的职责或正在处理的任务无关，最终只输出 SILENT。",
-			"如果需要回复，请只回复一次，综合处理这些消息，不要解释本判断规则。",
-		}, "\n"),
-	}, history)
 }
 
 func (s *Service) shouldSuppressAtAutoReply(msg feishu.Message, reply string) bool {

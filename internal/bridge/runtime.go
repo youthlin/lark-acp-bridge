@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -61,6 +62,7 @@ const (
 	runtimeScopeCurrent       = "current"
 	runtimeScopeWiki          = "wiki" // 兼容旧版 runtime key 与持久化测试。
 	runtimeScopeWikiCompanion = "wiki-companion"
+	runtimeScopeAtAuto        = "at-auto"
 )
 
 func currentRuntimeKey(key SessionKey) runtimeKey {
@@ -458,7 +460,37 @@ func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKe
 }
 
 func promptWithClient(ctx context.Context, client *acp.Client, sessionID string, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
-	timeout := newPromptActivityTimeout(ctx, acpPromptIdleTimeout, acpPromptMaxDuration)
+	startedAt := time.Now()
+	onLifecycle := opts.OnLifecycle
+	emitLifecycle := func(event acp.PromptLifecycleEvent) {
+		if event.SessionID == "" {
+			event.SessionID = sessionID
+		}
+		if event.At.IsZero() {
+			event.At = time.Now()
+		}
+		if event.Elapsed == 0 {
+			event.Elapsed = event.At.Sub(startedAt)
+		}
+		logPromptLifecycle(ctx, event)
+		if onLifecycle != nil {
+			onLifecycle(event)
+		}
+	}
+	emitLifecycle(acp.PromptLifecycleEvent{
+		Stage:     "started",
+		SessionID: sessionID,
+	})
+	timeout := newPromptActivityTimeout(ctx, acpPromptIdleTimeout, acpPromptMaxDuration, func(event promptTimeoutEvent) {
+		emitLifecycle(acp.PromptLifecycleEvent{
+			Stage:     "timeout_" + event.Reason,
+			SessionID: sessionID,
+			Err:       event.Cause,
+			Cause:     event.Cause,
+			At:        event.At,
+			Elapsed:   event.Elapsed,
+		})
+	})
 	defer timeout.Stop()
 	onUpdate := opts.OnUpdate
 	opts.OnUpdate = func(update acp.PromptUpdate) {
@@ -476,6 +508,7 @@ func promptWithClient(ctx context.Context, client *acp.Client, sessionID string,
 			return outcome, err
 		}
 	}
+	opts.OnLifecycle = emitLifecycle
 	result, err := client.PromptWithOptions(timeout.Context(), sessionID, text, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -488,30 +521,87 @@ func promptWithClient(ctx context.Context, client *acp.Client, sessionID string,
 	return result, nil
 }
 
+func logPromptLifecycle(ctx context.Context, event acp.PromptLifecycleEvent) {
+	stage := strings.TrimSpace(event.Stage)
+	if stage == "" {
+		stage = "unknown"
+	}
+	attrs := []any{
+		"session", event.SessionID,
+		"stage", stage,
+	}
+	if event.Method != "" {
+		attrs = append(attrs, "method", event.Method)
+	}
+	if event.RequestID != "" {
+		attrs = append(attrs, "request_id", event.RequestID)
+	}
+	if event.Elapsed > 0 {
+		attrs = append(attrs, "elapsed", event.Elapsed.String())
+	}
+	if event.WaitDuration > 0 {
+		attrs = append(attrs, "wait", event.WaitDuration.String())
+	}
+	if event.Cause != nil {
+		attrs = append(attrs, "cause", event.Cause)
+	}
+	if event.Err != nil {
+		attrs = append(attrs, "错误", event.Err)
+	}
+	switch {
+	case strings.HasPrefix(stage, "timeout_"):
+		slog.WarnContext(ctx, "ACP prompt 超时触发", attrs...)
+	case stage == "context_done" || stage == "cancel_wait_started" || stage == "cancel_wait_finished" || stage == "cancel_wait_timeout":
+		slog.WarnContext(ctx, "ACP prompt 取消等待状态", attrs...)
+	default:
+		slog.InfoContext(ctx, "ACP prompt 生命周期", attrs...)
+	}
+}
+
+type promptTimeoutEvent struct {
+	Reason      string
+	Cause       error
+	At          time.Time
+	Elapsed     time.Duration
+	IdleTimeout time.Duration
+	MaxDuration time.Duration
+}
+
 type promptActivityTimeout struct {
 	ctx        context.Context
 	cancel     context.CancelCauseFunc
 	mu         sync.Mutex
 	idle       time.Duration
+	max        time.Duration
+	startedAt  time.Time
 	deadline   time.Time
 	idleTimer  *time.Timer
 	maxTimer   *time.Timer
+	onExpire   func(promptTimeoutEvent)
 	idlePaused bool
 	stopped    bool
 }
 
-func newPromptActivityTimeout(parent context.Context, idleTimeout, maxDuration time.Duration) *promptActivityTimeout {
+func newPromptActivityTimeout(parent context.Context, idleTimeout, maxDuration time.Duration, onExpire ...func(promptTimeoutEvent)) *promptActivityTimeout {
 	ctx, cancel := context.WithCancelCause(parent)
+	startedAt := time.Now()
+	var expire func(promptTimeoutEvent)
+	if len(onExpire) > 0 {
+		expire = onExpire[0]
+	}
 	timeout := &promptActivityTimeout{
-		ctx:      ctx,
-		cancel:   cancel,
-		idle:     idleTimeout,
-		deadline: time.Now().Add(idleTimeout),
+		ctx:       ctx,
+		cancel:    cancel,
+		idle:      idleTimeout,
+		max:       maxDuration,
+		startedAt: startedAt,
+		deadline:  startedAt.Add(idleTimeout),
+		onExpire:  expire,
 	}
 	timeout.mu.Lock()
 	timeout.idleTimer = time.AfterFunc(idleTimeout, timeout.handleIdleTimeout)
 	timeout.maxTimer = time.AfterFunc(maxDuration, func() {
-		timeout.expire(fmt.Errorf("ACP prompt 执行超过绝对上限 %s: %w", maxDuration, context.DeadlineExceeded))
+		timeout.expire("max_duration", fmt.Errorf("ACP prompt 执行超过绝对上限 %s: %w", maxDuration, context.DeadlineExceeded))
 	})
 	timeout.mu.Unlock()
 	return timeout
@@ -569,30 +659,53 @@ func (t *promptActivityTimeout) Stop() {
 
 func (t *promptActivityTimeout) handleIdleTimeout() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.stopped {
+		t.mu.Unlock()
 		return
 	}
 	if t.idlePaused {
+		t.mu.Unlock()
 		return
 	}
 	if remaining := time.Until(t.deadline); remaining > 0 {
 		t.idleTimer.Reset(remaining)
+		t.mu.Unlock()
 		return
 	}
-	t.stopped = true
-	t.maxTimer.Stop()
-	t.cancel(fmt.Errorf("ACP prompt 连续 %s 未收到活动更新: %w", t.idle, context.DeadlineExceeded))
+	idle := t.idle
+	t.mu.Unlock()
+	t.expire("idle", fmt.Errorf("ACP prompt 连续 %s 未收到活动更新: %w", idle, context.DeadlineExceeded))
 }
 
-func (t *promptActivityTimeout) expire(cause error) {
+func (t *promptActivityTimeout) expire(reason string, cause error) {
+	var onExpire func(promptTimeoutEvent)
+	var event promptTimeoutEvent
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.stopped {
+		t.mu.Unlock()
 		return
 	}
 	t.stopped = true
-	t.idleTimer.Stop()
+	if t.idleTimer != nil {
+		t.idleTimer.Stop()
+	}
+	if t.maxTimer != nil {
+		t.maxTimer.Stop()
+	}
+	now := time.Now()
+	onExpire = t.onExpire
+	event = promptTimeoutEvent{
+		Reason:      strings.TrimSpace(reason),
+		Cause:       cause,
+		At:          now,
+		Elapsed:     now.Sub(t.startedAt),
+		IdleTimeout: t.idle,
+		MaxDuration: t.max,
+	}
+	t.mu.Unlock()
+	if onExpire != nil {
+		onExpire(event)
+	}
 	t.cancel(cause)
 }
 

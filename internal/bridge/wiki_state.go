@@ -15,9 +15,10 @@ import (
 const wikiStateVersion = 1
 
 type wikiState struct {
-	Version    int                           `json:"version"`
-	Companions map[string]wikiCompanionState `json:"companions,omitempty"`
-	Sources    map[string]wikiSourceState    `json:"sources,omitempty"`
+	Version          int                           `json:"version"`
+	Companions       map[string]wikiCompanionState `json:"companions,omitempty"`
+	AtAutoCompanions map[string]wikiCompanionState `json:"at_auto_companions,omitempty"`
+	Sources          map[string]wikiSourceState    `json:"sources,omitempty"`
 }
 
 type wikiCompanionState struct {
@@ -51,9 +52,10 @@ func newWikiStateStore(workspace string) *wikiStateStore {
 	return &wikiStateStore{
 		path: filepath.Join(workspaceLocalPath(workspace, "wiki"), "state.json"),
 		state: wikiState{
-			Version:    wikiStateVersion,
-			Companions: make(map[string]wikiCompanionState),
-			Sources:    make(map[string]wikiSourceState),
+			Version:          wikiStateVersion,
+			Companions:       make(map[string]wikiCompanionState),
+			AtAutoCompanions: make(map[string]wikiCompanionState),
+			Sources:          make(map[string]wikiSourceState),
 		},
 	}
 }
@@ -86,6 +88,9 @@ func (s *wikiStateStore) Load() error {
 	if state.Companions == nil {
 		state.Companions = make(map[string]wikiCompanionState)
 	}
+	if state.AtAutoCompanions == nil {
+		state.AtAutoCompanions = make(map[string]wikiCompanionState)
+	}
 	if state.Sources == nil {
 		state.Sources = make(map[string]wikiSourceState)
 	}
@@ -117,9 +122,17 @@ func (s *wikiStateStore) update(update func(*wikiState)) error {
 }
 
 func cloneWikiState(state wikiState) wikiState {
-	copy := wikiState{Version: state.Version, Companions: make(map[string]wikiCompanionState, len(state.Companions)), Sources: make(map[string]wikiSourceState, len(state.Sources))}
+	copy := wikiState{
+		Version:          state.Version,
+		Companions:       make(map[string]wikiCompanionState, len(state.Companions)),
+		AtAutoCompanions: make(map[string]wikiCompanionState, len(state.AtAutoCompanions)),
+		Sources:          make(map[string]wikiSourceState, len(state.Sources)),
+	}
 	for key, value := range state.Companions {
 		copy.Companions[key] = value
+	}
+	for key, value := range state.AtAutoCompanions {
+		copy.AtAutoCompanions[key] = value
 	}
 	for key, value := range state.Sources {
 		copy.Sources[key] = value

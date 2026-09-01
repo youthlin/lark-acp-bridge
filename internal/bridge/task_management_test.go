@@ -550,6 +550,24 @@ func TestSessionHasRunningUserTaskSessionWorkBoundaries(t *testing.T) {
 	}
 }
 
+func TestRuntimeKeyBusyMatchesRegisteredTaskRuntime(t *testing.T) {
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	key := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
+	companionRuntime := atAutoCompanionRuntimeKey(key, "traex")
+	svc.tasks[key] = &runningTask{
+		kind:    taskKindUser,
+		runtime: companionRuntime,
+		session: Session{Key: companionRuntime.SessionKey, AgentName: "traex", ACPSessionID: "acp-at-auto"},
+	}
+
+	if !svc.runtimeKeyBusy(companionRuntime) {
+		t.Fatalf("runtimeKeyBusy(%+v) = false, want true for registered companion runtime", companionRuntime)
+	}
+	if svc.runtimeKeyBusy(currentRuntimeKey(key)) {
+		t.Fatalf("runtimeKeyBusy(current) = true, want false when registered task uses companion runtime")
+	}
+}
+
 func TestSetTaskCancelHandlerSessionWorkBoundaries(t *testing.T) {
 	key := imSessionKey("bot-a", "chat-a", "")
 	normalizedKey := normalizeSessionKey(key)

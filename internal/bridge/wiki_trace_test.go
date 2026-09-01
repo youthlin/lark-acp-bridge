@@ -114,6 +114,80 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	}
 }
 
+func TestWikiTraceForJobShowsExecutionSessionIDAndBindsSourceSession(t *testing.T) {
+	cfg := config.Config{Bots: []config.BotConfig{{
+		ID:        "bot-a",
+		Workspace: t.TempDir(),
+		WikiTrace: config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"},
+	}}}
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	if err := store.UpsertChat(ChatConfig{
+		Key:          ChatKey{BotID: "bot-a", ChatID: "oc_trace"},
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(trace show config) error = %v", err)
+	}
+	svc := NewService(cfg, store)
+	var initialMeta feishu.StreamCardMeta
+	var initialProcess string
+	card := &fakeStreamCard{}
+	card.message = feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}
+	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		initialMeta = options.Meta
+		initialProcess = options.InitialProcess
+		return card, nil
+	}
+	source := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source")),
+		Title:        "来源会话标题",
+		AgentName:    "traex",
+		ACPSessionID: "acp-source",
+		Cwd:          t.TempDir(),
+		Workspace:    cfg.Bots[0].Workspace,
+	}
+	execution := wikiCompanionSession("bot-a", cfg.Bots[0].Workspace, wikiCompanionState{
+		AgentName:    "traex",
+		ACPSessionID: "acp-wiki-companion",
+	})
+	if err := store.Upsert(source); err != nil {
+		t.Fatalf("Upsert(source session) error = %v", err)
+	}
+	observer := svc.wikiTraceObserverForJob(source, execution, wikiJob{
+		SourceSessionID: source.ACPSessionID,
+		FromSeq:         10,
+		ToSeq:           12,
+		AgentName:       "traex",
+	})
+	observer.start(context.Background())
+	observer.onUpdate(acp.PromptUpdate{Update: acp.SessionUpdate{
+		SessionUpdate: "tool_call",
+		ToolCallID:    "tool-1",
+		Title:         "读取 trace",
+		Status:        "in_progress",
+	}})
+
+	if !strings.Contains(initialMeta.Metadata, "**来源会话：** 来源会话标题") || !strings.Contains(initialMeta.Metadata, "**来源聊天：** oc_source") || !strings.Contains(initialMeta.Metadata, "**Trace 区间：** (10, 12]") {
+		t.Fatalf("initial meta = %+v, want source metadata and trace range", initialMeta)
+	}
+	if !strings.Contains(initialProcess, "sid: acp-wiki-companion") || strings.Contains(initialProcess, "sid: acp-source") {
+		t.Fatalf("initial process = %q, want execution sid and not source sid", initialProcess)
+	}
+	if !strings.Contains(initialProcess, "msg: wiki\\_acp-source\\_10\\_12") {
+		t.Fatalf("initial process = %q, want source trace message id", initialProcess)
+	}
+	process := strings.Join(card.processUpdatesSnapshot(), "\n")
+	if !strings.Contains(process, "sid: acp-wiki-companion") || strings.Contains(process, "sid: acp-source") || !strings.Contains(process, "读取 trace") {
+		t.Fatalf("process updates = %q, want execution sid and tool progress", process)
+	}
+	got, binding, ok := store.SessionForMessage("bot-a", "oc_trace", "om_wiki_trace")
+	if !ok {
+		t.Fatalf("SessionForMessage(wiki trace card) ok=false binding=%+v", binding)
+	}
+	if got.Key != source.Key || got.ACPSessionID != source.ACPSessionID {
+		t.Fatalf("bound session = %+v, want source session %+v", got, source)
+	}
+}
+
 func TestWikiTraceUsesTraceChatShowConfig(t *testing.T) {
 	tests := []struct {
 		name        string

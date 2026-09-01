@@ -53,14 +53,19 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	})
 	defer unsubscribe()
 
-	rawResult, err := c.callWithAfterWriteAndCancelWait(ctx, "session/prompt", map[string]any{
+	rawResult, err := c.callWithLifecycle(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
 		},
 	}, func() {
 		c.activatePermissionHandler(sessionID, generation)
-	}, promptCancelResponseTimeout)
+	}, promptCancelResponseTimeout, func(event PromptLifecycleEvent) {
+		event.SessionID = sessionID
+		if opts.OnLifecycle != nil {
+			opts.OnLifecycle(event)
+		}
+	})
 	if err != nil {
 		outputMu.Lock()
 		defer outputMu.Unlock()

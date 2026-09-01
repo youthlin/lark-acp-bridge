@@ -49,15 +49,18 @@ type runningTask struct {
 }
 
 type runningTaskOptions struct {
-	drainPendingAtAuto  bool
-	queuePendingAtAuto  bool
-	queuedContinuation  bool
-	skipPostPromptWork  bool
-	triggerWiki         bool
-	silentPrompt        bool
-	blockWorkspaceTasks bool
-	replacementWait     replacedTaskWaitObserver
-	replacementTimeout  time.Duration
+	drainPendingAtAuto   bool
+	queuePendingAtAuto   bool
+	taskKey              SessionKey
+	runtime              runtimeKey
+	queuedContinuation   bool
+	skipPostPromptWork   bool
+	triggerWiki          bool
+	silentPrompt         bool
+	blockWorkspaceTasks  bool
+	skipPromptQueueDrain bool
+	replacementWait      replacedTaskWaitObserver
+	replacementTimeout   time.Duration
 }
 
 type replacedTaskWaitObserver interface {
@@ -77,6 +80,16 @@ func atAutoUserPromptTaskOptions() runningTaskOptions {
 
 func atAutoPromptTaskOptions() runningTaskOptions {
 	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}
+}
+
+func atAutoCompanionPromptTaskOptions(taskKey SessionKey, runtime runtimeKey) runningTaskOptions {
+	return runningTaskOptions{
+		drainPendingAtAuto:   true,
+		queuePendingAtAuto:   true,
+		taskKey:              taskKey,
+		runtime:              runtime,
+		skipPromptQueueDrain: true,
+	}
 }
 
 func queuedPromptTaskOptions() runningTaskOptions {
@@ -163,12 +176,25 @@ func defaultTaskOptions(kind taskKind) runningTaskOptions {
 }
 
 func (s *Service) startTaskWithOptions(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func(), error) {
+	ctx, finish, _, err := s.startTaskWithOptionsDetailed(ctx, session, agent, kind, opts)
+	return ctx, finish, err
+}
+
+func (s *Service) startTaskWithOptionsDetailed(ctx context.Context, session Session, agent config.AgentConfig, kind taskKind, opts runningTaskOptions) (context.Context, func(), *runningTask, error) {
+	taskKey := normalizeSessionKey(session.Key)
+	if opts.taskKey.Valid() {
+		taskKey = normalizeSessionKey(opts.taskKey)
+	}
 	session.Key = normalizeSessionKey(session.Key)
 	session.Workspace = s.workspaceForSessionTask(session)
+	runtime := currentRuntimeKey(session.Key)
+	if opts.runtime != (runtimeKey{}) {
+		runtime = normalizeRuntimeKey(opts.runtime)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	task := &runningTask{
 		kind:                kind,
-		runtime:             currentRuntimeKey(session.Key),
+		runtime:             runtime,
 		cancel:              cancel,
 		done:                make(chan struct{}),
 		predecessorDetached: make(chan struct{}),
@@ -178,11 +204,11 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 		queuePendingAtAuto:  opts.queuePendingAtAuto,
 	}
 
-	previous, busy := s.beginRunningTask(session.Key, task, opts)
+	previous, busy := s.beginRunningTask(taskKey, task, opts)
 	if busy {
 		cancel()
 		task.closeDone()
-		return ctx, func() {}, errSessionTaskBusy
+		return ctx, func() {}, nil, errSessionTaskBusy
 	}
 	if previous != nil && !opts.queuedContinuation {
 		if opts.replacementWait != nil {
@@ -190,24 +216,41 @@ func (s *Service) startTaskWithOptions(ctx context.Context, session Session, age
 		}
 		completed := s.cancelTask(ctx, previous, false)
 		if err := s.waitForReplacedTaskCompleted(ctx, previous, completed, opts); err != nil {
-			shouldDrainQueue := s.finishRunningTask(session.Key, task, kind, opts)
+			shouldDrainQueue := s.finishRunningTask(taskKey, task, kind, opts)
 			cancel()
 			task.closeDone()
 			if shouldDrainQueue {
-				s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
+				s.drainPromptQueueAsync(context.WithoutCancel(ctx), taskKey)
 			}
-			return ctx, func() {}, err
+			return ctx, func() {}, nil, err
 		}
 	}
 
 	return ctx, func() {
-		shouldDrainQueue := s.finishRunningTask(session.Key, task, kind, opts)
+		shouldDrainQueue := s.finishRunningTask(taskKey, task, kind, opts)
 		cancel()
 		task.closeDone()
 		if shouldDrainQueue {
-			s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
+			s.drainPromptQueueAsync(context.WithoutCancel(ctx), taskKey)
 		}
-	}, nil
+	}, task, nil
+}
+
+func (s *Service) updateRunningTaskRuntime(key SessionKey, task *runningTask, runtime runtimeKey, session Session) {
+	if task == nil {
+		return
+	}
+	key = normalizeSessionKey(key)
+	runtime = normalizeRuntimeKey(runtime)
+	session.Key = normalizeSessionKey(session.Key)
+	session.Workspace = s.workspaceForSessionTask(session)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if s.tasks[key] != task {
+		return
+	}
+	task.runtime = runtime
+	task.session = session
 }
 
 func (task *runningTask) closeDone() {
@@ -339,10 +382,12 @@ func (s *Service) runtimeKeyBusy(key runtimeKey) bool {
 	if _, ok := s.wikiTasks[key]; ok {
 		return true
 	}
-	if key.Scope == runtimeScopeWiki {
-		return false
+	for _, task := range s.tasks {
+		if normalizeRuntimeKey(task.runtime) == key {
+			return true
+		}
 	}
-	return s.tasks[normalizeSessionKey(key.SessionKey)] != nil
+	return false
 }
 
 func (s *Service) workspaceForSessionTask(session Session) string {
@@ -381,6 +426,9 @@ func (s *Service) finishRunningTask(key SessionKey, task *runningTask, kind task
 	}
 	delete(s.tasks, key)
 	s.workspaceLocks.clear(task.session.Workspace, task)
+	if opts.skipPromptQueueDrain {
+		return false
+	}
 	return kind == taskKindUser && !opts.queuedContinuation
 }
 

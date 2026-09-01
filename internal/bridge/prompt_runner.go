@@ -21,6 +21,7 @@ var errCurrentSessionChanged = errors.New("current session changed")
 type promptSessionOptions struct {
 	SkipPostPromptWork     bool
 	SkipPendingAtAutoDrain bool
+	EnableAtAutoQueue      bool
 }
 
 type preparedPrompt struct {
@@ -260,7 +261,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 	s.subscribeACPStateUpdates(ctx, msg, session.Key)
 	out := s.executePromptWithRecovery(ctx, session, func(runCtx context.Context, runSession Session) promptRunOutcome {
 		runOpts := userPromptTaskOptions()
-		if s.shouldHandleAtAutoMessage(msg) {
+		if opts.EnableAtAutoQueue && s.shouldHandleAtAutoMessage(msg) {
 			runOpts = atAutoPromptTaskOptions()
 		} else if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
 			runOpts = atAutoUserPromptTaskOptions()
@@ -323,28 +324,71 @@ func (s *Service) runPendingAtAutoAsync(ctx context.Context, msg feishu.Message,
 	if !isAtAutoMode(s.chatAtMode(msg)) {
 		return
 	}
-	pending := s.takePendingAtAutoMessages(session.Key)
+	pending := s.takePendingAtAutoForFlow(session.Key, false)
+	s.runClaimedPendingAtAutoAsync(ctx, msg, session, agent, pending)
+}
+
+func (s *Service) continuePendingAtAutoAfterFlow(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) {
+	pending := s.takePendingAtAutoForFlow(session.Key, true)
+	s.runClaimedPendingAtAutoAsync(ctx, msg, session, agent, pending)
+}
+
+func (s *Service) runClaimedPendingAtAutoAsync(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, pending []pendingAtMessage) {
 	if len(pending) == 0 {
 		return
 	}
-	promptText := formatAtAutoPendingPrompt(pending)
-	if strings.TrimSpace(promptText) == "" {
+	sessionKey := normalizeSessionKey(session.Key)
+	if s.backgroundWg.stopped.Load() {
+		s.finishAtAutoFlow(sessionKey)
 		return
 	}
-	autoMsg := msg
-	autoMsg.Text = promptText
-	autoMsg.Mentions = nil
-	autoMsg.ForceReplyInThread = true
-	sessionKey := session.Key
 	s.goBackground("pending-at-auto", func() {
-		reply, err := s.promptSession(context.WithoutCancel(ctx), autoMsg, session, agent, promptText, promptText, promptSessionOptions{
+		drainNext := true
+		defer func() {
+			if drainNext {
+				s.continuePendingAtAutoAfterFlow(ctx, msg, session, agent)
+			} else {
+				s.finishAtAutoFlow(sessionKey)
+			}
+		}()
+		decisionPrompt := s.formatAtAutoPendingDecisionPrompt(session, pending)
+		if strings.TrimSpace(decisionPrompt) == "" {
+			return
+		}
+		autoMsg := msg
+		autoMsg.Text = decisionPrompt
+		autoMsg.Mentions = nil
+		autoMsg.Reply = nil
+		autoMsg.ForceReplyInThread = true
+		respond, err := s.shouldAtAutoCompanionRespond(context.WithoutCancel(ctx), autoMsg, session, agent, decisionPrompt)
+		if err != nil {
+			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
+			if errors.Is(err, errSessionTaskBusy) {
+				s.restorePendingAtAutoMessages(sessionKey, pending)
+				drainNext = false
+				return
+			}
+			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
+			return
+		}
+		if !respond {
+			return
+		}
+		promptText := formatAtAutoPendingResponsePrompt(pending)
+		if strings.TrimSpace(promptText) == "" {
+			return
+		}
+		autoMsg.Text = promptText
+		reply, err := s.promptWithOptions(context.WithoutCancel(ctx), autoMsg, promptText, promptSessionOptions{
 			SkipPostPromptWork:     true,
 			SkipPendingAtAutoDrain: true,
+			EnableAtAutoQueue:      true,
 		})
 		if err != nil {
 			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
 			if errors.Is(err, errSessionTaskBusy) {
 				s.restorePendingAtAutoMessages(sessionKey, pending)
+				drainNext = false
 				return
 			}
 			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
@@ -395,9 +439,7 @@ func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, ses
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {
 	opts := userPromptTaskOptions()
-	if s.shouldHandleAtAutoMessage(msg) {
-		opts = atAutoPromptTaskOptions()
-	} else if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
+	if isAtAutoMode(s.chatAtMode(msg)) && messageMentionsBot(msg) {
 		opts = atAutoUserPromptTaskOptions()
 	}
 	return s.runUserPromptWithOptions(ctx, msg, session, agent, text, opts)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,6 +183,62 @@ func TestPromptTraceRecordsMessageIDAcrossTurns(t *testing.T) {
 	assertTraceRecordFinal(t, records[4], true)
 }
 
+func TestTraceRecorderWritesPromptLifecycleEvents(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := newTraceStore(workspace, config.TraceConfig{Enabled: true, RetentionDays: 7})
+	recorder := newTraceRecorderWithMessageID(store, session, "hello", "om_prompt_1")
+	timeoutErr := errors.New("ACP prompt 执行超过绝对上限 1h0m0s: context deadline exceeded")
+	cancelErr := context.Canceled
+	recorder.OnLifecycle(acp.PromptLifecycleEvent{
+		Stage:     "timeout_max_duration",
+		SessionID: "acp-session-1",
+		Err:       timeoutErr,
+		Cause:     timeoutErr,
+		At:        time.Date(2026, 9, 1, 16, 17, 46, 0, time.Local),
+		Elapsed:   time.Hour,
+	})
+	recorder.OnLifecycle(acp.PromptLifecycleEvent{
+		Stage:        "cancel_wait_finished",
+		SessionID:    "acp-session-1",
+		Method:       "session/prompt",
+		RequestID:    "42",
+		Err:          cancelErr,
+		Cause:        timeoutErr,
+		Elapsed:      time.Hour + 37*time.Minute,
+		WaitDuration: 37 * time.Minute,
+	})
+	recorder.Complete(acp.PromptResult{}, timeoutErr)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,lifecycle,lifecycle,error" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	for i, record := range records {
+		if record["message_id"] != "om_prompt_1" {
+			t.Fatalf("record[%d] message_id = %v, want om_prompt_1; record = %+v", i, record["message_id"], record)
+		}
+	}
+	if records[1]["stage"] != "timeout_max_duration" || records[1]["elapsed"] != "1h0m0s" {
+		t.Fatalf("timeout lifecycle record = %+v, want timeout stage and elapsed", records[1])
+	}
+	if _, ok := records[1]["cause"]; ok {
+		t.Fatalf("timeout lifecycle record = %+v, want duplicate cause omitted", records[1])
+	}
+	if records[2]["stage"] != "cancel_wait_finished" || records[2]["method"] != "session/prompt" || records[2]["request_id"] != "42" {
+		t.Fatalf("cancel lifecycle record = %+v, want method and request id", records[2])
+	}
+	if records[2]["wait"] != "37m0s" || !strings.Contains(records[2]["cause"].(string), "绝对上限") {
+		t.Fatalf("cancel lifecycle record = %+v, want wait and timeout cause", records[2])
+	}
+}
+
 func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
@@ -202,6 +259,8 @@ func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	}
 	records := []traceRecord{
 		{TS: traceTimestamp(time.Now()), Type: "user", Content: "hello"},
+		{TS: traceTimestamp(time.Now()), Type: "lifecycle", Stage: "started"},
+		{TS: traceTimestamp(time.Now()), Type: "lifecycle", Stage: "timeout_max_duration", Error: "ACP prompt 执行超过绝对上限 1h0m0s: context deadline exceeded"},
 		{TS: traceTimestamp(time.Now()), Type: "tool", ToolCallID: "tool-1", Output: json.RawMessage(`"` + strings.Repeat("x", 800) + `"`)},
 		{TS: traceTimestamp(time.Now()), Type: "assistant", Content: "working"},
 		{TS: traceTimestamp(time.Now()), Type: "assistant", IsFinal: true, Content: "done"},
@@ -223,13 +282,13 @@ func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	}
 
 	gotRecords := readTraceRecords(t, path)
-	if got := traceRecordTypes(gotRecords); strings.Join(got, ",") != "user,assistant" {
+	if got := traceRecordTypes(gotRecords); strings.Join(got, ",") != "user,lifecycle,assistant" {
 		t.Fatalf("record types = %v, records = %+v", got, gotRecords)
 	}
-	if gotRecords[0]["content"] != "hello" || gotRecords[1]["content"] != "done" {
-		t.Fatalf("records = %+v, want summary user and final assistant", gotRecords)
+	if gotRecords[0]["content"] != "hello" || gotRecords[1]["stage"] != "timeout_max_duration" || gotRecords[2]["content"] != "done" {
+		t.Fatalf("records = %+v, want summary user, timeout lifecycle, and final assistant", gotRecords)
 	}
-	assertTraceRecordFinal(t, gotRecords[1], true)
+	assertTraceRecordFinal(t, gotRecords[2], true)
 }
 
 func TestTraceRecordTimestampMarshalsAsFixedTS(t *testing.T) {

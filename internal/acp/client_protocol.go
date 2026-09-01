@@ -3,15 +3,31 @@ package acp
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 type UpdateHandler func(sessionID string, update SessionUpdate)
 
 type PromptUpdateHandler func(update PromptUpdate)
 
+type PromptLifecycleHandler func(event PromptLifecycleEvent)
+
 type PromptOptions struct {
 	OnUpdate            PromptUpdateHandler
 	OnPermissionRequest PermissionRequestHandler
+	OnLifecycle         PromptLifecycleHandler
+}
+
+type PromptLifecycleEvent struct {
+	Stage        string
+	SessionID    string
+	Method       string
+	RequestID    string
+	Err          error
+	Cause        error
+	At           time.Time
+	Elapsed      time.Duration
+	WaitDuration time.Duration
 }
 
 type SessionListOptions struct {
