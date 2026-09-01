@@ -31,6 +31,8 @@ type ChatConfig struct {
 	Key              ChatKey                    `json:"key"`
 	AgentName        string                     `json:"agent_name,omitempty"`
 	AgentConfigs     map[string]ChatAgentConfig `json:"agent_configs,omitempty"`
+	Rules            string                     `json:"rules,omitempty"`
+	RulesRevision    uint64                     `json:"rules_revision,omitempty"`
 	AtMode           string                     `json:"at_mode,omitempty"`
 	MentionOptional  bool                       `json:"mention_optional,omitempty"`
 	WikiDisabled     bool                       `json:"wiki_disabled,omitempty"`

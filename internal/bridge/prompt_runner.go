@@ -108,16 +108,16 @@ func (s *Service) executePromptWithRecovery(ctx context.Context, session Session
 }
 
 func (s *Service) runUserPromptWithWorkspaceContext(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRunOutcome {
-	promptText := s.promptTextWithWorkspaceContextForSession(session, msg, text)
+	promptText, chatRulesRevision := s.promptTextWithWorkspaceContextForSessionRevision(session, msg, text)
 	includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
 	run := s.runUserPromptWithOptionsDetailed(ctx, msg, session, agent, promptText, opts)
 	if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
-		session = s.markWorkspacePrompted(ctx, msg, session)
+		session = s.markWorkspacePrompted(ctx, msg, session, chatRulesRevision)
 	}
 	return promptRunOutcome{session: session, result: run.result, reply: run.reply, replySet: run.replySet, sentProgress: run.sentProgress, err: run.err}
 }
 
-func (s *Service) markWorkspacePrompted(ctx context.Context, msg feishu.Message, session Session) Session {
+func (s *Service) markWorkspacePrompted(ctx context.Context, msg feishu.Message, session Session, chatRulesRevision uint64) Session {
 	if session.WorkspacePrompted || strings.TrimSpace(session.ACPSessionID) == "" || strings.TrimSpace(sessionWorkspace(session, msg)) == "" {
 		return session
 	}
@@ -126,13 +126,7 @@ func (s *Service) markWorkspacePrompted(ctx context.Context, msg feishu.Message,
 		session.WorkspacePrompted = true
 		return session
 	}
-	err := store.UpdateCurrentSession(session.Key, session.ACPSessionID, func(current *Session) bool {
-		if current.WorkspacePrompted {
-			return false
-		}
-		current.WorkspacePrompted = true
-		return true
-	})
+	err := store.MarkWorkspacePromptedIfRulesRevision(session.Key, session.ACPSessionID, chatKeyFromMessage(msg), chatRulesRevision)
 	if err != nil {
 		slog.WarnContext(ctx, "保存 workspace prompt 状态失败", "session", session.ACPSessionID, "错误", err)
 		return session

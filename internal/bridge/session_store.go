@@ -326,6 +326,27 @@ func (s *SessionStore) UpdateCurrentSession(key SessionKey, acpSessionID string,
 	return s.writeOrRestoreLocked(snapshot)
 }
 
+// MarkWorkspacePromptedIfRulesRevision 仅在 prompt 使用的 chat rules 仍为当前版本时标记注入完成。
+func (s *SessionStore) MarkWorkspacePromptedIfRulesRevision(key SessionKey, acpSessionID string, chatKey ChatKey, rulesRevision uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key = normalizeSessionKey(key)
+	chatKey = normalizeChatKey(chatKey)
+	session, ok := s.sessions[key]
+	if !ok || session.ACPSessionID != strings.TrimSpace(acpSessionID) || session.WorkspacePrompted {
+		return nil
+	}
+	if chat := s.chats[chatKey]; chat.RulesRevision != rulesRevision {
+		return nil
+	}
+	snapshot := s.snapshotLocked()
+	session = cloneSession(session)
+	session.WorkspacePrompted = true
+	s.upsertSessionLocked(session, time.Now())
+	return s.writeOrRestoreLocked(snapshot)
+}
+
 func (s *SessionStore) ResetWorkspacePromptedForAllSessions() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -590,6 +611,46 @@ func (s *SessionStore) UpdateChat(chat ChatConfig, update func(*ChatConfig)) (Ch
 	update(&chat)
 	snapshot := s.snapshotLocked()
 	chat = s.upsertChatLocked(chat, time.Now())
+	return cloneChatConfig(chat), s.writeOrRestoreLocked(snapshot)
+}
+
+// UpdateChatRules 更新 chat 补充规则，并让该 chat 下的 ACP session 在下一条 prompt 重新注入上下文。
+func (s *SessionStore) UpdateChatRules(chat ChatConfig, rules string) (ChatConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	chat = normalizeChatForStore(chat)
+	if !chat.Key.Valid() {
+		return ChatConfig{}, fmt.Errorf("chat key 不能为空")
+	}
+	if latest, ok := s.chats[chat.Key]; ok {
+		chat = cloneChatConfig(latest)
+	}
+	rules = strings.TrimSpace(rules)
+	if chat.Rules == rules {
+		return cloneChatConfig(chat), nil
+	}
+
+	snapshot := s.snapshotLocked()
+	chat.Rules = rules
+	chat.RulesRevision++
+	chat = s.upsertChatLocked(chat, time.Now())
+	for key, session := range s.sessions {
+		if chatKeyFromSessionKey(key) != chat.Key || !session.WorkspacePrompted {
+			continue
+		}
+		session = cloneSession(session)
+		session.WorkspacePrompted = false
+		s.sessions[key] = session
+	}
+	for i, session := range s.history {
+		if chatKeyFromSessionKey(session.Key) != chat.Key || !session.WorkspacePrompted {
+			continue
+		}
+		session = cloneSession(session)
+		session.WorkspacePrompted = false
+		s.history[i] = session
+	}
 	return cloneChatConfig(chat), s.writeOrRestoreLocked(snapshot)
 }
 
@@ -1066,6 +1127,7 @@ func cloneConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOp
 func normalizeChatForStore(chat ChatConfig) ChatConfig {
 	chat.Key = normalizeChatKey(chat.Key)
 	chat.AgentName = strings.TrimSpace(chat.AgentName)
+	chat.Rules = strings.TrimSpace(chat.Rules)
 	chat.AgentConfigs = normalizeChatAgentConfigs(chat.AgentConfigs)
 	return chat
 }

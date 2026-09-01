@@ -358,6 +358,39 @@ func TestWorkspacePromptForSessionInjectsWorkspaceContextAndMemoryPolicyTogether
 	}
 }
 
+func TestWorkspacePromptForSessionInjectsChatRulesWithWorkspaceContext(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "MEMORY.md"), []byte("# MEMORY\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(MEMORY.md) error = %v", err)
+	}
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	msg := feishu.Message{BotID: "bot-a", ChatID: "oc_chat"}
+	if err := store.UpsertChat(ChatConfig{Key: chatKeyFromMessage(msg), Rules: "回复默认使用中文。"}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	svc := newTestService(config.Default(), store)
+	session := Session{Workspace: workspace}
+
+	first, rulesRevision := svc.promptTextWithWorkspaceContextForSessionRevision(session, msg, "你好")
+	for _, want := range []string{"## Workspace Context", "## Workspace Memory Policy", "## Chat Rules", "回复默认使用中文。"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first prompt = %q, want %q", first, want)
+		}
+	}
+	if strings.Index(first, "## Chat Rules") > strings.Index(first, "## Message Metadata") {
+		t.Fatalf("first prompt = %q, want chat rules before message metadata", first)
+	}
+	if rulesRevision != 0 {
+		t.Fatalf("rules revision = %d, want 0", rulesRevision)
+	}
+
+	session.WorkspacePrompted = true
+	normal := svc.promptTextWithWorkspaceContextForSession(session, msg, "继续")
+	if strings.Contains(normal, "## Chat Rules") || strings.Contains(normal, "回复默认使用中文。") {
+		t.Fatalf("normal prompt = %q, want no repeated chat rules", normal)
+	}
+}
+
 func slicesContains(values []string, value string) bool {
 	for _, item := range values {
 		if item == value {

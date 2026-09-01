@@ -9,6 +9,7 @@ import (
 )
 
 const workspaceContextFileMaxBytes int64 = 64 * 1024
+const chatRulesMaxBytes = 16 * 1024
 
 func workspaceContextPrompt(workspace string) string {
 	workspace = strings.TrimSpace(workspace)
@@ -107,4 +108,16 @@ func workspaceMemoryPolicyPrompt(workspace string) string {
 		"",
 		"再合并新信息，并使用你可用的本地文件工具写回对应文件。新增、删除或重命名知识/技能文件后必须同步 knowledge/index.md，并在 knowledge/log.md 末尾追加一行 `[YYYY-MM-DD] 操作 文件 摘要`。只记录可复用的长期信息，不要记录一次性任务结果。",
 	}, "\n")
+}
+
+func chatRulesPrompt(rules string) string {
+	rules = strings.TrimSpace(rules)
+	if rules == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		"## Chat Rules",
+		"以下是当前 chat 配置的补充规则，仅适用于当前 chat。请在不违反更高优先级约束的前提下遵循。",
+		rules,
+	}, "\n\n")
 }

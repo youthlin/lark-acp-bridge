@@ -135,15 +135,30 @@ func promptTextWithWorkspaceContext(workspace string, msg feishu.Message, text s
 type workspacePromptOptions struct {
 	IncludeWorkspaceContext bool
 	IncludeMemoryPolicy     bool
+	ChatRules               string
 }
 
 func (s *Service) promptTextWithWorkspaceContextForSession(session Session, msg feishu.Message, text string) string {
+	prompt, _ := s.promptTextWithWorkspaceContextForSessionRevision(session, msg, text)
+	return prompt
+}
+
+func (s *Service) promptTextWithWorkspaceContextForSessionRevision(session Session, msg feishu.Message, text string) (string, uint64) {
 	workspace := sessionWorkspace(session, msg)
 	includeWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, workspace)
-	return promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
+	chatRules := ""
+	var chatRulesRevision uint64
+	if includeWorkspaceContext {
+		chat := s.chatConfigForMessage(msg)
+		chatRules = chat.Rules
+		chatRulesRevision = chat.RulesRevision
+	}
+	prompt := promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
 		IncludeWorkspaceContext: includeWorkspaceContext,
 		IncludeMemoryPolicy:     includeWorkspaceContext,
+		ChatRules:               chatRules,
 	})
+	return prompt, chatRulesRevision
 }
 
 func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message, text string, opts workspacePromptOptions) string {
@@ -159,6 +174,7 @@ func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message,
 	return promptWithUserMessage([]string{
 		workspaceContext,
 		memoryPolicy,
+		chatRulesPrompt(opts.ChatRules),
 		messageMetadataPrompt(msg),
 	}, text)
 }

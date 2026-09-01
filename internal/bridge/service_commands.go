@@ -151,6 +151,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/rules",
+		helpLines: []string{"/rules [status]|set <规则>|clear - 管理当前 chat 随 workspace 注入的补充规则"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleRulesCommand(ctx, text, msg)
+		},
+	},
+	{
 		name:      "/sid",
 		helpLines: []string{"/sid <acp_session_id> <prompt> - 将本条消息发送到指定 ACP session"},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
@@ -287,6 +294,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/wiki"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/loop"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/queue"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/rules"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/sid"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/card"),

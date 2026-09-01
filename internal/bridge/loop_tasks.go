@@ -143,14 +143,14 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 		}
 		s.markLoopRound(session.Key, started, round)
 		s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
-		roundPrompt := s.promptTextWithWorkspaceContextForSession(session, msg, loopPrompt(basePrompt, s.takeLoopPendingAdd(session.Key, started), req, round, started, deadline))
+		roundPrompt, chatRulesRevision := s.promptTextWithWorkspaceContextForSessionRevision(session, msg, loopPrompt(basePrompt, s.takeLoopPendingAdd(session.Key, started), req, round, started, deadline))
 		includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
 		run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round))
 		result := run.result
 		rawResult := run.rawResult
 		streamedReply := run.reply
 		if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
-			session = s.markWorkspacePrompted(ctx, msg, session)
+			session = s.markWorkspacePrompted(ctx, msg, session, chatRulesRevision)
 		}
 		s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
 		if run.err != nil {

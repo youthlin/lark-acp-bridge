@@ -40,7 +40,7 @@
 - 同一会话中新普通消息优先级最高：新消息会取消上一轮正在执行的用户 prompt，再处理新消息；自动 wiki 使用独立伴生会话，不受原会话新消息影响。
 - 群聊默认需要 at 当前 bot 才响应；`/at off`、`/at off auto`、`/at off auto-reaction` 可改为免 at，`/at on` 恢复。私聊始终响应，不支持 `/at`。
 
-斜杠命令仅限 bot owner 执行（sender open_id 命中 `owner_open_ids` 或启动时解析到的应用所有者/管理员）。完整命令以 `internal/bridge/service_commands.go` 的 `slashRoutedCommandTable` 为准，当前包含：`/help`、`/new`、`/agent`、`/session`、`/wiki`、`/drive_comment`、`/loop`、`/queue`、`/schedule`、`/card`、`/cmds`、`//command`、`/compact`、`/config`、`/model`、`/mode`、`/usage`、`/show`、`/at`、`/debug`、`/update`、`/restart`、`/status`。`/update` 只替换二进制，不自动重启，完成后需再用 `/restart`。
+斜杠命令仅限 bot owner 执行（sender open_id 命中 `owner_open_ids` 或启动时解析到的应用所有者/管理员）。完整命令以 `internal/bridge/service_commands.go` 的 `slashRoutedCommandTable` 为准，当前包含：`/help`、`/new`、`/agent`、`/session`、`/wiki`、`/drive_comment`、`/loop`、`/queue`、`/rules`、`/schedule`、`/card`、`/cmds`、`//command`、`/compact`、`/config`、`/model`、`/mode`、`/usage`、`/show`、`/at`、`/debug`、`/update`、`/restart`、`/status`。`/rules` 管理当前 chat 的补充规则，并在 workspace 规则注入时一并传给 ACP agent。`/update` 只替换二进制，不自动重启，完成后需再用 `/restart`。
 
 ## Workspace 与知识沉淀
 
