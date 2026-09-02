@@ -29,7 +29,7 @@ type Service struct {
 	serviceTasks
 	serviceScheduleRuns
 	serviceACPUpdates
-	backgroundWg backgroundGoroutines
+	taskSupervisor taskSupervisor
 }
 
 type serviceStores struct {
@@ -122,7 +122,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		serviceACPUpdates: serviceACPUpdates{
 			acpUpdateUnsub: make(map[SessionKey]func()),
 		},
-		backgroundWg: newBackgroundGoroutines(),
+		taskSupervisor: newTaskSupervisor(),
 	}
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
