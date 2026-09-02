@@ -332,71 +332,77 @@ func (s *Service) runClaimedPendingAtAutoAsync(ctx context.Context, msg feishu.M
 		return
 	}
 	sessionKey := normalizeSessionKey(session.Key)
-	if s.backgroundWg.stopped.Load() {
+	if s.backgroundStopped() {
 		s.finishAtAutoFlow(sessionKey)
 		return
 	}
-	s.goBackground("pending-at-auto", func() {
-		drainNext := true
-		defer func() {
-			if drainNext {
-				s.continuePendingAtAutoAfterFlow(ctx, msg, session, agent)
-			} else {
-				s.finishAtAutoFlow(sessionKey)
-			}
-		}()
-		decisionPrompt := s.formatAtAutoPendingDecisionPrompt(session, pending)
-		if strings.TrimSpace(decisionPrompt) == "" {
-			return
-		}
-		autoMsg := msg
-		autoMsg = pendingAtAutoReplyMessage(autoMsg, pending)
-		autoMsg.Text = decisionPrompt
-		autoMsg.Mentions = nil
-		autoMsg.Reply = nil
-		respond, err := s.shouldAtAutoCompanionRespond(context.WithoutCancel(ctx), autoMsg, session, agent, decisionPrompt)
-		if err != nil {
-			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
-			if errors.Is(err, errSessionTaskBusy) {
-				s.restorePendingAtAutoMessages(sessionKey, pending)
-				drainNext = false
+	if !s.goBackground(
+		context.WithoutCancel(ctx),
+		"pending-at-auto",
+		func(ctx context.Context) {
+			drainNext := true
+			defer func() {
+				if drainNext {
+					s.continuePendingAtAutoAfterFlow(ctx, msg, session, agent)
+				} else {
+					s.finishAtAutoFlow(sessionKey)
+				}
+			}()
+			decisionPrompt := s.formatAtAutoPendingDecisionPrompt(session, pending)
+			if strings.TrimSpace(decisionPrompt) == "" {
 				return
 			}
-			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
-			return
-		}
-		if !respond {
-			return
-		}
-		promptText := formatAtAutoPendingResponsePrompt(pending)
-		if strings.TrimSpace(promptText) == "" {
-			return
-		}
-		autoMsg.Text = promptText
-		reply, err := s.promptWithOptions(context.WithoutCancel(ctx), autoMsg, promptText, promptSessionOptions{
-			SkipPostPromptWork:     true,
-			SkipPendingAtAutoDrain: true,
-			EnableAtAutoQueue:      true,
-		})
-		if err != nil {
-			// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
-			if errors.Is(err, errSessionTaskBusy) {
-				s.restorePendingAtAutoMessages(sessionKey, pending)
-				drainNext = false
+			autoMsg := msg
+			autoMsg = pendingAtAutoReplyMessage(autoMsg, pending)
+			autoMsg.Text = decisionPrompt
+			autoMsg.Mentions = nil
+			autoMsg.Reply = nil
+			respond, err := s.shouldAtAutoCompanionRespond(ctx, autoMsg, session, agent, decisionPrompt)
+			if err != nil {
+				// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
+				if errors.Is(err, errSessionTaskBusy) {
+					s.restorePendingAtAutoMessages(sessionKey, pending)
+					drainNext = false
+					return
+				}
+				slog.WarnContext(ctx, "执行待处理群聊 auto 判断失败", "错误", err)
 				return
 			}
-			slog.WarnContext(context.WithoutCancel(ctx), "执行待处理群聊 auto 判断失败", "错误", err)
-			return
-		}
-		if strings.TrimSpace(reply) == "" {
-			return
-		}
-		if ok, err := s.sendIntermediateReply(context.WithoutCancel(ctx), autoMsg, reply); err != nil {
-			slog.WarnContext(context.WithoutCancel(ctx), "发送待处理群聊 auto 回复失败", "错误", err)
-		} else if !ok {
-			slog.WarnContext(context.WithoutCancel(ctx), "缺少待处理群聊 auto 回复发送器")
-		}
-	})
+			if !respond {
+				return
+			}
+			promptText := formatAtAutoPendingResponsePrompt(pending)
+			if strings.TrimSpace(promptText) == "" {
+				return
+			}
+			autoMsg.Text = promptText
+			reply, err := s.promptWithOptions(ctx, autoMsg, promptText, promptSessionOptions{
+				SkipPostPromptWork:     true,
+				SkipPendingAtAutoDrain: true,
+				EnableAtAutoQueue:      true,
+			})
+			if err != nil {
+				// session 正忙（通常是新消息刚好占用）时，把待处理消息放回，等待下次处理，避免丢失。
+				if errors.Is(err, errSessionTaskBusy) {
+					s.restorePendingAtAutoMessages(sessionKey, pending)
+					drainNext = false
+					return
+				}
+				slog.WarnContext(ctx, "执行待处理群聊 auto 判断失败", "错误", err)
+				return
+			}
+			if strings.TrimSpace(reply) == "" {
+				return
+			}
+			if ok, err := s.sendIntermediateReply(ctx, autoMsg, reply); err != nil {
+				slog.WarnContext(ctx, "发送待处理群聊 auto 回复失败", "错误", err)
+			} else if !ok {
+				slog.WarnContext(ctx, "缺少待处理群聊 auto 回复发送器")
+			}
+		},
+	) {
+		s.finishAtAutoFlow(sessionKey)
+	}
 }
 
 func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) (Session, error) {

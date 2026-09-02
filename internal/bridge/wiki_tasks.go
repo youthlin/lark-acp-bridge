@@ -332,10 +332,26 @@ func (s *Service) runWikiLint(ctx context.Context, msg feishu.Message) string {
 		finish()
 		return "启动 wiki lint 失败：发送开始通知失败：" + sendErr.Error()
 	} else if ok {
-		s.goBackground("wiki-lint", func() { s.runWikiLintTask(replyCtx, taskCtx, finish, msg, session, agent) })
+		if !s.goBackground(
+			replyCtx,
+			"wiki-lint",
+			func(ctx context.Context) {
+				s.runWikiLintTask(ctx, taskCtx, finish, msg, session, agent)
+			},
+		) {
+			finish()
+		}
 		return ""
 	}
-	s.goBackground("wiki-lint", func() { s.runWikiLintTask(context.WithoutCancel(ctx), taskCtx, finish, msg, session, agent) })
+	if !s.goBackground(
+		context.WithoutCancel(ctx),
+		"wiki-lint",
+		func(ctx context.Context) {
+			s.runWikiLintTask(ctx, taskCtx, finish, msg, session, agent)
+		},
+	) {
+		finish()
+	}
 	return ack
 }
 
@@ -632,7 +648,21 @@ func (s *Service) scheduleWikiTimer(key SessionKey, delay time.Duration, pending
 	}
 	pending.generation = generation
 	pending.timer = time.AfterFunc(delay, func() {
-		s.runWikiTimer(key, generation, pending.session, pending.agent)
+		if !s.goBackground(
+			context.Background(),
+			"wiki-timer",
+			func(ctx context.Context) {
+				s.runWikiTimer(
+					ctx,
+					key,
+					generation,
+					pending.session,
+					pending.agent,
+				)
+			},
+		) {
+			s.cancelWikiTimer(key)
+		}
 	})
 	s.wikiTimers[key] = &pending
 	s.taskMu.Unlock()
@@ -652,7 +682,7 @@ func (s *Service) wikiConfigForSession(session Session) ChatConfig {
 	return chat
 }
 
-func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session, agent config.AgentConfig) {
+func (s *Service) runWikiTimer(parent context.Context, key SessionKey, generation int64, session Session, agent config.AgentConfig) {
 	key = normalizeSessionKey(key)
 	session.Key = normalizeSessionKey(session.Key)
 	switch s.beginWikiTimerRun(key, generation, session.Workspace) {
@@ -665,7 +695,7 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 
 	// Timer-driven reflection is independent of any Feishu request; task
 	// cancellation is controlled by the task manager and session lifecycle.
-	ctx, finish, err := s.startTaskWithOptions(context.Background(), session, agent, taskKindWiki, wikiReflectionTaskOptions())
+	ctx, finish, err := s.startTaskWithOptions(parent, session, agent, taskKindWiki, wikiReflectionTaskOptions())
 	if err != nil {
 		if errors.Is(err, errSessionTaskBusy) {
 			s.scheduleWikiAfterUserPrompt(session, agent)
@@ -674,6 +704,7 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		}
 		return
 	}
+	defer finish()
 	s.markWikiStarted(key)
 	prompt := wikiReflectionPrompt(sessionWorkspace(session, feishu.Message{}))
 	trace := s.wikiTraceObserver(session, generation)
@@ -684,7 +715,6 @@ func (s *Service) runWikiTimer(key SessionKey, generation int64, session Session
 		recorder.Complete(result, err)
 	}
 	trace.complete(ctx, result, err)
-	finish()
 	s.markWikiFinished(key, session, result, err)
 }
 
@@ -707,16 +737,22 @@ func (s *Service) runPendingWikiAsync(pending pendingWikiRun) {
 	if strings.TrimSpace(pending.session.ACPSessionID) == "" {
 		return
 	}
-	s.goBackground("pending-wiki", func() { s.runPendingWikiWithRuntimeKey(pending) })
+	s.goBackground(
+		context.Background(),
+		"pending-wiki",
+		func(ctx context.Context) {
+			s.runPendingWikiWithRuntimeKey(ctx, pending)
+		},
+	)
 }
 
-func (s *Service) runPendingWikiWithRuntimeKey(pending pendingWikiRun) {
+func (s *Service) runPendingWikiWithRuntimeKey(parent context.Context, pending pendingWikiRun) {
 	pending.session.Key = normalizeSessionKey(pending.session.Key)
 	key := pending.session.Key
 	runtime := wikiRuntimeKey(key, pending.generation, pending.session.ACPSessionID)
 	// Pending wiki runs resume after foreground work finishes, outside the
 	// original request lifecycle.
-	ctx, finish, ok := s.startWikiTask(context.Background(), pending.session, pending.agent, runtime)
+	ctx, finish, ok := s.startWikiTask(parent, pending.session, pending.agent, runtime)
 	if !ok {
 		s.scheduleWikiAfterUserPrompt(pending.session, pending.agent)
 		return

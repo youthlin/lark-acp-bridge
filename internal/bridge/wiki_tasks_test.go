@@ -54,6 +54,45 @@ func TestWikiTimerRunsSilentReflection(t *testing.T) {
 	}
 }
 
+func TestWikiTimerPromptPanicCleansTask(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptPanic: true}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	svc.taskMu.Lock()
+	if svc.wikiGenerations == nil {
+		svc.wikiGenerations = make(map[SessionKey]int64)
+	}
+	svc.wikiGenerations[key] = 1
+	svc.taskMu.Unlock()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("runWikiTimer did not panic")
+		}
+		svc.taskMu.Lock()
+		remainingTask := svc.tasks[key]
+		busy := svc.hasWorkspaceTaskLocked(key, workspace)
+		svc.taskMu.Unlock()
+		if remainingTask != nil {
+			t.Fatalf("remaining task after wiki timer panic = %+v, want cleaned", remainingTask)
+		}
+		if busy {
+			t.Fatal("workspace lock remains after wiki timer panic")
+		}
+	}()
+	svc.runWikiTimer(context.Background(), key, 1, session, mustConfigAgent(t, config.Default(), "traex"))
+}
+
 func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bots[0].WikiTrace = config.WikiTraceConfig{Enabled: true, ChatID: "oc_trace"}
@@ -88,7 +127,7 @@ func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
 	svc.wikiGenerations[key] = 1
 	svc.taskMu.Unlock()
 
-	svc.runWikiTimer(key, 1, session, mustConfigAgent(t, cfg, "traex"))
+	svc.runWikiTimer(context.Background(), key, 1, session, mustConfigAgent(t, cfg, "traex"))
 
 	if rt.promptCallCount() != 1 || !rt.promptCalls[0].HasUpdateHandler {
 		t.Fatalf("prompt calls = %+v, want wiki trace update handler", rt.promptCalls)
@@ -136,7 +175,7 @@ func TestPendingWikiTraceKeepsIndependentRuntimeKey(t *testing.T) {
 		agent: mustConfigAgent(t, cfg, "traex"),
 	}
 
-	svc.runPendingWikiWithRuntimeKey(pending)
+	svc.runPendingWikiWithRuntimeKey(context.Background(), pending)
 
 	if rt.wikiRuntimeCallCount() != 1 {
 		t.Fatalf("wiki runtime calls = %d, want one", rt.wikiRuntimeCallCount())

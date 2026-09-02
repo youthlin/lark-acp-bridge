@@ -175,11 +175,17 @@ func (c *wikiCoordinator) enqueue(sourceID string) {
 	start := c.running == ""
 	c.mu.Unlock()
 	if start {
-		c.service.goBackground("wiki-companion", c.drain)
+		c.service.goBackground(
+			context.Background(),
+			"wiki-companion",
+			func(ctx context.Context) {
+				c.drain(ctx)
+			},
+		)
 	}
 }
 
-func (c *wikiCoordinator) drain() {
+func (c *wikiCoordinator) drain(serviceCtx context.Context) {
 	for {
 		c.mu.Lock()
 		if c.stopped || c.running != "" || len(c.queue) == 0 {
@@ -191,7 +197,7 @@ func (c *wikiCoordinator) drain() {
 		delete(c.queued, sourceID)
 		c.running = sourceID
 		c.runningAt = time.Now()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(serviceCtx)
 		c.cancel = cancel
 		c.mu.Unlock()
 

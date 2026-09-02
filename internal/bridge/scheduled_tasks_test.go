@@ -484,6 +484,11 @@ func TestStartLoadsEnabledScheduledTasksAndTriggersRuns(t *testing.T) {
 	if err := svc.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := svc.Shutdown(context.Background()); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	})
 	if got := svc.scheduledTaskJobCount(); got != 1 {
 		t.Fatalf("scheduledTaskJobCount() = %d, want only enabled task registered", got)
 	}

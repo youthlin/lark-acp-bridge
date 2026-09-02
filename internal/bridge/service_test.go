@@ -180,6 +180,23 @@ func (f *fakeSentMessageClient) StartStreamCard(ctx context.Context, msg feishu.
 	return f.streamStarter(ctx, msg, options)
 }
 
+type fakeStreamCardCollector struct {
+	mu    sync.Mutex
+	cards []*fakeStreamCard
+}
+
+func (c *fakeStreamCardCollector) add(card *fakeStreamCard) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cards = append(c.cards, card)
+}
+
+func (c *fakeStreamCardCollector) snapshot() []*fakeStreamCard {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]*fakeStreamCard(nil), c.cards...)
+}
+
 func (f *fakeSentMessageClient) StartProcessingReaction(ctx context.Context, msg feishu.Message) func() {
 	if f == nil || f.reactionStarter == nil {
 		return func() {}
@@ -8665,11 +8682,11 @@ func TestHandleFeishuMessageRefreshesRunningStreamCardStatus(t *testing.T) {
 	}
 	svc := newTestService(config.Default(), store)
 	svc.setRuntime(rt)
-	var cards []*fakeStreamCard
+	var cards fakeStreamCardCollector
 	client := newFakeSentMessageClient("")
 	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
-		cards = append(cards, card)
+		cards.add(card)
 		return card, nil
 	}
 	svc.setOutbound(session.Key.BotID, client)
@@ -8694,7 +8711,8 @@ func TestHandleFeishuMessageRefreshesRunningStreamCardStatus(t *testing.T) {
 		}{reply: reply, err: err}
 	}()
 	waitForCondition(t, time.Second, func() bool {
-		return len(cards) == 1 && len(cards[0].statusUpdatesSnapshot()) >= 2
+		snapshot := cards.snapshot()
+		return len(snapshot) == 1 && len(snapshot[0].statusUpdatesSnapshot()) >= 2
 	})
 
 	close(rt.blockPrompt)
@@ -10435,11 +10453,11 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 	ctx := context.Background()
-	var cards []*fakeStreamCard
+	var cards fakeStreamCardCollector
 	client := newFakeSentMessageClient("")
 	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		card := &fakeStreamCard{}
-		cards = append(cards, card)
+		cards.add(card)
 		return card, nil
 	}
 	svc.setOutbound("bot-a", client)
@@ -10488,7 +10506,7 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	if got := rt.promptCallCount(); got != 1 {
 		t.Fatalf("prompt calls = %d, want replacement prompt to wait for runtime cancel", got)
 	}
-	waitForCondition(t, time.Second, func() bool { return len(cards) >= 2 })
+	waitForCondition(t, time.Second, func() bool { return len(cards.snapshot()) >= 2 })
 	select {
 	case got := <-secondDone:
 		t.Fatalf("second prompt finished before runtime cancel returned: %+v", got)
@@ -10533,36 +10551,37 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 		t.Fatalf("prompt/cancel calls = %+v / %+v, want runtime cancel before replacement prompt", rt.promptCalls, rt.cancelCalls)
 	}
 	rt.mu.Unlock()
-	if len(cards) == 0 {
+	cardSnapshot := cards.snapshot()
+	if len(cardSnapshot) == 0 {
 		t.Fatal("old prompt should create a stream card before cancellation")
 	}
 	cancelled := false
-	for _, update := range cards[0].processUpdatesSnapshot() {
+	for _, update := range cardSnapshot[0].processUpdatesSnapshot() {
 		if strings.Contains(update, "已取消") {
 			cancelled = true
 			break
 		}
 	}
 	if !cancelled {
-		t.Fatalf("process updates = %+v, want cancellation marker", cards[0].processUpdatesSnapshot())
+		t.Fatalf("process updates = %+v, want cancellation marker", cardSnapshot[0].processUpdatesSnapshot())
 	}
 	statusCancelled := false
-	for _, update := range cards[0].statusUpdatesSnapshot() {
+	for _, update := range cardSnapshot[0].statusUpdatesSnapshot() {
 		if strings.Contains(update, "🚫") {
 			statusCancelled = true
 			break
 		}
 	}
 	if !statusCancelled {
-		t.Fatalf("status updates = %+v, want cancelled status", cards[0].statusUpdatesSnapshot())
+		t.Fatalf("status updates = %+v, want cancelled status", cardSnapshot[0].statusUpdatesSnapshot())
 	}
-	if !cards[0].isClosed() {
+	if !cardSnapshot[0].isClosed() {
 		t.Fatal("cancelled old card should be closed")
 	}
-	if len(cards) < 2 {
-		t.Fatalf("cards = %+v, want replacement stream card", cards)
+	if len(cardSnapshot) < 2 {
+		t.Fatalf("cards = %+v, want replacement stream card", cardSnapshot)
 	}
-	replacementStatus := cards[1].statusUpdatesSnapshot()
+	replacementStatus := cardSnapshot[1].statusUpdatesSnapshot()
 	if !hasSubstring(replacementStatus, "等待中断") {
 		t.Fatalf("replacement status updates = %+v, want waiting status", replacementStatus)
 	}
@@ -11639,7 +11658,7 @@ func TestNewMessageCancelsRunningWikiReflection(t *testing.T) {
 	svc.taskMu.Unlock()
 	wikiDone := make(chan struct{})
 	go func() {
-		svc.runWikiTimer(key, 1, session, mustConfigAgent(t, config.Default(), "traex"))
+		svc.runWikiTimer(context.Background(), key, 1, session, mustConfigAgent(t, config.Default(), "traex"))
 		close(wikiDone)
 	}()
 	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
@@ -11811,6 +11830,7 @@ type fakeRuntime struct {
 	blockAfterPromptCancel bool
 	promptResult           acp.PromptResult
 	promptResults          []acp.PromptResult
+	promptPanic            bool
 	configOptions          []acp.SessionConfigOption
 	configCalls            []fakeConfigCall
 	modeCalls              []fakeModeCall
@@ -12005,12 +12025,16 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	if result.Text == "" {
 		result.Text = f.promptReply
 	}
+	promptPanic := f.promptPanic
 	var promptErr error
 	if len(f.promptErrors) > 0 {
 		promptErr = f.promptErrors[0]
 		f.promptErrors = f.promptErrors[1:]
 	}
 	f.mu.Unlock()
+	if promptPanic {
+		panic("prompt panic")
+	}
 	if opts.OnUpdate != nil {
 		for _, update := range updates {
 			opts.OnUpdate(update)

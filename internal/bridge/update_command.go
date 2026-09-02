@@ -77,13 +77,17 @@ func (s *Service) handleUpdateCommand(ctx context.Context, text string, msg feis
 	}
 
 	// 更新涉及网络下载，异步执行，避免阻塞飞书事件处理；通过中间消息回报结果。
-	s.goBackground("update-command", func() {
-		if rollback {
-			s.runUpdateRollbackCommand(context.WithoutCancel(ctx), msg, opts)
-			return
-		}
-		s.runUpdateCommand(context.WithoutCancel(ctx), msg, opts, *checkOnly, strings.TrimSpace(*target))
-	})
+	s.goBackground(
+		context.WithoutCancel(ctx),
+		"update-command",
+		func(ctx context.Context) {
+			if rollback {
+				s.runUpdateRollbackCommand(ctx, msg, opts)
+				return
+			}
+			s.runUpdateCommand(ctx, msg, opts, *checkOnly, strings.TrimSpace(*target))
+		},
+	)
 	return ""
 }
 

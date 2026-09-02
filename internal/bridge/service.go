@@ -122,6 +122,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		serviceACPUpdates: serviceACPUpdates{
 			acpUpdateUnsub: make(map[SessionKey]func()),
 		},
+		backgroundWg: newBackgroundGoroutines(),
 	}
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]

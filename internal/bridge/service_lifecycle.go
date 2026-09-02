@@ -146,6 +146,7 @@ func (s *Service) persistResolvedConfig(ctx context.Context) {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	slog.Info("关闭 ACP 桥接服务")
+	s.stopBackgroundStarts()
 	if runtime, ok := s.runtime.(*runtimeManager); ok {
 		runtime.stopIdleCleaner()
 	}
@@ -154,6 +155,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		coordinator.stop()
 	}
 	s.cancelAllSessionWork(ctx)
+	s.cancelBackgroundRoot()
 	waitCtx, cancel := context.WithTimeout(ctx, shutdownBackgroundWait)
 	s.waitBackgroundShutdown(waitCtx)
 	cancel()
@@ -172,15 +174,19 @@ func (s *Service) consumeRestartAckAsync(ctx context.Context, adapter restartAck
 	if strings.TrimSpace(bot.Workspace) == "" {
 		return
 	}
-	s.goBackground("restart-ack", func() {
-		// Restart ack is consumed during service startup, outside any
-		// inbound Feishu request; keep it bounded but independent.
-		ackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := consumeRestartAck(ackCtx, bot.Workspace, adapter, bot.ID); err != nil {
-			slog.WarnContext(ctx, "消费重启确认消息失败", "bot", displayBotID(bot.ID), "错误", err)
-		}
-	})
+	s.goBackground(
+		context.WithoutCancel(ctx),
+		"restart-ack",
+		func(ctx context.Context) {
+			// Restart ack is consumed during service startup, outside any
+			// inbound Feishu request; keep it bounded but independent.
+			ackCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := consumeRestartAck(ackCtx, bot.Workspace, adapter, bot.ID); err != nil {
+				slog.WarnContext(ctx, "消费重启确认消息失败", "bot", displayBotID(bot.ID), "错误", err)
+			}
+		},
+	)
 }
 
 func (s *Service) runRestartCommand(ctx context.Context, workspace string) {

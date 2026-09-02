@@ -65,7 +65,17 @@ func (s *Service) startScheduledTask(ctx context.Context, task ScheduledTask, wo
 	if existing != nil && existing.cancel != nil {
 		existing.cancel()
 	}
-	s.goBackground("scheduled-task:"+task.ID, func() { s.runScheduledTaskJob(jobCtx, job) })
+	if !s.goBackground(
+		jobCtx,
+		"scheduled-task:"+task.ID,
+		func(ctx context.Context) {
+			s.runScheduledTaskJob(ctx, job)
+		},
+	) {
+		cancel()
+		s.removeScheduledTaskJob(job)
+		return fmt.Errorf("服务正在关闭")
+	}
 	return nil
 }
 
@@ -127,11 +137,19 @@ func (s *Service) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJob
 			s.completeOnceScheduledTask(ctx, job.task)
 			return
 		}
-		s.goBackground("scheduled-run:"+job.task.ID+"/"+runID, func() {
-			defer job.removeActiveRun(runID)
-			defer cancel()
-			s.executeScheduledTaskRun(runCtx, job, runID, triggeredAt)
-		})
+		if !s.goBackground(
+			runCtx,
+			"scheduled-run:"+job.task.ID+"/"+runID,
+			func(ctx context.Context) {
+				defer job.removeActiveRun(runID)
+				defer cancel()
+				s.executeScheduledTaskRun(ctx, job, runID, triggeredAt)
+			},
+		) {
+			cancel()
+			job.removeActiveRun(runID)
+			return
+		}
 	}
 }
 
