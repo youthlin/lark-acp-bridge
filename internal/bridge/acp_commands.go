@@ -60,6 +60,10 @@ func (s *Service) forwardACPCommand(ctx context.Context, command string, msg fei
 	if !ok {
 		return "未找到 agent 配置：" + session.AgentName
 	}
+	command, err := s.sanitizeACPCommandSecretsForModel(msg, session, command)
+	if err != nil {
+		return "处理敏感输入失败：" + err.Error()
+	}
 	result, _, err := s.runUserPrompt(ctx, msg, session, agent, command)
 	reply := result.Text
 	if err != nil {

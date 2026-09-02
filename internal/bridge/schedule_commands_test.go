@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,6 +170,83 @@ func TestHandleScheduleCommandAddCronSpec(t *testing.T) {
 	tasks := svc.scheduledTaskStoreForBotID("bot-a").List()
 	if len(tasks) != 1 || tasks[0].Spec != "0 9 * * 1" || tasks[0].Prompt != "生成周报" {
 		t.Fatalf("tasks = %+v, want cron task", tasks)
+	}
+}
+
+func TestHandleScheduleCommandSanitizesSecretPromptBeforePersisting(t *testing.T) {
+	workspace := t.TempDir()
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace, OwnerOpenIDs: []string{testOwnerOpenID}}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd}}},
+	}
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-schedule-secret"}, promptReply: "schedule done"}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	svc.setRuntime(rt)
+	msg := feishu.Message{
+		BotID:     "bot-a",
+		ChatID:    "oc_chat",
+		ChatType:  "p2p",
+		MessageID: "om_schedule_secret",
+		SenderID:  testOwnerOpenID,
+		Workspace: workspace,
+		Text:      "/schedule add @every 1h 配置模型 BASE_URL=https://example.com API_KEY=sk-schedule-secret",
+	}
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/schedule add secret) error = %v", err)
+	}
+	if !strings.Contains(reply, "已创建定时任务：task-") {
+		t.Fatalf("reply = %q, want created task", reply)
+	}
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	tasks := store.List()
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, want one task", tasks)
+	}
+	task := tasks[0]
+	if strings.Contains(task.Prompt, "sk-schedule-secret") || strings.Contains(task.Prompt, secretInputNoticeTemplate) {
+		t.Fatalf("persisted prompt = %q, should not include raw secret or runtime notice", task.Prompt)
+	}
+	if !strings.Contains(task.Prompt, "BASE_URL=https://example.com") || !strings.Contains(task.Prompt, "API_KEY=[已隐藏: ") {
+		t.Fatalf("persisted prompt = %q, want base URL and secret file placeholder", task.Prompt)
+	}
+	list := svc.handleScheduleCommand(context.Background(), "/schedule list", msg)
+	status := svc.handleScheduleCommand(context.Background(), "/schedule status "+task.ID, msg)
+	for name, text := range map[string]string{"list": list, "status": status} {
+		if strings.Contains(text, "sk-schedule-secret") || strings.Contains(text, ".local/secret-inputs") {
+			t.Fatalf("%s output = %q, should not expose raw secret or secret path", name, text)
+		}
+		if !strings.Contains(text, "API_KEY="+secretInputPlaceholder) {
+			t.Fatalf("%s output = %q, want display placeholder", name, text)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, ".local", secretInputsDirName, "om_schedule_secret", "secret-1.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(secret) error = %v", err)
+	}
+	if string(data) != "sk-schedule-secret" {
+		t.Fatalf("secret file content = %q, want raw secret", string(data))
+	}
+
+	runResult, err := svc.runScheduledTaskOnce(context.Background(), task, "run-1", time.Now(), workspace, noopTriggerSink{})
+	if err != nil {
+		t.Fatalf("runScheduledTaskOnce() error = %v", err)
+	}
+	if runResult.TriggerResult.Request.Prompt == "" {
+		t.Fatalf("trigger result = %+v, want request prompt", runResult.TriggerResult)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one schedule runtime call", calls)
+	}
+	prompt := calls[0].Text
+	if strings.Contains(prompt, "sk-schedule-secret") {
+		t.Fatalf("runtime prompt = %q, should not include raw secret", prompt)
+	}
+	if !strings.Contains(prompt, secretInputNoticeTemplate) || !strings.Contains(prompt, "API_KEY=[已隐藏: ") {
+		t.Fatalf("runtime prompt = %q, want notice and placeholder", prompt)
 	}
 }
 

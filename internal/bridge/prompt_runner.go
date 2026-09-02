@@ -22,10 +22,11 @@ type promptSessionOptions struct {
 }
 
 type preparedPrompt struct {
-	session Session
-	agent   config.AgentConfig
-	text    string
-	errText string
+	session   Session
+	agent     config.AgentConfig
+	text      string
+	titleText string
+	errText   string
 }
 
 type promptStreamRun struct {
@@ -212,7 +213,7 @@ func (s *Service) promptWithOptions(ctx context.Context, msg feishu.Message, tex
 	if prepared.errText != "" {
 		return prepared.errText, nil
 	}
-	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, text, opts)
+	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, prepared.titleText, opts)
 }
 
 func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (preparedPrompt, error) {
@@ -223,7 +224,11 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 			return preparedPrompt{errText: errText}, nil
 		}
 		text := promptTextWithReplyContext(msg, userText)
-		return preparedPrompt{session: created, agent: agent, text: text}, nil
+		sanitized, err := s.sanitizePromptSecretsForModel(msg, created, text, userText)
+		if err != nil {
+			return preparedPrompt{}, err
+		}
+		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
 	}
 	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
 		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
@@ -231,7 +236,11 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 			return preparedPrompt{errText: errText}, nil
 		}
 		text := promptTextWithReplyContext(msg, userText)
-		return preparedPrompt{session: created, agent: agent, text: text}, nil
+		sanitized, err := s.sanitizePromptSecretsForModel(msg, created, text, userText)
+		if err != nil {
+			return preparedPrompt{}, err
+		}
+		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
@@ -245,7 +254,11 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 		}
 		session = created
 	}
-	return preparedPrompt{session: session, agent: agent, text: text}, nil
+	sanitized, err := s.sanitizePromptSecretsForModel(msg, session, text, userText)
+	if err != nil {
+		return preparedPrompt{}, err
+	}
+	return preparedPrompt{session: session, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
 }
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string, opts promptSessionOptions) (string, error) {

@@ -45,7 +45,7 @@ func (s *Service) handleQueueCommand(ctx context.Context, text string, msg feish
 		session:  session,
 		agent:    prepared.agent,
 		text:     prepared.text,
-		userText: userText,
+		userText: prepared.titleText,
 	})
 	if !s.sessionHasRunningUserTask(session.Key) {
 		s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)

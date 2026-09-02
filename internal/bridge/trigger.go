@@ -140,6 +140,24 @@ func (s *Service) runTriggerPrompt(ctx context.Context, req TriggerRequest) (Tri
 		return result, err
 	}
 	req = prepared.request
+	secretSession := prepared.session
+	if !prepared.hasSession {
+		secretSession = Session{
+			Key:       req.Key,
+			Workspace: req.Workspace,
+		}
+	}
+	if sanitizedReq, err := s.sanitizeTriggerRequestSecrets(req, secretSession); err != nil {
+		result := TriggerResult{Request: req, Session: prepared.session, Err: err}
+		slog.ErrorContext(ctx, "隐藏 trigger prompt 中的敏感输入失败", append(triggerLogArgs(req, prepared.session), slog.Any("错误", err))...)
+		if req.Sink != nil {
+			_ = req.Sink.OnError(ctx, result)
+		}
+		return result, err
+	} else {
+		prepared.request = sanitizedReq
+		req = sanitizedReq
+	}
 	if !prepared.hasSession {
 		session, err := s.createTriggerSession(ctx, prepared)
 		if err != nil {

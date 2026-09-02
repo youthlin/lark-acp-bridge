@@ -120,6 +120,9 @@ func (s *Service) handleScheduleAddCommand(ctx context.Context, text string, msg
 	if errText != "" {
 		return errText
 	}
+	if errText := s.sanitizeScheduleTaskPrompt(msg, &args); errText != "" {
+		return errText
+	}
 	task := newScheduledTaskFromCommand(msg, scheduleTaskArgs{
 		Spec:      args.Spec,
 		Prompt:    args.Prompt,
@@ -154,6 +157,9 @@ func (s *Service) handleScheduleOnceCommand(ctx context.Context, text string, ms
 		agentName: s.chatAgentName(msg),
 	})
 	if errText != "" {
+		return errText
+	}
+	if errText := s.sanitizeScheduleTaskPrompt(msg, &args); errText != "" {
 		return errText
 	}
 	task := newScheduledTaskFromCommand(msg, scheduleTaskArgs{
@@ -501,7 +507,7 @@ func (s *Service) handleScheduleListCommand(msg feishu.Message) string {
 		if task.Once {
 			state = "一次性"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s [%s]\n   触发：%s\n   agent：%s\n   cwd：%s\n   prompt：%s", i+1, task.ID, state, scheduledTaskTriggerText(task), task.AgentName, task.Cwd, oneLine(task.Prompt, 80)))
+		lines = append(lines, fmt.Sprintf("%d. %s [%s]\n   触发：%s\n   agent：%s\n   cwd：%s\n   prompt：%s", i+1, task.ID, state, scheduledTaskTriggerText(task), task.AgentName, task.Cwd, oneLine(redactSensitiveValuesForDisplay(task.Prompt), 80)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -521,7 +527,7 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		"触发：" + scheduledTaskTriggerText(task),
 		"agent：" + task.AgentName,
 		"cwd：" + task.Cwd,
-		"prompt：" + task.Prompt,
+		"prompt：" + redactSensitiveValuesForDisplay(task.Prompt),
 		"创建者：" + task.CreatorOpenID,
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
 		missedSchedulePolicyText(),
@@ -573,6 +579,9 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 	if errText != "" {
 		return errText
 	}
+	if errText := s.sanitizeScheduleTaskPrompt(msg, &args); errText != "" {
+		return errText
+	}
 	task, ok, err := store.Update(id, func(task *ScheduledTask) {
 		task.Spec = args.Spec
 		task.AgentName = agentName
@@ -596,6 +605,22 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 		s.stopScheduledTask(ctx, task)
 	}
 	return formatScheduledTaskUpdated(task)
+}
+
+func (s *Service) sanitizeScheduleTaskPrompt(msg feishu.Message, args *scheduleTaskArgs) string {
+	if args == nil {
+		return ""
+	}
+	session := Session{
+		Key:       imSessionKey(msg.BotID, msg.ChatID, firstNonEmpty(msg.ThreadID, msg.RootID, msg.MessageID)),
+		Workspace: firstNonEmpty(msg.Workspace, s.botWorkspace(msg.BotID)),
+	}
+	sanitized, err := s.sanitizePromptSecretsToFiles(msg, session, args.Prompt)
+	if err != nil {
+		return "处理敏感输入失败：" + err.Error()
+	}
+	args.Prompt = sanitized
+	return ""
 }
 
 func (s *Service) handleScheduleRunCommand(ctx context.Context, msg feishu.Message, id string) string {
@@ -714,7 +739,7 @@ func formatScheduledTaskUpdated(task ScheduledTask) string {
 		"触发：" + scheduledTaskTriggerText(task),
 		"agent：" + task.AgentName,
 		"cwd：" + task.Cwd,
-		"prompt：" + task.Prompt,
+		"prompt：" + redactSensitiveValuesForDisplay(task.Prompt),
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
 	}, "\n")
 }

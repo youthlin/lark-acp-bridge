@@ -32,7 +32,7 @@ func (s *Service) handleAtAutoPromptMessage(ctx context.Context, incoming incomi
 	if strings.TrimSpace(decisionPrompt) == "" {
 		return "", nil
 	}
-	if !s.beginAtAutoFlowOrQueue(source.Key, pendingAtMessageFromMessage(incoming.msg)) {
+	if !s.beginAtAutoFlowOrQueue(source.Key, s.pendingAtMessageFromMessage(incoming.msg)) {
 		return "", nil
 	}
 	defer func() {
@@ -363,7 +363,7 @@ func (s *Service) formatAtAutoDecisionPromptWithMessages(source Session, message
 		s.formatAtAutoSourceContext(source),
 	}
 	sections = append(sections, messageSections...)
-	return strings.Join(nonEmptySections(sections), "\n\n")
+	return redactSensitiveValuesForDisplay(strings.Join(nonEmptySections(sections), "\n\n"))
 }
 
 func (s *Service) formatAtAutoSourceContext(source Session) string {
@@ -400,7 +400,7 @@ func (s *Service) atAutoSourceTracePath(source Session) string {
 }
 
 func formatAtAutoPendingResponsePrompt(messages []pendingAtMessage) string {
-	history := formatPendingAtMessageBlock("下面是需要处理的群消息：", messages)
+	history := formatPendingAtMessageBlockForModel("下面是需要处理的群消息：", messages)
 	if history == "" {
 		return ""
 	}

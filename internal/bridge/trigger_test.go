@@ -302,6 +302,121 @@ func TestRunTriggerPromptCreatesSessionFromExplicitRequest(t *testing.T) {
 	}
 }
 
+func TestRunTriggerPromptSanitizesSecretsBeforeRuntimeAndTrace(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:        "bot-a",
+			Workspace: workspace,
+		}},
+		AgentList: []config.NamedAgentConfig{{
+			Name:        "traex",
+			AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd},
+		}},
+	}
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger-secret"}, promptReply: "done"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:secret", SubID: "run:1"}
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:          "bot-a",
+		Key:            key,
+		TraceMessageID: "trigger_secret_msg",
+		Workspace:      workspace,
+		AgentName:      "traex",
+		Cwd:            cwd,
+		Title:          "API_KEY=sk-trigger-title",
+		Prompt:         "配置模型 API_KEY=sk-trigger-secret",
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one trigger prompt", calls)
+	}
+	prompt := calls[0].Text
+	if strings.Contains(prompt, "sk-trigger-secret") {
+		t.Fatalf("runtime prompt = %q, should not include raw secret", prompt)
+	}
+	if !strings.Contains(prompt, secretInputNoticeTemplate) || !strings.Contains(prompt, "API_KEY=[已隐藏: ") {
+		t.Fatalf("runtime prompt = %q, want notice and placeholder", prompt)
+	}
+	updated, ok := store.Get(key)
+	if !ok {
+		t.Fatalf("stored trigger session missing for %+v", key)
+	}
+	if strings.Contains(updated.Title, "sk-trigger-title") || updated.Title != "API_KEY="+secretInputPlaceholder {
+		t.Fatalf("stored trigger title = %q, want display placeholder only", updated.Title)
+	}
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-trigger-secret.jsonl"))
+	if len(records) == 0 {
+		t.Fatal("trace records missing")
+	}
+	content, _ := records[0]["content"].(string)
+	if strings.Contains(content, "sk-trigger-secret") {
+		t.Fatalf("trace user content = %q, should not include raw secret", content)
+	}
+	if !strings.Contains(content, secretInputNoticeTemplate) || !strings.Contains(content, "API_KEY=[已隐藏: ") {
+		t.Fatalf("trace user content = %q, want notice and placeholder", content)
+	}
+}
+
+func TestRunTriggerPromptSanitizesSecretsWhenNoticeAlreadyExists(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))
+	cwd := t.TempDir()
+	cfg := config.Config{
+		Bots: []config.BotConfig{{
+			ID:        "bot-a",
+			Workspace: workspace,
+		}},
+		AgentList: []config.NamedAgentConfig{{
+			Name:        "traex",
+			AgentConfig: config.AgentConfig{Command: "traex", DefaultCwd: cwd},
+		}},
+	}
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-trigger-secret-notice"}, promptReply: "done"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	key := SessionKey{BotID: "bot-a", Source: "schedule", MainID: "task:secret-notice", SubID: "run:1"}
+
+	_, err := svc.runTriggerPrompt(context.Background(), TriggerRequest{
+		BotID:          "bot-a",
+		Key:            key,
+		TraceMessageID: "trigger_secret_notice_msg",
+		Workspace:      workspace,
+		AgentName:      "traex",
+		Cwd:            cwd,
+		Prompt:         secretInputNoticeTemplate + "\n\n继续配置 API_KEY=sk-trigger-notice-secret",
+	})
+	if err != nil {
+		t.Fatalf("runTriggerPrompt() error = %v", err)
+	}
+	calls := rt.promptCallsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("promptCalls = %+v, want one trigger prompt", calls)
+	}
+	prompt := calls[0].Text
+	if strings.Contains(prompt, "sk-trigger-notice-secret") {
+		t.Fatalf("runtime prompt = %q, should not include raw secret", prompt)
+	}
+	if !strings.Contains(prompt, "API_KEY=[已隐藏: ") {
+		t.Fatalf("runtime prompt = %q, want secret file placeholder", prompt)
+	}
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-trigger-secret-notice.jsonl"))
+	if len(records) == 0 {
+		t.Fatal("trace records missing")
+	}
+	content, _ := records[0]["content"].(string)
+	if strings.Contains(content, "sk-trigger-notice-secret") {
+		t.Fatalf("trace user content = %q, should not include raw secret", content)
+	}
+}
+
 func TestRunTriggerPromptUsesTextChunkFallback(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	svc := NewService(config.Config{

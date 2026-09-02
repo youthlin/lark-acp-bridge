@@ -197,7 +197,7 @@ func (s *Service) shouldIgnoreMessage(msg feishu.Message, text string) bool {
 }
 
 func (s *Service) cachePendingAtText(msg feishu.Message) {
-	entry := pendingAtMessageFromMessage(msg)
+	entry := s.pendingAtMessageFromMessage(msg)
 	if strings.TrimSpace(entry.Text) == "" {
 		return
 	}
@@ -234,26 +234,47 @@ func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText st
 	}, formatCurrentAtUserMessage(msg, promptText))
 }
 
-func pendingAtMessageFromMessage(msg feishu.Message) pendingAtMessage {
+func (s *Service) pendingAtMessageFromMessage(msg feishu.Message) pendingAtMessage {
+	text := strings.TrimSpace(msg.PromptText())
+	if text != "" {
+		session := Session{
+			Key:       sessionKeyFromMessage(msg),
+			Workspace: firstNonEmpty(msg.Workspace, s.botWorkspace(msg.BotID)),
+		}
+		sanitized, err := s.sanitizePromptSecretsToFiles(msg, session, text)
+		if err != nil {
+			slog.Warn("保存待处理 at 消息敏感输入失败", "bot", displayBotID(msg.BotID), "message_id", msg.MessageID, "错误", err)
+			sanitized = redactSensitiveValuesForDisplay(text)
+		}
+		text = strings.TrimSpace(sanitized)
+	}
 	return pendingAtMessage{
 		MessageID:          strings.TrimSpace(msg.MessageID),
 		ThreadID:           strings.TrimSpace(msg.ThreadID),
 		RootID:             strings.TrimSpace(msg.RootID),
 		ParentID:           strings.TrimSpace(msg.ParentID),
 		SenderID:           strings.TrimSpace(msg.SenderID),
-		Text:               strings.TrimSpace(msg.PromptText()),
+		Text:               text,
 		ForceReplyInThread: msg.ForceReplyInThread,
 	}
 }
 
 func formatPendingAtHistory(messages []pendingAtMessage) string {
-	return formatPendingAtMessageBlock(pendingAtHistoryHeader, messages)
+	return formatPendingAtMessageBlockForModel(pendingAtHistoryHeader, messages)
 }
 
 func formatPendingAtMessageBlock(header string, messages []pendingAtMessage) string {
+	return formatPendingAtMessageBlockWithText(header, messages, redactSensitiveValuesForDisplay)
+}
+
+func formatPendingAtMessageBlockForModel(header string, messages []pendingAtMessage) string {
+	return formatPendingAtMessageBlockWithText(header, messages, func(text string) string { return text })
+}
+
+func formatPendingAtMessageBlockWithText(header string, messages []pendingAtMessage, formatText func(string) string) string {
 	lines := []string{header}
 	for _, message := range messages {
-		text := strings.TrimSpace(message.Text)
+		text := strings.TrimSpace(formatText(message.Text))
 		if text == "" {
 			continue
 		}
@@ -302,7 +323,7 @@ func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {
 }
 
 func (s *Service) queueAtAutoMessageIfBusy(msg feishu.Message) bool {
-	entry := pendingAtMessageFromMessage(msg)
+	entry := s.pendingAtMessageFromMessage(msg)
 	if strings.TrimSpace(entry.Text) == "" {
 		return false
 	}

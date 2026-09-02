@@ -248,7 +248,10 @@ type incomingPromptMessage struct {
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
 	incoming := s.normalizeIncomingMessage(msg)
 	ctx = incomingMessageTraceContext(ctx, incoming.msg)
-	slog.DebugContext(ctx, "处理解析后的消息", "text", incoming.text, "prompt_text", incoming.promptText)
+	slog.DebugContext(ctx, "处理解析后的消息",
+		"text", redactSensitiveValuesForDisplay(incoming.text),
+		"prompt_text", redactSensitiveValuesForDisplay(incoming.promptText),
+	)
 
 	if s.shouldSkipIncomingMessage(ctx, incoming) {
 		return "", nil
