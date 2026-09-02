@@ -19,7 +19,7 @@ import (
 const (
 	acpRequestTimeout    = 10 * time.Minute
 	acpPromptIdleTimeout = 10 * time.Minute
-	acpPromptMaxDuration = time.Hour
+	acpPromptMaxDuration = 0
 
 	acpRuntimeIdleTimeout       = 30 * time.Minute
 	acpRuntimeIdleSweepInterval = 5 * time.Minute
@@ -211,6 +211,14 @@ func (slot runtimeClientSlot) close(manager *runtimeManager) error {
 		return nil
 	}
 	return manager.closeClient(slot.client, slot.sessionID)
+}
+
+func (slot runtimeClientSlot) forceClose() error {
+	slot.unsubscribe()
+	if slot.client == nil {
+		return nil
+	}
+	return slot.client.Close()
 }
 
 func (slot runtimeClientSlot) closeReplacedBy(manager *runtimeManager, replacement *acp.Client) error {
@@ -452,6 +460,10 @@ func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKe
 	}
 	defer release()
 	result, err := promptWithClient(ctx, client, session.ACPSessionID, text, opts)
+	if errors.Is(err, acp.ErrCancelResponseTimeout) {
+		r.detachBrokenRuntimeClient(key, client)
+		return result, err
+	}
 	if err == nil || !isBrokenACPClientPipeError(err) {
 		return result, err
 	}
@@ -513,7 +525,11 @@ func promptWithClient(ctx context.Context, client *acp.Client, sessionID string,
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if cause := context.Cause(timeout.Context()); errors.Is(cause, context.DeadlineExceeded) {
-				err = cause
+				if errors.Is(err, acp.ErrCancelResponseTimeout) {
+					err = fmt.Errorf("%w: %v", err, cause)
+				} else {
+					err = cause
+				}
 			}
 		}
 		return result, fmt.Errorf("session/prompt: %w", err)
@@ -600,9 +616,11 @@ func newPromptActivityTimeout(parent context.Context, idleTimeout, maxDuration t
 	}
 	timeout.mu.Lock()
 	timeout.idleTimer = time.AfterFunc(idleTimeout, timeout.handleIdleTimeout)
-	timeout.maxTimer = time.AfterFunc(maxDuration, func() {
-		timeout.expire("max_duration", fmt.Errorf("ACP prompt 执行超过绝对上限 %s: %w", maxDuration, context.DeadlineExceeded))
-	})
+	if maxDuration > 0 {
+		timeout.maxTimer = time.AfterFunc(maxDuration, func() {
+			timeout.expire("max_duration", fmt.Errorf("ACP prompt 执行超过绝对上限 %s: %w", maxDuration, context.DeadlineExceeded))
+		})
+	}
 	timeout.mu.Unlock()
 	return timeout
 }
@@ -652,8 +670,12 @@ func (t *promptActivityTimeout) Stop() {
 		return
 	}
 	t.stopped = true
-	t.idleTimer.Stop()
-	t.maxTimer.Stop()
+	if t.idleTimer != nil {
+		t.idleTimer.Stop()
+	}
+	if t.maxTimer != nil {
+		t.maxTimer.Stop()
+	}
 	t.cancel(context.Canceled)
 }
 
@@ -1153,7 +1175,7 @@ func (r *runtimeManager) detachBrokenRuntimeClient(key runtimeKey, broken *acp.C
 	}
 	r.mu.Unlock()
 	lock.Unlock()
-	_ = slot.close(r)
+	_ = slot.forceClose()
 }
 
 func isBrokenACPClientPipeError(err error) bool {

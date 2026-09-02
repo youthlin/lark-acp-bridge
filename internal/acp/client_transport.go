@@ -17,6 +17,10 @@ type rpcResponse struct {
 	err    error
 }
 
+var ErrCancelResponseTimeout = errors.New("ACP 请求取消后等待响应超时")
+
+type rpcCancelNotifier func(ctx context.Context, id *RequestID, afterWrite func(error))
+
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	return c.callWithAfterWrite(ctx, method, params, nil)
 }
@@ -41,6 +45,18 @@ func (c *Client) callWithLifecycle(
 	params any,
 	afterWrite func(),
 	cancelWait time.Duration,
+	onLifecycle PromptLifecycleHandler,
+) (json.RawMessage, error) {
+	return c.callWithLifecycleAndCancel(ctx, method, params, afterWrite, cancelWait, nil, onLifecycle)
+}
+
+func (c *Client) callWithLifecycleAndCancel(
+	ctx context.Context,
+	method string,
+	params any,
+	afterWrite func(),
+	cancelWait time.Duration,
+	cancelNotifier rpcCancelNotifier,
 	onLifecycle PromptLifecycleHandler,
 ) (json.RawMessage, error) {
 	// 仅当调用方未设置 deadline 时套用方法级默认超时，避免握手/会话操作永久挂起。
@@ -90,7 +106,10 @@ func (c *Client) callWithLifecycle(
 		ctxErr := ctx.Err()
 		cause := context.Cause(ctx)
 		emit("context_done", ctxErr, cause, 0)
-		c.cancelRequest(ctx, req.ID, func(err error) {
+		if cancelNotifier == nil {
+			cancelNotifier = c.cancelRequest
+		}
+		cancelNotifier(ctx, req.ID, func(err error) {
 			if err != nil {
 				emit("cancel_send_failed", err, cause, 0)
 				return
@@ -126,6 +145,7 @@ func (c *Client) callWithLifecycle(
 		case <-timer.C:
 			c.removePending(req.ID)
 			emit("cancel_wait_timeout", ctxErr, cause, time.Since(waitStartedAt))
+			return nil, fmt.Errorf("%w: 等待 ACP 请求取消响应超过 %s: %w", ctxErr, cancelWait, ErrCancelResponseTimeout)
 		}
 		return nil, ctxErr
 	case res := <-ch:

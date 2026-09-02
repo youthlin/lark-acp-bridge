@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
-const promptCancelResponseTimeout = -1
+// promptCancelResponseTimeout 是 session/cancel 后等待原 session/prompt response 的兜底窗口。
+// 定义为 var 仅方便单元测试临时缩短；生产代码不应修改。
+var promptCancelResponseTimeout = 10 * time.Second
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (string, error) {
 	result, err := c.PromptWithOptions(ctx, sessionID, text, PromptOptions{})
@@ -53,14 +56,19 @@ func (c *Client) PromptWithOptions(ctx context.Context, sessionID, text string, 
 	})
 	defer unsubscribe()
 
-	rawResult, err := c.callWithLifecycle(ctx, "session/prompt", map[string]any{
+	rawResult, err := c.callWithLifecycleAndCancel(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
 		},
 	}, func() {
 		c.activatePermissionHandler(sessionID, generation)
-	}, promptCancelResponseTimeout, func(event PromptLifecycleEvent) {
+	}, promptCancelResponseTimeout, func(ctx context.Context, _ *RequestID, afterWrite func(error)) {
+		err := c.CancelSession(ctx, sessionID)
+		if afterWrite != nil {
+			afterWrite(err)
+		}
+	}, func(event PromptLifecycleEvent) {
 		event.SessionID = sessionID
 		if opts.OnLifecycle != nil {
 			opts.OnLifecycle(event)

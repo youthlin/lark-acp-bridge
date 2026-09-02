@@ -2127,20 +2127,20 @@ func TestClientPromptWaitsForServerResponseAfterContextCancellation(t *testing.T
 	cancel()
 
 	cancelReq := server.readRequest(t)
-	if cancelReq.Method != "$/cancel_request" {
-		t.Fatalf("cancel method = %q, want $/cancel_request", cancelReq.Method)
+	if cancelReq.Method != "session/cancel" {
+		t.Fatalf("cancel method = %q, want session/cancel", cancelReq.Method)
 	}
 	if cancelReq.ID != nil {
 		t.Fatalf("cancel request id = %v, want notification", cancelReq.ID.Key())
 	}
 	var cancelParams struct {
-		ID RequestID `json:"id"`
+		SessionID string `json:"sessionId"`
 	}
 	if err := json.Unmarshal(cancelReq.Params, &cancelParams); err != nil {
 		t.Fatalf("Unmarshal cancel params error = %v", err)
 	}
-	if cancelParams.ID.Key() != firstReq.ID.Key() {
-		t.Fatalf("cancel id = %q, want %q", cancelParams.ID.Key(), firstReq.ID.Key())
+	if cancelParams.SessionID != "session-1" {
+		t.Fatalf("cancel sessionId = %q, want session-1", cancelParams.SessionID)
 	}
 
 	secondResult := make(chan error, 1)
@@ -2218,8 +2218,8 @@ func TestClientPromptLifecycleReportsCancellationWait(t *testing.T) {
 	}
 	cancel()
 	cancelReq := server.readRequest(t)
-	if cancelReq.Method != "$/cancel_request" {
-		t.Fatalf("cancel method = %q, want $/cancel_request", cancelReq.Method)
+	if cancelReq.Method != "session/cancel" {
+		t.Fatalf("cancel method = %q, want session/cancel", cancelReq.Method)
 	}
 	server.writeResponse(t, req.ID, map[string]any{"stopReason": "cancelled"})
 	select {
@@ -2258,6 +2258,72 @@ func TestClientPromptLifecycleReportsCancellationWait(t *testing.T) {
 	}
 	if byStage["cancel_wait_finished"].Elapsed <= 0 {
 		t.Fatalf("cancel_wait_finished event = %+v, want elapsed", byStage["cancel_wait_finished"])
+	}
+}
+
+func TestClientPromptReturnsAfterCancellationWaitTimeout(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{ProtocolVersion: 1}
+	oldTimeout := promptCancelResponseTimeout
+	promptCancelResponseTimeout = 30 * time.Millisecond
+	defer func() {
+		promptCancelResponseTimeout = oldTimeout
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan PromptLifecycleEvent, 16)
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.PromptWithOptions(ctx, "session-1", "开始 review", PromptOptions{
+			OnLifecycle: func(event PromptLifecycleEvent) {
+				events <- event
+			},
+		})
+		result <- err
+		close(events)
+	}()
+
+	req := server.readRequest(t)
+	if req.Method != "session/prompt" {
+		t.Fatalf("method = %q, want session/prompt", req.Method)
+	}
+	cancel()
+	cancelReq := server.readRequest(t)
+	if cancelReq.Method != "session/cancel" {
+		t.Fatalf("cancel method = %q, want session/cancel", cancelReq.Method)
+	}
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PromptWithOptions() error = %v, want context.Canceled", err)
+		}
+		if !errors.Is(err, ErrCancelResponseTimeout) {
+			t.Fatalf("PromptWithOptions() error = %v, want ErrCancelResponseTimeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PromptWithOptions() did not return after cancellation wait timeout")
+	}
+
+	var got []PromptLifecycleEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	stages := make([]string, 0, len(got))
+	byStage := make(map[string]PromptLifecycleEvent)
+	for _, event := range got {
+		stages = append(stages, event.Stage)
+		byStage[event.Stage] = event
+	}
+	if _, ok := byStage["cancel_wait_timeout"]; !ok {
+		t.Fatalf("lifecycle stages = %v, want cancel_wait_timeout", stages)
+	}
+	if _, ok := byStage["cancel_wait_finished"]; ok {
+		t.Fatalf("lifecycle stages = %v, did not want cancel_wait_finished", stages)
+	}
+	if byStage["cancel_wait_timeout"].WaitDuration <= 0 {
+		t.Fatalf("cancel_wait_timeout event = %+v, want wait duration", byStage["cancel_wait_timeout"])
 	}
 }
 

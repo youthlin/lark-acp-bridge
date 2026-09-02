@@ -519,3 +519,36 @@ func TestPromptActivityTimeoutKeepsAbsoluteLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptActivityTimeoutAllowsDisabledAbsoluteLimit(t *testing.T) {
+	timeout := newPromptActivityTimeout(context.Background(), 80*time.Millisecond, 0)
+	defer timeout.Stop()
+
+	ticker := time.NewTicker(30 * time.Millisecond)
+	defer ticker.Stop()
+	stopTouching := time.After(180 * time.Millisecond)
+	for touching := true; touching; {
+		select {
+		case <-ticker.C:
+			timeout.Touch()
+		case <-timeout.Context().Done():
+			t.Fatalf("prompt activity timeout expired while idle kept moving and absolute limit was disabled: %v", context.Cause(timeout.Context()))
+		case <-stopTouching:
+			touching = false
+		}
+	}
+
+	select {
+	case <-timeout.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("prompt activity timeout did not expire after idle updates stopped")
+	}
+
+	cause := context.Cause(timeout.Context())
+	if !errors.Is(cause, context.DeadlineExceeded) {
+		t.Fatalf("cause = %v, want context.DeadlineExceeded", cause)
+	}
+	if !strings.Contains(cause.Error(), "未收到活动更新") {
+		t.Fatalf("cause = %v, want idle timeout detail", cause)
+	}
+}
