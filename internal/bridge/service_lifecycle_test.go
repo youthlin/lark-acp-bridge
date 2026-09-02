@@ -113,7 +113,7 @@ func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
 	if !strings.Contains(string(gitignore), ".local/") {
 		t.Fatalf(".gitignore = %q, want .local/", gitignore)
 	}
-	store := svc.stores["bot-a"]
+	store := svc.storeForBotID("bot-a")
 	if store == nil {
 		t.Fatal("bot store is nil")
 	}
@@ -219,7 +219,7 @@ func TestStartUpgradesExistingWorkspaceBuiltinSkills(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", file.name, data, file.want)
 		}
 	}
-	store := svc.stores["bot-a"]
+	store := svc.storeForBotID("bot-a")
 	if store == nil {
 		t.Fatal("bot store is nil")
 	}

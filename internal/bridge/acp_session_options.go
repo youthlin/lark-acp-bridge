@@ -503,20 +503,6 @@ func (s *Service) setSessionModel(ctx context.Context, msg feishu.Message, sessi
 	return value, modelOptionName(modelOpt, value), nil
 }
 
-func (s *Service) selectionSession(msg feishu.Message, acpSessionID string, expiredMessage string) (Session, error) {
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return Session{}, fmt.Errorf("会话持久化未初始化")
-	}
-	for _, key := range callbackSessionKeys(msg) {
-		session, ok := store.Get(key)
-		if ok && session.ACPSessionID == acpSessionID {
-			return session, nil
-		}
-	}
-	return Session{}, errors.New(expiredMessage)
-}
-
 func callbackSessionKeys(msg feishu.Message) []SessionKey {
 	keys := make([]SessionKey, 0, 2)
 	if strings.TrimSpace(msg.ThreadID) != "" && strings.TrimSpace(msg.ChatID) != "" {

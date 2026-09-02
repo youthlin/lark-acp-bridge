@@ -576,13 +576,7 @@ func (s *Service) prepareTriggerRequest(req TriggerRequest) (TriggerRequest, *Se
 }
 
 func (s *Service) storeForBotID(botID string) *SessionStore {
-	if s.stores == nil {
-		return nil
-	}
-	if store := s.stores[strings.TrimSpace(botID)]; store != nil {
-		return store
-	}
-	return s.stores[""]
+	return s.conversationManager.storeForBotID(botID)
 }
 
 func cleanExistingDirectory(path string) (string, error) {

@@ -104,10 +104,8 @@ func TestPrepareTriggerRequestSelectsBotStore(t *testing.T) {
 	storeA := NewSessionStore("")
 	storeB := NewSessionStore("")
 	svc := NewService(config.Config{}, nil)
-	svc.stores = map[string]*SessionStore{
-		"bot-a": storeA,
-		"bot-b": storeB,
-	}
+	svc.conversationManager.setStore("bot-a", storeA)
+	svc.conversationManager.setStore("bot-b", storeB)
 
 	req, store, err := svc.prepareTriggerRequest(TriggerRequest{
 		Key:       SessionKey{BotID: " bot-b ", Source: " schedule ", MainID: " task:daily ", SubID: " run:1 "},

@@ -108,56 +108,6 @@ func setChatShowOption(chat *ChatConfig, target string, visible bool) (string, b
 	}
 }
 
-func (s *Service) chatConfigForMessage(msg feishu.Message) ChatConfig {
-	chat := ChatConfig{Key: chatKeyFromMessage(msg)}
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return chat
-	}
-	if existing, ok := store.GetChat(chat.Key); ok {
-		return existing
-	}
-	if session, ok := s.findSession(msg); ok {
-		chat.WikiDisabled = session.WikiDisabled
-		chat.WikiIntervalSec = session.WikiIntervalSec
-		chat.HideStepMessages = session.HideStepMessages
-		chat.HidePlans = session.HidePlans
-		chat.ShowThoughts = session.ShowThoughts
-		chat.HideThoughts = session.HideThoughts
-		chat.HideTools = session.HideTools
-		chat.HideStatusBar = session.HideStatusBar
-		chat.HideUsageDetail = session.HideUsageDetail
-	}
-	return chat
-}
-
-func (s *Service) migrateSessionShowConfigToChat(ctx context.Context, msg feishu.Message) {
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return
-	}
-	chatKey := chatKeyFromMessage(msg)
-	session, ok := s.findSession(msg)
-	if !ok || !sessionHasShowConfig(session) {
-		return
-	}
-	chat := ChatConfig{
-		Key:              chatKey,
-		WikiDisabled:     session.WikiDisabled,
-		WikiIntervalSec:  session.WikiIntervalSec,
-		HideStepMessages: session.HideStepMessages,
-		HidePlans:        session.HidePlans,
-		ShowThoughts:     session.ShowThoughts,
-		HideThoughts:     session.HideThoughts,
-		HideTools:        session.HideTools,
-		HideStatusBar:    session.HideStatusBar,
-		HideUsageDetail:  session.HideUsageDetail,
-	}
-	if _, err := store.InsertChatIfAbsent(chat); err != nil {
-		slog.ErrorContext(ctx, "迁移会话展示配置到 chat 配置失败", "chat", msg.ChatID, "错误", err)
-	}
-}
-
 func sessionHasShowConfig(session Session) bool {
 	return session.HideStepMessages ||
 		session.HidePlans ||

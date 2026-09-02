@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,8 +14,6 @@ import (
 )
 
 const promptCardFinalUpdateLimit = 15 * time.Second
-
-var errCurrentSessionChanged = errors.New("current session changed")
 
 type promptSessionOptions struct {
 	SkipPostPromptWork     bool
@@ -403,38 +400,6 @@ func (s *Service) runClaimedPendingAtAutoAsync(ctx context.Context, msg feishu.M
 	) {
 		s.finishAtAutoFlow(sessionKey)
 	}
-}
-
-func (s *Service) refreshACPSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig) (Session, error) {
-	cwd := strings.TrimSpace(session.Cwd)
-	if cwd == "" {
-		return Session{}, fmt.Errorf("当前会话缺少工作目录，无法重建 ACP session")
-	}
-	inheritConfig := inheritedSessionConfigFromPreviousSession(session, true, session.AgentName)
-	previousACPSessionID := session.ACPSessionID
-	slog.WarnContext(ctx, "持久化 ACP session 不可恢复，准备重建", "session", session.ACPSessionID, "cwd", cwd)
-	candidate, err := s.runtime.NewSession(ctx, session.Key, session.AgentName, agent, filepath.Clean(cwd), sessionWorkspace(session, msg))
-	if err != nil {
-		return Session{}, fmt.Errorf("重建 ACP session 失败: %w", err)
-	}
-	defer candidate.Abort()
-	sessionInfo := candidate.Info()
-	workspace := sessionWorkspace(session, msg)
-	session = sessionWithACPInfo(session, sessionInfo, cwd, workspace)
-	store := s.storeForMessage(msg)
-	session, err = commitCurrentACPSessionReplacement(candidate, store, previousACPSessionID, session)
-	if err != nil {
-		if errors.Is(err, errCurrentSessionChanged) {
-			return Session{}, fmt.Errorf("当前会话已变化，忽略旧会话的重建结果")
-		}
-		if store == nil {
-			return Session{}, fmt.Errorf("激活重建后的 ACP session 失败: %w", err)
-		}
-		return Session{}, fmt.Errorf("保存重建后的 ACP session 失败: %w", err)
-	}
-	session = s.inheritNewSessionConfig(ctx, msg, session, inheritConfig)
-	slog.InfoContext(ctx, "已重建 ACP session", "session", session.ACPSessionID, "cwd", session.Cwd)
-	return session, nil
 }
 
 func (s *Service) runUserPrompt(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string) (acp.PromptResult, bool, error) {

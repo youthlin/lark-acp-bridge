@@ -144,48 +144,6 @@ func (s *Service) resumeSession(ctx context.Context, msg feishu.Message, index i
 	return fmt.Sprintf("已恢复会话 %d。\n标题：%s\nagent：%s\ncwd：%s\nsession：%s", index, displaySessionTitle(session), session.AgentName, session.Cwd, session.ACPSessionID)
 }
 
-func (s *Service) resumeSessionByID(ctx context.Context, msg feishu.Message, acpSessionID string, expectedCurrentACPSessionID *string) (Session, string) {
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return Session{}, "会话持久化未初始化。"
-	}
-	acpSessionID = strings.TrimSpace(acpSessionID)
-	if acpSessionID == "" {
-		return Session{}, "会话 ID 不能为空。"
-	}
-	key := sessionKeyFromMessage(msg)
-	var (
-		session  Session
-		restored bool
-		err      error
-	)
-	expectedSessionID := ""
-	if current, ok := store.Get(key); ok {
-		expectedSessionID = current.ACPSessionID
-	}
-	if expectedCurrentACPSessionID != nil {
-		expectedSessionID = strings.TrimSpace(*expectedCurrentACPSessionID)
-	}
-	session, restored, err = s.runtime.TransitionCurrentSession(key, expectedSessionID, func() (Session, bool, error) {
-		if expectedCurrentACPSessionID == nil {
-			return store.ResumeSessionIfCurrent(key, expectedSessionID, acpSessionID)
-		}
-		return store.ResumeSessionIfCurrent(key, *expectedCurrentACPSessionID, acpSessionID)
-	})
-	if err != nil {
-		if restored {
-			slog.WarnContext(ctx, "恢复会话后关闭旧 ACP runtime 失败", "key", key, "错误", err)
-			return session, ""
-		}
-		slog.ErrorContext(ctx, "恢复会话映射失败", "错误", err)
-		return Session{}, "恢复会话失败：" + err.Error()
-	}
-	if !restored {
-		return Session{}, "当前会话已变化，或选择的会话不存在，请重新发送 /session list。"
-	}
-	return session, ""
-}
-
 func (s *Service) HandleSessionSelection(ctx context.Context, selection feishu.SessionSelection) (string, error) {
 	if err := validateSelectionRequester(selection.RequesterID, selection.OperatorID, "会话", "session list", "恢复会话"); err != nil {
 		return "", err

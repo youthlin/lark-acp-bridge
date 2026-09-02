@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -30,93 +29,6 @@ type newSessionPlan struct {
 
 type sessionTransition struct {
 	Key SessionKey
-}
-
-func (s *Service) newSession(ctx context.Context, fields []string, msg feishu.Message) string {
-	session, _, source, errText := s.createSession(ctx, fields, msg)
-	if errText != "" {
-		return errText
-	}
-	session = s.waitForNewSessionState(ctx, msg, session.Key, session)
-	return formatNewSessionReply(session, source)
-}
-
-func (s *Service) createSession(ctx context.Context, fields []string, msg feishu.Message) (Session, config.AgentConfig, string, string) {
-	slog.InfoContext(ctx, "准备创建ACP会话", "cmd", fields)
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return Session{}, config.AgentConfig{}, "", "会话持久化未初始化。"
-	}
-	plan, errText := s.resolveNewSessionPlan(fields, msg)
-	if errText != "" {
-		return Session{}, config.AgentConfig{}, "", errText
-	}
-	inheritConfig := s.inheritedSessionConfigForNewSession(msg, plan.AgentName)
-	if _, err := ensureWorkspace(msg.Workspace, msg.BotID); err != nil {
-		slog.ErrorContext(ctx, "初始化 workspace 失败", "workspace", msg.Workspace, "错误", err)
-		return Session{}, config.AgentConfig{}, "", "初始化 workspace 失败：" + err.Error()
-	}
-	transition := s.prepareSessionTransition(ctx, msg)
-	candidate, err := s.startACPSessionCandidate(ctx, transition.Key, msg, plan)
-	if err != nil {
-		s.restoreSessionTransition(transition)
-		slog.ErrorContext(ctx, "创建 ACP session 失败", "agent", plan.AgentName, "cwd", plan.Cwd, "错误", err)
-		return Session{}, config.AgentConfig{}, "", "创建 ACP session 失败：" + err.Error()
-	}
-	defer candidate.Abort()
-	session := newSessionFromCandidate(transition.Key, msg, plan, candidate)
-	if err := commitNewSessionCandidate(candidate, store, plan, &session); err != nil {
-		s.restoreSessionTransition(transition)
-		slog.ErrorContext(ctx, "保存会话映射失败", "错误", err)
-		return Session{}, config.AgentConfig{}, "", "保存会话映射失败：" + err.Error()
-	}
-	session = s.inheritNewSessionConfig(ctx, msg, session, inheritConfig)
-	s.afterSessionCommitted(transition, session)
-	slog.InfoContext(ctx, "创建 ACP session 成功", "agent", plan.AgentName, "cwd", plan.Cwd)
-	return session, plan.Agent, plan.Source, ""
-}
-
-func (s *Service) resolveNewSessionPlan(fields []string, msg feishu.Message) (newSessionPlan, string) {
-	req, source, errText := s.resolveNewSessionRequest(fields, msg)
-	if errText != "" {
-		return newSessionPlan{}, errText
-	}
-	cwd := req.Cwd
-	if !filepath.IsAbs(cwd) {
-		return newSessionPlan{}, "工作目录必须是绝对路径，可使用 /absolute/path 或 ~/path。"
-	}
-	if info, err := os.Stat(cwd); err != nil {
-		return newSessionPlan{}, "工作目录不可访问：" + err.Error()
-	} else if !info.IsDir() {
-		return newSessionPlan{}, "工作目录不是目录：" + cwd
-	}
-	agentName := s.chatAgentName(msg)
-	agent, ok := s.registry.Get(agentName)
-	if !ok {
-		return newSessionPlan{}, "未找到当前聊天选择的 agent 配置：" + agentName
-	}
-	return newSessionPlan{
-		Req:             req,
-		Source:          source,
-		UseDefaultTitle: req.Title == "",
-		Cwd:             cwd,
-		AgentName:       agentName,
-		Agent:           agent,
-	}, ""
-}
-
-func (s *Service) prepareSessionTransition(ctx context.Context, msg feishu.Message) sessionTransition {
-	key := sessionKeyFromMessage(msg)
-	s.migrateSessionShowConfigToChat(ctx, msg)
-	s.cancelRunningSessionWork(ctx, key)
-	s.subscribeACPStateUpdates(ctx, msg, key)
-	return sessionTransition{Key: key}
-}
-
-func (s *Service) restoreSessionTransition(sessionTransition) {}
-
-func (s *Service) startACPSessionCandidate(ctx context.Context, key SessionKey, msg feishu.Message, plan newSessionPlan) (acpSessionCandidate, error) {
-	return s.runtime.NewSession(ctx, key, plan.AgentName, plan.Agent, filepath.Clean(plan.Cwd), msg.Workspace)
 }
 
 func newSessionFromCandidate(key SessionKey, msg feishu.Message, plan newSessionPlan, candidate acpSessionCandidate) Session {
@@ -155,18 +67,6 @@ type inheritedSessionConfig struct {
 	Model string
 }
 
-func (s *Service) inheritedSessionConfigForNewSession(msg feishu.Message, agentName string) inheritedSessionConfig {
-	chat := s.chatConfigForMessage(msg)
-	if cfg, ok := chatAgentSessionConfig(chat, agentName); ok {
-		return inheritedSessionConfig{
-			Mode:  cfg.Mode,
-			Model: cfg.Model,
-		}
-	}
-	previous, ok := s.findSession(msg)
-	return inheritedSessionConfigFromPreviousSession(previous, ok, agentName)
-}
-
 func chatAgentSessionConfig(chat ChatConfig, agentName string) (ChatAgentConfig, bool) {
 	agentName = strings.TrimSpace(agentName)
 	if agentName == "" || len(chat.AgentConfigs) == 0 {
@@ -195,91 +95,6 @@ func inheritedSessionConfigFromPreviousSession(previous Session, ok bool, agentN
 
 func (c inheritedSessionConfig) empty() bool {
 	return c.Mode == "" && c.Model == ""
-}
-
-func (s *Service) inheritNewSessionConfig(ctx context.Context, msg feishu.Message, session Session, inherited inheritedSessionConfig) Session {
-	if inherited.empty() {
-		return session
-	}
-	session = s.waitForNewSessionState(ctx, msg, session.Key, session)
-	return s.applyInheritedSessionConfig(ctx, msg, session, inherited)
-}
-
-func (s *Service) applyInheritedSessionConfig(ctx context.Context, msg feishu.Message, session Session, inherited inheritedSessionConfig) Session {
-	if inherited.empty() {
-		return session
-	}
-	store := s.storeForMessage(msg)
-	if inherited.Mode != "" {
-		if _, _, err := s.setSessionMode(ctx, msg, session, inherited.Mode); err != nil {
-			slog.WarnContext(ctx, "继承上次 ACP session mode 失败", "mode", inherited.Mode, "session", session.ACPSessionID, "错误", err)
-		} else {
-			session = latestSessionForKey(store, session.Key, session)
-		}
-	}
-	if inherited.Model != "" {
-		if _, _, err := s.setSessionModel(ctx, msg, session, inherited.Model); err != nil {
-			slog.WarnContext(ctx, "继承上次 ACP session model 失败", "model", inherited.Model, "session", session.ACPSessionID, "错误", err)
-		} else {
-			session = latestSessionForKey(store, session.Key, session)
-		}
-	}
-	return latestSessionForKey(store, session.Key, session)
-}
-
-func (s *Service) afterSessionCommitted(transition sessionTransition, session Session) {
-	s.clearACPError(session)
-}
-
-func (s *Service) waitForNewSessionState(ctx context.Context, msg feishu.Message, key SessionKey, session Session) Session {
-	store := s.storeForMessage(msg)
-	session = latestSessionForKey(store, key, session)
-	if newSessionStateReady(session) {
-		return session
-	}
-	timer := time.NewTimer(newSessionStateWait)
-	defer timer.Stop()
-	var partialTimer *time.Timer
-	var partialTimerC <-chan time.Time
-	defer func() {
-		if partialTimer != nil {
-			partialTimer.Stop()
-		}
-	}()
-	if newSessionStatePartial(session) {
-		partialTimer = time.NewTimer(newSessionPartialStateWait)
-		partialTimerC = partialTimer.C
-	}
-	updated := make(chan struct{}, 1)
-	unsub := s.runtime.SubscribeUpdates(key, func(sessionID string, update acp.SessionUpdate) {
-		if sessionID != session.ACPSessionID || !isACPStateUpdate(update) {
-			return
-		}
-		select {
-		case updated <- struct{}{}:
-		default:
-		}
-	})
-	defer unsub()
-	for {
-		select {
-		case <-ctx.Done():
-			return latestSessionForKey(store, key, session)
-		case <-timer.C:
-			return latestSessionForKey(store, key, session)
-		case <-partialTimerC:
-			return latestSessionForKey(store, key, session)
-		case <-updated:
-			current := latestSessionForKey(store, key, session)
-			if newSessionStateReady(current) {
-				return current
-			}
-			if newSessionStatePartial(current) && partialTimer == nil {
-				partialTimer = time.NewTimer(newSessionPartialStateWait)
-				partialTimerC = partialTimer.C
-			}
-		}
-	}
 }
 
 func newSessionStateReady(session Session) bool {
@@ -340,84 +155,6 @@ type newSessionRequest struct {
 	ManualTitle bool
 }
 
-func (s *Service) resolveNewSessionRequest(fields []string, msg feishu.Message) (newSessionRequest, string, string) {
-	args := fields[1:]
-	req := newSessionRequest{}
-	if len(args) > 0 {
-		if args[0] == "--title" || args[0] == "-t" {
-			req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
-			req.ManualTitle = req.Title != ""
-		} else {
-			candidate, isPath, errText := s.resolveNewSessionCwdArg(args[0], msg)
-			if errText != "" {
-				return newSessionRequest{}, "", errText
-			}
-			if isPath {
-				req.Cwd = candidate
-				req.Title = normalizeSessionTitle(strings.Join(args[1:], " "))
-				req.ManualTitle = req.Title != ""
-			} else {
-				req.Title = normalizeSessionTitle(strings.Join(args, " "))
-				req.ManualTitle = req.Title != ""
-			}
-		}
-	}
-	if req.Cwd != "" {
-		return req, "命令参数", ""
-	}
-	cwd, source, errText := s.defaultNewSessionCwd(msg)
-	if errText != "" {
-		return newSessionRequest{}, "", errText
-	}
-	req.Cwd = cwd
-	return req, source, ""
-}
-
-func (s *Service) defaultNewSessionCwd(msg feishu.Message) (string, string, string) {
-	if session, ok := s.findSession(msg); ok && session.Cwd != "" {
-		return session.Cwd, "当前会话已有会话", ""
-	}
-	agentName := s.chatAgentName(msg)
-	agent, ok := s.registry.Get(agentName)
-	if !ok || strings.TrimSpace(agent.DefaultCwd) == "" {
-		if agentName == "" {
-			return "", "", "当前会话还没有会话映射，且未配置 ACP agent。请使用 /new <cwd> 指定工作目录。"
-		}
-		return "", "", "当前会话还没有会话映射，且当前 agent " + agentName + " 未配置 default_cwd。请使用 /new <cwd> 指定工作目录。"
-	}
-	return agent.DefaultCwd, "默认配置", ""
-}
-
-func (s *Service) resolveNewSessionCwdArg(arg string, msg feishu.Message) (string, bool, string) {
-	arg = strings.TrimSpace(arg)
-	if arg == "" {
-		return "", false, ""
-	}
-	looksPath := isExplicitPathArg(arg)
-	if !looksPath {
-		return "", false, ""
-	}
-	candidate, err := config.ExpandPath(arg)
-	if err != nil {
-		return "", false, "展开工作目录失败：" + err.Error()
-	}
-	if !filepath.IsAbs(candidate) {
-		base, _, errText := s.defaultNewSessionCwd(msg)
-		if errText != "" {
-			return "", false, errText
-		}
-		candidate = filepath.Join(base, candidate)
-	}
-	info, statErr := os.Stat(candidate)
-	if statErr == nil {
-		if !info.IsDir() {
-			return "", false, "工作目录不是目录：" + candidate
-		}
-		return candidate, true, ""
-	}
-	return "", false, "工作目录不可访问：" + statErr.Error()
-}
-
 func isExplicitPathArg(arg string) bool {
 	arg = strings.TrimSpace(arg)
 	return filepath.IsAbs(arg) ||
@@ -454,10 +191,6 @@ func titleFromPrompt(text string) string {
 	return normalizeSessionTitle(text)
 }
 
-func (s *Service) updateAutomaticSessionTitle(ctx context.Context, msg feishu.Message, session Session, userText string) Session {
-	return updateAutomaticSessionTitleInStore(ctx, s.storeForMessage(msg), session, userText)
-}
-
 func updateAutomaticSessionTitleInStore(ctx context.Context, store *SessionStore, session Session, userText string) Session {
 	if session.ManualTitle {
 		return session
@@ -485,37 +218,6 @@ func displaySessionTitle(session Session) string {
 	return "(未命名)"
 }
 
-func (s *Service) defaultAgentName() string {
-	names := s.registry.Names()
-	if len(names) == 0 {
-		return ""
-	}
-	return names[0]
-}
-
-func (s *Service) chatAgentName(msg feishu.Message) string {
-	chat := s.chatConfigForMessage(msg)
-	if strings.TrimSpace(chat.AgentName) != "" {
-		return chat.AgentName
-	}
-	if session, ok := s.findSession(msg); ok {
-		if _, ok := s.registry.Get(session.AgentName); ok {
-			return session.AgentName
-		}
-	}
-	return s.defaultAgentName()
-}
-
-func (s *Service) storeForMessage(msg feishu.Message) *SessionStore {
-	if s.stores == nil {
-		return nil
-	}
-	if store := s.stores[msg.BotID]; store != nil {
-		return store
-	}
-	return s.stores[""]
-}
-
 func sessionKeyFromMessage(msg feishu.Message) SessionKey {
 	keys := sessionKeysFromMessage(msg)
 	if len(keys) == 0 {
@@ -526,24 +228,6 @@ func sessionKeyFromMessage(msg feishu.Message) SessionKey {
 
 func chatKeyFromMessage(msg feishu.Message) ChatKey {
 	return ChatKey{BotID: msg.BotID, ChatID: msg.ChatID}
-}
-
-func (s *Service) findSession(msg feishu.Message) (Session, bool) {
-	store := s.storeForMessage(msg)
-	if store == nil {
-		return Session{}, false
-	}
-	for _, messageID := range messageSessionBindingLookupIDs(msg) {
-		if session, _, ok := store.SessionForMessage(msg.BotID, msg.ChatID, messageID); ok {
-			return session, true
-		}
-	}
-	for _, key := range sessionKeysFromMessage(msg) {
-		if session, ok := store.Get(key); ok {
-			return session, true
-		}
-	}
-	return Session{}, false
 }
 
 func messageSessionBindingLookupIDs(msg feishu.Message) []string {

@@ -40,24 +40,9 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 	}
 
-	// 从文件加载历史会话
-	for botID, store := range s.stores {
-		if store == nil {
-			continue
-		}
-		if err := store.Load(); err != nil {
-			return err
-		}
-		if files := upgradedWorkspaceFiles[strings.TrimSpace(botID)]; len(files) > 0 {
-			count, err := store.ResetWorkspacePromptedForAllSessions()
-			if err != nil {
-				return fmt.Errorf("重置 bot %q 的 workspace prompt 状态: %w", botID, err)
-			}
-			if count > 0 {
-				slog.Info("workspace 已升级，重置 bot 会话 workspace prompt 状态", "bot", displayBotID(botID), "数量", count, "files", files)
-			}
-		}
-		slog.Info("已加载持久化会话映射", "bot", displayBotID(botID), "数量", store.Count())
+	// 从文件加载历史会话。
+	if err := s.conversationManager.loadStores(upgradedWorkspaceFiles); err != nil {
+		return err
 	}
 
 	slog.Info("启动 ACP 桥接服务", "agent列表", s.registry.Names(), "bot数量", len(s.feishu))

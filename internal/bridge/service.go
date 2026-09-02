@@ -29,11 +29,11 @@ type Service struct {
 	serviceTasks
 	serviceScheduleRuns
 	serviceACPUpdates
-	taskSupervisor taskSupervisor
+	taskSupervisor      taskSupervisor
+	conversationManager conversationManager
 }
 
 type serviceStores struct {
-	stores                 map[string]*SessionStore // 会话存储, key=bot.id, 默认store用 "" 作为 key
 	scheduleStores         map[string]*ScheduledTaskStore
 	scheduleSenders        map[string]scheduledTaskIMSender
 	scheduleMessageSenders map[string]scheduledTaskMessageSender
@@ -87,7 +87,6 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		registry: acp.NewRegistry(cfg),
 		runtime:  newRuntimeManager(),
 		serviceStores: serviceStores{
-			stores:                 make(map[string]*SessionStore),
 			scheduleStores:         make(map[string]*ScheduledTaskStore),
 			scheduleSenders:        make(map[string]scheduledTaskIMSender),
 			scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
@@ -124,6 +123,14 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		},
 		taskSupervisor: newTaskSupervisor(),
 	}
+	s.conversationManager = newConversationManager(s.registry, s.runtime)
+	s.conversationManager.hooks = conversationManagerHooks{
+		cancelRunningSessionWork: s.cancelRunningSessionWork,
+		subscribeACPStateUpdates: s.subscribeACPStateUpdates,
+		setSessionMode:           s.setSessionMode,
+		setSessionModel:          s.setSessionModel,
+		clearACPError:            s.clearACPError,
+	}
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
 		adapter := feishu.NewAdapter(bot, s)
@@ -132,12 +139,12 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		s.scheduleMessageSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextMessage
 		s.scheduleStreams[strings.TrimSpace(bot.ID)] = adapter.StartStreamCard
 		if store != nil {
-			s.stores[bot.ID] = store
+			s.conversationManager.setStore(bot.ID, store)
 		} else if strings.TrimSpace(bot.Workspace) != "" {
-			s.stores[bot.ID] = NewSessionStoreWithFallback(
+			s.conversationManager.setStore(bot.ID, NewSessionStoreWithFallback(
 				workspaceLocalPath(bot.Workspace, "sessions.json"),
 				workspaceLegacyPath(bot.Workspace, "sessions.json"),
-			)
+			))
 		}
 		if strings.TrimSpace(bot.Workspace) != "" {
 			workspaceKey := normalizeWorkspaceLockPath(bot.Workspace)
@@ -167,7 +174,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		}
 	}
 	if store != nil {
-		s.stores[""] = store
+		s.conversationManager.setStore("", store)
 		if strings.TrimSpace(store.path) != "" {
 			s.usageStores[""] = NewTokenUsageStore(sessionStoreSiblingPath(store.path, "token_usage.json"))
 		}
@@ -195,6 +202,7 @@ func (s *Service) WithVersion(version string) *Service {
 func (s *Service) setRuntime(runtime acpRuntime) {
 	if runtime != nil {
 		s.runtime = runtime
+		s.conversationManager.setRuntime(runtime)
 	}
 }
 
