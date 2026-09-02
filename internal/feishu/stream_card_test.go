@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -358,6 +360,27 @@ func TestStreamCardUpdateContentNeverEmpty(t *testing.T) {
 	}
 }
 
+func TestStreamCardUpdateContentSanitizesMarkdownImages(t *testing.T) {
+	input := strings.Join([]string{
+		"二维码：",
+		"![飞书授权二维码](/data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png)",
+		"```markdown",
+		"![保留示例](/tmp/example.png)",
+		"```",
+	}, "\n")
+
+	got := streamCardUpdateContent(input)
+	if strings.Contains(got, "![飞书授权二维码](/data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png)") {
+		t.Fatalf("streamCardUpdateContent() kept local markdown image: %q", got)
+	}
+	if !strings.Contains(got, "图片: 飞书授权二维码 /data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png") {
+		t.Fatalf("streamCardUpdateContent() = %q, want readable image fallback", got)
+	}
+	if !strings.Contains(got, "![保留示例](/tmp/example.png)") {
+		t.Fatalf("streamCardUpdateContent() = %q, want fenced markdown image preserved", got)
+	}
+}
+
 func TestTruncateCardKitLogValue(t *testing.T) {
 	if got := truncateCardKitLogValue(cardJSON{"content": "hello"}); !strings.Contains(got, `"content":"hello"`) {
 		t.Fatalf("truncateCardKitLogValue(map) = %q, want JSON content", got)
@@ -436,6 +459,66 @@ func TestSDKStreamCardFullCardJSONIncludesSnapshotPanels(t *testing.T) {
 	}
 	if !jsonContainsBool(payload, "streaming_mode", false) {
 		t.Fatalf("full card snapshot should disable streaming_mode: %#v", payload)
+	}
+}
+
+func TestSDKStreamCardFullCardJSONSanitizesProcessMarkdownImages(t *testing.T) {
+	card := &sdkStreamCard{
+		finalBlocks: []outboundBlock{
+			{Kind: outboundBlockMarkdown, Text: "二维码：\n正文引用 ![远程图](https://example.com/a.png)"},
+			{Kind: outboundBlockImage, Alt: "飞书授权二维码", ImageKey: "img_v3_uploaded"},
+		},
+		processCreated: true,
+		process:        "过程引用图片 ![飞书授权二维码](/data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png)",
+		status:         "已完成",
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(card.fullCardJSONLocked()), &payload); err != nil {
+		t.Fatalf("fullCardJSONLocked() is not valid JSON: %v", err)
+	}
+
+	if !jsonContainsValue(payload, "img_v3_uploaded") {
+		t.Fatalf("full card snapshot should keep uploaded image component: %#v", payload)
+	}
+	if jsonContainsSubstring(payload, "![飞书授权二维码](/data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png)") {
+		t.Fatalf("full card snapshot kept invalid local markdown image: %#v", payload)
+	}
+	if jsonContainsSubstring(payload, "![远程图](https://example.com/a.png)") {
+		t.Fatalf("full card snapshot kept remote markdown image in card markdown: %#v", payload)
+	}
+	if !jsonContainsSubstring(payload, "图片: 飞书授权二维码 /data00/home/youthlin.chen/lark-acp-default-auth-qrcode.png") {
+		t.Fatalf("full card snapshot should keep readable image fallback: %#v", payload)
+	}
+	if !jsonContainsSubstring(payload, "图片: 远程图 https://example.com/a.png") {
+		t.Fatalf("full card snapshot should keep readable remote image fallback: %#v", payload)
+	}
+}
+
+func TestStreamCardFinalTextUploadsLocalMarkdownImage(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := filepath.Join(dir, "qrcode.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatalf("WriteFile(image) error = %v", err)
+	}
+	adapter := &Adapter{messages: &fakeMessageClient{imageKey: "img_v3_uploaded_qrcode"}}
+
+	blocks, err := adapter.renderOutboundBlocks(context.Background(), "请扫码：\n![扫码]("+imagePath+")", outboundRenderContext{})
+	if err != nil {
+		t.Fatalf("renderOutboundBlocks() error = %v", err)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(newStreamCardJSONFromBlocks(blocks, "", "done", "", false, true, false, false, StreamCardMeta{})), &payload); err != nil {
+		t.Fatalf("newStreamCardJSONFromBlocks() is not valid JSON: %v", err)
+	}
+
+	if jsonContainsSubstring(payload, "![扫码]("+imagePath+")") {
+		t.Fatalf("final card kept local markdown image syntax: %#v", payload)
+	}
+	if !jsonContainsValue(payload, "img_v3_uploaded_qrcode") {
+		t.Fatalf("final card should contain uploaded image key: %#v", payload)
+	}
+	if !jsonContainsValue(payload, "扫码") {
+		t.Fatalf("final card should keep image alt text: %#v", payload)
 	}
 }
 

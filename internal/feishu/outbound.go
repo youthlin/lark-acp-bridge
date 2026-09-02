@@ -163,7 +163,7 @@ func outboundBlocksStreamCardElements(blocks []outboundBlock) []any {
 	for idx, block := range blocks {
 		switch block.Kind {
 		case outboundBlockMarkdown:
-			text := strings.TrimSpace(block.Text)
+			text := strings.TrimSpace(sanitizeStreamCardMarkdownContent(block.Text))
 			if text == "" {
 				continue
 			}

@@ -138,7 +138,7 @@ func streamCardProcessPanelWithTitle(content string, title string) cardJSON {
 		"vertical_spacing": "4px",
 		"padding":          "8px 12px 8px 12px",
 		"elements": []any{
-			cardJSON{"tag": "markdown", "content": content, "element_id": streamCardProcessElementID},
+			cardJSON{"tag": "markdown", "content": sanitizeStreamCardMarkdownContent(content), "element_id": streamCardProcessElementID},
 		},
 	}
 }
@@ -177,7 +177,7 @@ func streamCardSourceLink(url string) cardJSON {
 func streamCardMetadata(content string) cardJSON {
 	return cardJSON{
 		"tag":              "markdown",
-		"content":          content,
+		"content":          sanitizeStreamCardMarkdownContent(content),
 		"element_id":       streamCardMetadataElementID,
 		"text_size":        "notation",
 		"vertical_spacing": "4px",
@@ -187,7 +187,7 @@ func streamCardMetadata(content string) cardJSON {
 func streamCardFooter(content string) cardJSON {
 	return cardJSON{
 		"tag":              "markdown",
-		"content":          content,
+		"content":          sanitizeStreamCardMarkdownContent(content),
 		"element_id":       streamCardFooterElementID,
 		"text_size":        "notation",
 		"text_align":       "left",
@@ -210,7 +210,7 @@ func streamCardUsagePanel(content string) cardJSON {
 		"vertical_spacing": "4px",
 		"padding":          "8px 12px 8px 12px",
 		"elements": []any{
-			cardJSON{"tag": "markdown", "content": content, "element_id": streamCardUsageDetailID},
+			cardJSON{"tag": "markdown", "content": sanitizeStreamCardMarkdownContent(content), "element_id": streamCardUsageDetailID},
 		},
 	}
 }
@@ -523,10 +523,78 @@ func (c *sdkStreamCard) nextSequenceLocked() int {
 }
 
 func streamCardUpdateContent(text string) string {
+	text = sanitizeStreamCardMarkdownContent(text)
 	if strings.TrimSpace(text) == "" {
 		return streamCardEmptyContent
 	}
 	return text
+}
+
+func sanitizeStreamCardMarkdownContent(text string) string {
+	if text == "" {
+		return ""
+	}
+	var out strings.Builder
+	inFence := false
+	for _, rawLine := range strings.SplitAfter(text, "\n") {
+		line := strings.TrimSuffix(rawLine, "\n")
+		lineBreak := ""
+		if strings.HasSuffix(rawLine, "\n") {
+			lineBreak = "\n"
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			out.WriteString(line)
+			out.WriteString(lineBreak)
+			continue
+		}
+		if inFence {
+			out.WriteString(line)
+			out.WriteString(lineBreak)
+			continue
+		}
+		out.WriteString(sanitizeStreamCardMarkdownLine(line))
+		out.WriteString(lineBreak)
+	}
+	return out.String()
+}
+
+func sanitizeStreamCardMarkdownLine(line string) string {
+	matches := outboundMarkdownImagePattern.FindAllStringSubmatchIndex(line, -1)
+	if len(matches) == 0 {
+		return line
+	}
+	var out strings.Builder
+	offset := 0
+	for _, loc := range matches {
+		if loc[0] > offset {
+			out.WriteString(line[offset:loc[0]])
+		}
+		alt := strings.TrimSpace(line[loc[2]:loc[3]])
+		target := strings.TrimSpace(line[loc[4]:loc[5]])
+		out.WriteString(streamCardMarkdownImageFallbackText(alt, target))
+		offset = loc[1]
+	}
+	if offset < len(line) {
+		out.WriteString(line[offset:])
+	}
+	return out.String()
+}
+
+func streamCardMarkdownImageFallbackText(alt, target string) string {
+	alt = strings.TrimSpace(alt)
+	target = trimReplyImagePath(target)
+	switch {
+	case alt != "" && target != "":
+		return "图片: " + alt + " " + target
+	case alt != "":
+		return "图片: " + alt
+	case target != "":
+		return "图片: " + target
+	default:
+		return "图片"
+	}
 }
 
 func logCardKitFailure(ctx context.Context, operation string, cardID string, elementID string, sequence int, request any, resp *larkcore.ApiResp, code int, msg string) {
