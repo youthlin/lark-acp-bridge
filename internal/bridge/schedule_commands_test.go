@@ -456,10 +456,10 @@ func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) 
 		text string
 	}
 	sent := make(chan sentResult, 1)
-	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
+	svc.setScheduledTaskIMSender("bot-a", func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
 		sent <- sentResult{msg: msg, text: text}
 		return nil
-	}
+	})
 	msg := feishu.Message{
 		BotID:            "bot-a",
 		ChatID:           "oc_chat",
@@ -515,7 +515,7 @@ func TestHandleScheduleRunCommandStartsImmediateRunAndSendsResult(t *testing.T) 
 	if len(newCalls) != 1 || newCalls[0].Key.Source != sessionSourceSchedule || newCalls[0].Key.MainID != "task:"+tasks[0].ID || newCalls[0].Workspace != workspace {
 		t.Fatalf("newCalls = %+v, want immediate schedule session in bot workspace", newCalls)
 	}
-	last, ok := svc.lastScheduleRunStatus(tasks[0].ID)
+	last, ok := svc.lastScheduleRunStatus(tasks[0])
 	if !ok || last.State != scheduleRunCompleted {
 		t.Fatalf("last status = %+v ok=%v, want completed immediate run", last, ok)
 	}
@@ -798,10 +798,10 @@ func TestHandleScheduleOnceCommandFiresAndDeletes(t *testing.T) {
 	}
 	svc.setRuntime(rt)
 	sent := make(chan string, 1)
-	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
+	svc.setScheduledTaskIMSender("bot-a", func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
 		sent <- text
 		return nil
-	}
+	})
 
 	at := time.Now().Add(2 * time.Second).Format(time.RFC3339)
 	msg := feishu.Message{

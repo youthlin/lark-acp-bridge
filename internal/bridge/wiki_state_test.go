@@ -127,10 +127,10 @@ func TestWikiCoordinatorUsesCompanionAndCommitsFrozenCursor(t *testing.T) {
 	svc.setRuntime(runtime)
 	var traceInitialProcess string
 	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}}
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		traceInitialProcess = options.InitialProcess
 		return card, nil
-	}
+	})
 	session := Session{
 		Key:             normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
 		AgentName:       "traex",
@@ -195,10 +195,10 @@ func TestWikiCoordinatorTraceUpdatesSIDAfterCompanionRecreate(t *testing.T) {
 	svc.setRuntime(runtime)
 	var traceInitialProcess string
 	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}}
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		traceInitialProcess = options.InitialProcess
 		return card, nil
-	}
+	})
 	session := Session{
 		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc-chat", "")),
 		AgentName:    "traex",

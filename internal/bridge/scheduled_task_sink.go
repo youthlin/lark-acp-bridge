@@ -8,64 +8,6 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
 
-func (s *Service) scheduledTaskSink(task ScheduledTask) TriggerSink {
-	task = normalizeScheduledTask(task)
-	if !strings.EqualFold(task.ResultSink.Type, "im") || strings.TrimSpace(task.ResultSink.ChatID) == "" {
-		return nil
-	}
-	return &scheduledTaskIMSink{message: feishu.Message{
-		BotID:     task.BotID,
-		ChatID:    task.ResultSink.ChatID,
-		Workspace: task.Cwd,
-	},
-		cwd:           task.Cwd,
-		taskID:        task.ID,
-		store:         s.storeForBotID(task.BotID),
-		sender:        s.scheduleIMSender(task.BotID),
-		messageSender: s.scheduleMessageSender(task.BotID),
-		starter:       s.scheduleStreamStarter(task.BotID),
-	}
-}
-
-func (s *Service) scheduleIMSender(botID string) scheduledTaskIMSender {
-	if s == nil {
-		return nil
-	}
-	botID = strings.TrimSpace(botID)
-	if sender := s.scheduleSenders[botID]; sender != nil {
-		return sender
-	}
-	return s.scheduleSenders[""]
-}
-
-func (s *Service) scheduleMessageSender(botID string) scheduledTaskMessageSender {
-	if s == nil {
-		return nil
-	}
-	botID = strings.TrimSpace(botID)
-	if sender, ok := s.outboundForBot(botID).(sentMessageSender); ok && sender != nil {
-		return sender.SendTextMessage
-	}
-	if sender := s.scheduleMessageSenders[botID]; sender != nil {
-		return sender
-	}
-	return s.scheduleMessageSenders[""]
-}
-
-func (s *Service) scheduleStreamStarter(botID string) scheduledTaskStreamStarter {
-	if s == nil {
-		return nil
-	}
-	botID = strings.TrimSpace(botID)
-	if starter, ok := s.outboundForBot(botID).(streamCardStarter); ok && starter != nil {
-		return starter.StartStreamCard
-	}
-	if starter := s.scheduleStreams[botID]; starter != nil {
-		return starter
-	}
-	return s.scheduleStreams[""]
-}
-
 func (s *scheduledTaskIMSink) OnUpdate(ctx context.Context, result TriggerResult) error {
 	stream := s.ensureStream(ctx, result)
 	if stream == nil {

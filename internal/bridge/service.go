@@ -27,22 +27,18 @@ type Service struct {
 	serviceStores
 	serviceOutbounds
 	serviceTasks
-	serviceScheduleRuns
 	serviceACPUpdates
 	taskSupervisor      taskSupervisor
 	conversationManager conversationManager
+	scheduler           scheduler
 }
 
 type serviceStores struct {
-	scheduleStores         map[string]*ScheduledTaskStore
-	scheduleSenders        map[string]scheduledTaskIMSender
-	scheduleMessageSenders map[string]scheduledTaskMessageSender
-	scheduleStreams        map[string]scheduledTaskStreamStarter
-	usageStores            map[string]*TokenUsageStore
-	traceStoreMu           sync.RWMutex
-	traceStores            map[string]*traceStore
-	companionStateStores   map[string]*wikiStateStore // key=规范化 workspace 路径
-	wikiCoordinators       map[string]*wikiCoordinator
+	usageStores          map[string]*TokenUsageStore
+	traceStoreMu         sync.RWMutex
+	traceStores          map[string]*traceStore
+	companionStateStores map[string]*wikiStateStore // key=规范化 workspace 路径
+	wikiCoordinators     map[string]*wikiCoordinator
 }
 
 type serviceOutbounds struct {
@@ -66,12 +62,6 @@ type serviceTasks struct {
 	promptQueues    map[SessionKey]*promptQueue
 }
 
-type serviceScheduleRuns struct {
-	scheduleRuns       map[string]scheduleRunStatus
-	scheduleRunsByTask map[string]map[string]struct{}
-	scheduleJobs       map[string]*scheduledTaskJob
-}
-
 type serviceACPUpdates struct {
 	acpUpdateMu    sync.Mutex
 	acpUpdateUnsub map[SessionKey]func()
@@ -87,14 +77,10 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		registry: acp.NewRegistry(cfg),
 		runtime:  newRuntimeManager(),
 		serviceStores: serviceStores{
-			scheduleStores:         make(map[string]*ScheduledTaskStore),
-			scheduleSenders:        make(map[string]scheduledTaskIMSender),
-			scheduleMessageSenders: make(map[string]scheduledTaskMessageSender),
-			scheduleStreams:        make(map[string]scheduledTaskStreamStarter),
-			usageStores:            make(map[string]*TokenUsageStore),
-			traceStores:            make(map[string]*traceStore),
-			companionStateStores:   make(map[string]*wikiStateStore),
-			wikiCoordinators:       make(map[string]*wikiCoordinator),
+			usageStores:          make(map[string]*TokenUsageStore),
+			traceStores:          make(map[string]*traceStore),
+			companionStateStores: make(map[string]*wikiStateStore),
+			wikiCoordinators:     make(map[string]*wikiCoordinator),
 		},
 		serviceOutbounds: serviceOutbounds{
 			outbounds: make(map[string]feishu.Outbound),
@@ -113,11 +99,6 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			atAutoFlows:     make(map[SessionKey]bool),
 			promptQueues:    make(map[SessionKey]*promptQueue),
 		},
-		serviceScheduleRuns: serviceScheduleRuns{
-			scheduleRuns:       make(map[string]scheduleRunStatus),
-			scheduleRunsByTask: make(map[string]map[string]struct{}),
-			scheduleJobs:       make(map[string]*scheduledTaskJob),
-		},
 		serviceACPUpdates: serviceACPUpdates{
 			acpUpdateUnsub: make(map[SessionKey]func()),
 		},
@@ -131,13 +112,22 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		setSessionModel:          s.setSessionModel,
 		clearACPError:            s.clearACPError,
 	}
+	s.scheduler = newScheduler(schedulerHooks{
+		startBackground:              s.goBackground,
+		runTriggerPrompt:             s.runTriggerPrompt,
+		cancelRunningSessionWorkSync: s.cancelRunningSessionWorkSync,
+		cancelScheduledTaskRuns:      s.cancelScheduledTaskRuns,
+		botWorkspace:                 s.botWorkspace,
+		storeForBotID:                s.storeForBotID,
+		outboundForBot:               s.outboundForBot,
+	})
 	for _, bot := range cfg.Bots {
 		// 见 [Service.HandleFeishuMessage], s 实现了 [feishu.Handler]
 		adapter := feishu.NewAdapter(bot, s)
 		s.feishu = append(s.feishu, adapter)
-		s.scheduleSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextWithRenderContext
-		s.scheduleMessageSenders[strings.TrimSpace(bot.ID)] = adapter.SendTextMessage
-		s.scheduleStreams[strings.TrimSpace(bot.ID)] = adapter.StartStreamCard
+		s.scheduler.setIMSender(bot.ID, adapter.SendTextWithRenderContext)
+		s.scheduler.setMessageSender(bot.ID, adapter.SendTextMessage)
+		s.scheduler.setStreamStarter(bot.ID, adapter.StartStreamCard)
 		if store != nil {
 			s.conversationManager.setStore(bot.ID, store)
 		} else if strings.TrimSpace(bot.Workspace) != "" {
@@ -156,10 +146,10 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 				}
 				s.companionStateStores[workspaceKey] = state
 			}
-			s.scheduleStores[bot.ID] = NewScheduledTaskStoreWithFallback(
+			s.scheduler.setStore(bot.ID, NewScheduledTaskStoreWithFallback(
 				workspaceLocalPath(bot.Workspace, "scheduled_tasks.json"),
 				workspaceLegacyPath(bot.Workspace, "scheduled_tasks.json"),
-			)
+			))
 			s.usageStores[bot.ID] = NewTokenUsageStoreWithFallback(
 				workspaceLocalPath(bot.Workspace, "token_usage.json"),
 				workspaceLegacyPath(bot.Workspace, "token_usage.json"),

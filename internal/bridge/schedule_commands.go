@@ -478,7 +478,7 @@ func (s *Service) startImmediateScheduleRun(ctx context.Context, task ScheduledT
 			}
 		},
 	) {
-		s.markScheduleRunFinished(task.ID, runID, time.Now(), context.Canceled)
+		s.markScheduleRunFinished(task, runID, time.Now(), context.Canceled)
 	}
 	return runID
 }
@@ -532,7 +532,7 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
 		missedSchedulePolicyText(),
 	}
-	last, ok := s.lastScheduleRunStatus(task.ID)
+	last, ok := s.lastScheduleRunStatus(task)
 	if ok {
 		lines = append(lines,
 			"最近 run："+last.RunID,
@@ -688,34 +688,6 @@ func (s *Service) handleScheduleDeleteCommand(ctx context.Context, msg feishu.Me
 	}
 	s.stopScheduledTask(ctx, task)
 	return "已删除定时任务：" + task.ID
-}
-
-func (s *Service) lastScheduleRunStatus(taskID string) (scheduleRunStatus, bool) {
-	taskID = strings.TrimSpace(taskID)
-	s.taskMu.Lock()
-	defer s.taskMu.Unlock()
-	var last scheduleRunStatus
-	var ok bool
-	for id := range s.scheduleRunsByTask[taskID] {
-		status, exists := s.scheduleRuns[id]
-		if !exists || status.TaskID != taskID {
-			continue
-		}
-		if !ok || scheduleRunStatusTime(status).After(scheduleRunStatusTime(last)) {
-			last = status
-			ok = true
-		}
-	}
-	return last, ok
-}
-
-func scheduleRunStatusTime(status scheduleRunStatus) time.Time {
-	for _, t := range []time.Time{status.EndedAt, status.SkippedAt, status.StartedAt} {
-		if !t.IsZero() {
-			return t
-		}
-	}
-	return time.Time{}
 }
 
 func formatScheduledTaskCreated(task ScheduledTask) string {

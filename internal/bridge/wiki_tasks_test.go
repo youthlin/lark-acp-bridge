@@ -111,9 +111,9 @@ func TestWikiTimerTraceUsesPromptUpdates(t *testing.T) {
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
-	}
+	})
 	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	session := Session{
 		Key:          key,
@@ -158,9 +158,9 @@ func TestPendingWikiTraceKeepsIndependentRuntimeKey(t *testing.T) {
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
-	}
+	})
 	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
 	pending := pendingWikiRun{
 		generation: 7,

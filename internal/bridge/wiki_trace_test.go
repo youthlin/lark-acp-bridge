@@ -29,11 +29,11 @@ func TestWikiTraceShowsFullProcess(t *testing.T) {
 	var initialMeta feishu.StreamCardMeta
 	card := &fakeStreamCard{}
 	card.message = feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		target = msg
 		initialMeta = options.Meta
 		return card, nil
-	}
+	})
 	session := Session{
 		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source")),
 		Title:        "来源会话标题",
@@ -132,11 +132,11 @@ func TestWikiTraceForJobShowsExecutionSessionIDAndBindsSourceSession(t *testing.
 	var initialProcess string
 	card := &fakeStreamCard{}
 	card.message = feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		initialMeta = options.Meta
 		initialProcess = options.InitialProcess
 		return card, nil
-	}
+	})
 	source := Session{
 		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "omt_source")),
 		Title:        "来源会话标题",
@@ -230,9 +230,9 @@ func TestWikiTraceUsesTraceChatShowConfig(t *testing.T) {
 			}
 			svc := NewService(cfg, store)
 			card := &fakeStreamCard{}
-			svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+			svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 				return card, nil
-			}
+			})
 			observer := svc.wikiTraceObserver(Session{
 				Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "")),
 				ACPSessionID: "acp-wiki",
@@ -265,9 +265,9 @@ func TestWikiTraceNoReplyShowsNoChangesSummary(t *testing.T) {
 	}}}
 	svc := NewService(cfg, NewSessionStore(""))
 	card := &fakeStreamCard{}
-	svc.scheduleStreams["bot-a"] = func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		return card, nil
-	}
+	})
 	observer := svc.wikiTraceObserver(Session{
 		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_source", "")),
 		ACPSessionID: "acp-wiki",

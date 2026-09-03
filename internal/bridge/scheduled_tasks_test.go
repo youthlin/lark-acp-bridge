@@ -590,7 +590,7 @@ func TestScheduleRunStatusTransitions(t *testing.T) {
 	if pending.State != scheduleRunPending || !pending.StartedAt.Equal(started) || pending.SessionKey != key {
 		t.Fatalf("pending status = %+v, want pending with key and start time", pending)
 	}
-	stored, ok := svc.scheduleRunStatus("daily", "run-1")
+	stored, ok := svc.scheduleRunStatus(task, "run-1")
 	if !ok || stored.State != scheduleRunPending {
 		t.Fatalf("stored pending status = %+v ok=%v, want pending", stored, ok)
 	}
@@ -600,18 +600,18 @@ func TestScheduleRunStatusTransitions(t *testing.T) {
 		t.Fatalf("running status = %+v, want running with prompt", running)
 	}
 
-	completed := svc.markScheduleRunFinished("daily", "run-1", started.Add(2*time.Minute), nil)
+	completed := svc.markScheduleRunFinished(task, "run-1", started.Add(2*time.Minute), nil)
 	if completed.State != scheduleRunCompleted || !completed.EndedAt.Equal(started.Add(2*time.Minute)) || completed.LastError != "" {
 		t.Fatalf("completed status = %+v, want completed without error", completed)
 	}
 
 	failedErr := errors.New("boom")
-	failed := svc.markScheduleRunFinished("daily", "run-2", started.Add(3*time.Minute), failedErr)
+	failed := svc.markScheduleRunFinished(task, "run-2", started.Add(3*time.Minute), failedErr)
 	if failed.State != scheduleRunFailed || failed.LastError != "boom" {
 		t.Fatalf("failed status = %+v, want failed with error", failed)
 	}
 
-	cancelled := svc.markScheduleRunFinished("daily", "run-3", started.Add(4*time.Minute), context.Canceled)
+	cancelled := svc.markScheduleRunFinished(task, "run-3", started.Add(4*time.Minute), context.Canceled)
 	if cancelled.State != scheduleRunCancelled || cancelled.LastError != "" {
 		t.Fatalf("cancelled status = %+v, want cancelled without last error", cancelled)
 	}
@@ -640,22 +640,20 @@ func TestScheduleRunHistoryPrunesOldFinishedRunsAndKeepsRunning(t *testing.T) {
 		svc.markScheduleRunSkipped(task, runID, scheduledTaskRunKey(task, runID), started.Add(time.Duration(i+1)*time.Minute), "done")
 	}
 
-	svc.taskMu.Lock()
-	defer svc.taskMu.Unlock()
-	if len(svc.scheduleRuns) != scheduleRunHistoryLimit+1 {
-		t.Fatalf("scheduleRuns len = %d, want %d finished history + running", len(svc.scheduleRuns), scheduleRunHistoryLimit+1)
+	if got := svc.scheduler.runCountForTest(); got != scheduleRunHistoryLimit+1 {
+		t.Fatalf("scheduler run count = %d, want %d finished history + running", got, scheduleRunHistoryLimit+1)
 	}
-	if _, ok := svc.scheduleRuns[scheduleRunStatusID("daily", "still-running")]; !ok {
+	if _, ok := svc.scheduleRunStatus(task, "still-running"); !ok {
 		t.Fatal("running status pruned, want preserved")
 	}
-	if _, ok := svc.scheduleRuns[scheduleRunStatusID("daily", "run-0")]; ok {
+	if _, ok := svc.scheduleRunStatus(task, "run-0"); ok {
 		t.Fatal("oldest finished status still exists, want pruned")
 	}
-	if _, ok := svc.scheduleRuns[scheduleRunStatusID("daily", "run-104")]; !ok {
+	if _, ok := svc.scheduleRunStatus(task, "run-104"); !ok {
 		t.Fatal("newest finished status missing, want retained")
 	}
-	if got := len(svc.scheduleRunsByTask["daily"]); got != scheduleRunHistoryLimit+1 {
-		t.Fatalf("scheduleRunsByTask[daily] len = %d, want %d", got, scheduleRunHistoryLimit+1)
+	if got := svc.scheduler.runCountForTaskForTest(task.BotID, task.ID); got != scheduleRunHistoryLimit+1 {
+		t.Fatalf("scheduler daily run count = %d, want %d", got, scheduleRunHistoryLimit+1)
 	}
 }
 
@@ -683,21 +681,19 @@ func TestScheduleRunHistoryPrunesOnlyTargetTaskIndex(t *testing.T) {
 		svc.markScheduleRunSkipped(target, runID, scheduledTaskRunKey(target, runID), started.Add(time.Duration(i)*time.Minute), "done")
 	}
 
-	svc.taskMu.Lock()
-	defer svc.taskMu.Unlock()
-	if got := len(svc.scheduleRunsByTask[target.ID]); got != scheduleRunHistoryLimit {
+	if got := svc.scheduler.runCountForTaskForTest(target.BotID, target.ID); got != scheduleRunHistoryLimit {
 		t.Fatalf("target task index len = %d, want %d", got, scheduleRunHistoryLimit)
 	}
-	if got := len(svc.scheduleRunsByTask[other.ID]); got != scheduleRunHistoryLimit {
+	if got := svc.scheduler.runCountForTaskForTest(other.BotID, other.ID); got != scheduleRunHistoryLimit {
 		t.Fatalf("other task index len = %d, want %d", got, scheduleRunHistoryLimit)
 	}
-	if _, ok := svc.scheduleRuns[scheduleRunStatusID(target.ID, "target-0")]; ok {
+	if _, ok := svc.scheduleRunStatus(target, "target-0"); ok {
 		t.Fatal("oldest target status still exists, want pruned")
 	}
-	if _, ok := svc.scheduleRuns[scheduleRunStatusID(other.ID, "other-0")]; !ok {
+	if _, ok := svc.scheduleRunStatus(other, "other-0"); !ok {
 		t.Fatal("oldest other status missing, want unrelated task history retained")
 	}
-	if _, ok := svc.scheduleRunsByTask[target.ID][scheduleRunStatusID(target.ID, "target-0")]; ok {
+	if svc.scheduler.hasRunIndexForTest(target.BotID, target.ID, "target-0") {
 		t.Fatal("oldest target status still indexed, want index pruned with status")
 	}
 }
@@ -720,16 +716,14 @@ func TestRunScheduledTaskJobRemovesDeadJobAndRecordsFailure(t *testing.T) {
 		Prompt:    "generate report",
 	}
 	job := &scheduledTaskJob{task: task, schedule: noNextScheduleSpec{}}
-	svc.taskMu.Lock()
-	svc.scheduleJobs[scheduledTaskJobID(task)] = job
-	svc.taskMu.Unlock()
+	svc.scheduler.setJobForTest(job)
 
 	svc.runScheduledTaskJob(context.Background(), job)
 
 	if got := svc.scheduledTaskJobCount(); got != 0 {
 		t.Fatalf("scheduledTaskJobCount() = %d, want dead job removed", got)
 	}
-	last, ok := svc.lastScheduleRunStatus(task.ID)
+	last, ok := svc.lastScheduleRunStatus(task)
 	if !ok {
 		t.Fatal("lastScheduleRunStatus ok = false, want recorded failure")
 	}
@@ -974,8 +968,8 @@ func TestStopScheduledTaskCancelsActiveRun(t *testing.T) {
 	jobCtx, jobCancel := context.WithCancel(context.Background())
 	job := &scheduledTaskJob{task: task, cancel: jobCancel}
 	job.addActiveRun(runID, key, cancel)
+	svc.scheduler.setJobForTest(job)
 	svc.taskMu.Lock()
-	svc.scheduleJobs[scheduledTaskJobID(task)] = job
 	svc.tasks[key] = &runningTask{
 		kind:    taskKindUser,
 		runtime: currentRuntimeKey(key),
@@ -1087,12 +1081,12 @@ func TestRunScheduledTaskOnceSendsResultToServiceIMSender(t *testing.T) {
 	var sentMsgs []feishu.Message
 	ctx := context.Background()
 	var sentRender []feishu.OutboundRenderContext
-	svc.scheduleSenders["bot-a"] = func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
+	svc.setScheduledTaskIMSender("bot-a", func(ctx context.Context, msg feishu.Message, text string, render feishu.OutboundRenderContext) error {
 		sent = append(sent, text)
 		sentMsgs = append(sentMsgs, msg)
 		sentRender = append(sentRender, render)
 		return nil
-	}
+	})
 
 	_, err := svc.runScheduledTaskOnce(ctx, task, "run-1", time.Now(), t.TempDir(), nil)
 	if err != nil {
@@ -1154,7 +1148,7 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 	var streamMetas []feishu.StreamCardMeta
 	var initialProcesses []string
 	var streamCard *fakeStreamCard
-	svc.scheduleStreams["bot-a"] = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		streamTargets = append(streamTargets, msg)
 		streamMetas = append(streamMetas, options.Meta)
 		initialProcesses = append(initialProcesses, options.InitialProcess)
@@ -1166,7 +1160,7 @@ func TestRunScheduledTaskOnceBindsStreamCardMessageForRootReplyRouting(t *testin
 			RootID:    "om_schedule_result",
 		}}
 		return streamCard, nil
-	}
+	})
 	chatSession := Session{
 		Key:          imSessionKey("bot-a", "oc_chat", ""),
 		AgentName:    "traex",

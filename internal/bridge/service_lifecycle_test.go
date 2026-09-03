@@ -123,7 +123,7 @@ func TestStartMigratesWorkspaceLocalStateBeforeLoadingStores(t *testing.T) {
 	if got, ok := store.Get(session.Key); !ok || got.ACPSessionID != session.ACPSessionID {
 		t.Fatalf("loaded session = %+v, %v; want migrated session", got, ok)
 	}
-	scheduleStore := svc.scheduleStores["bot-a"]
+	scheduleStore := svc.scheduledTaskStoreForBotID("bot-a")
 	if scheduleStore == nil {
 		t.Fatal("schedule store is nil")
 	}
