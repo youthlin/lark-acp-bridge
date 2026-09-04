@@ -64,7 +64,7 @@ func (s *meetingTraceSink) OnComplete(ctx context.Context, result TriggerResult)
 			stream.setFinalTextWithContext(finalCtx, text)
 		}
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
-		stream.updatePromptResult(result.ACPResult)
+		stream.updatePromptResultWithContext(finalCtx, result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)
 		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(meetingTraceCardCompleted))
 		stream.closeWithContext(finalCtx)

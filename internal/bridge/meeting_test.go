@@ -318,7 +318,7 @@ func TestMeetingPromptMergesSpeechAndHidesInternalEventFields(t *testing.T) {
 	if input.MeetingEnded {
 		t.Fatal("meeting prompt input meeting_ended = true, want false for live flush")
 	}
-	if len(input.NewTranscript) != 1 || input.NewTranscript[0].Speaker != "小王" || input.NewTranscript[0].Text != "没有收到卡片。啊，应该是配置还没开。" {
+	if len(input.NewTranscript) != 1 || input.NewTranscript[0].Speaker != "小王" || input.NewTranscript[0].Text != "没有收到卡片。 啊，应该是配置还没开。" {
 		t.Fatalf("new transcript = %+v, want consecutive speech merged", input.NewTranscript)
 	}
 	if len(input.NewDocuments) != 1 || input.NewDocuments[0].Title != "发布文档" {
@@ -473,6 +473,51 @@ func TestMeetingTraceShowsFullProcess(t *testing.T) {
 		t.Fatal("second meeting trace card was not bound to meeting session")
 	}
 	stopMeetingTestService(svc)
+}
+
+func TestMeetingTraceCompleteUpdatesUsageAfterSourceContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	card := &fakeStreamCard{failOnCanceledContext: true}
+	sink := &meetingTraceSink{
+		message: feishu.Message{BotID: "bot-a", ChatID: "oc_trace"},
+		state:   MeetingState{BotID: "bot-a", MeetingID: "meeting-1", MeetingNo: "123456789", Topic: "发布会"},
+		starter: func(context.Context, feishu.Message, feishu.StreamCardOptions) (feishu.StreamCard, error) {
+			return card, nil
+		},
+	}
+	result := TriggerResult{
+		Request: TriggerRequest{BotID: "bot-a"},
+		Session: Session{
+			Key:          meetingSessionKey("bot-a", "meeting-1"),
+			ACPSessionID: "acp-meeting",
+			Cwd:          t.TempDir(),
+		},
+		Text:    `{"summary":["确认上线"],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[]}`,
+		TextSet: true,
+		ACPResult: acp.PromptResult{
+			StopReason: "end_turn",
+			Usage:      acp.TokenUsage{InputTokens: 12, OutputTokens: 3},
+		},
+	}
+	if stream := sink.ensureStream(ctx, result); stream == nil {
+		t.Fatal("ensureStream() = nil")
+	}
+	cancel()
+	if err := sink.OnComplete(ctx, result); err != nil {
+		t.Fatalf("OnComplete() error = %v", err)
+	}
+	usageDetails := card.usageDetailsSnapshot()
+	if len(usageDetails) != 1 {
+		t.Fatalf("usageDetails = %+v, want one usage detail update after source context cancellation", usageDetails)
+	}
+	for _, want := range []string{`"inputTokens": 12`, `"outputTokens": 3`} {
+		if !strings.Contains(usageDetails[0], want) {
+			t.Fatalf("usage detail = %q, want %q", usageDetails[0], want)
+		}
+	}
+	if !card.isClosed() {
+		t.Fatal("meeting trace card was not closed")
+	}
 }
 
 func TestValidateMeetingMinutesRequiresTraceableEvidenceAndDocuments(t *testing.T) {

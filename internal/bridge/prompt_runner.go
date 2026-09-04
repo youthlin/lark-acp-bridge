@@ -512,7 +512,7 @@ func (s *Service) promptRuntimeWithProgressRawStatusPrefixAndStream(ctx context.
 			}
 		} else {
 			run.stream.updatePromptStatusFromResultWithContext(finalCtx, result)
-			run.stream.updatePromptResult(result)
+			run.stream.updatePromptResultWithContext(finalCtx, result)
 			run.stream.finishPromptStatusWithContext(finalCtx, result.StopReason)
 		}
 		run.stream.closeWithContext(finalCtx)

@@ -46,7 +46,7 @@ func (s *scheduledTaskIMSink) OnComplete(ctx context.Context, result TriggerResu
 			stream.setFinalTextWithContext(finalCtx, text)
 		}
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
-		stream.updatePromptResult(result.ACPResult)
+		stream.updatePromptResultWithContext(finalCtx, result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)
 		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(result, scheduleStreamCardCompleted))
 		stream.closeWithContext(finalCtx)

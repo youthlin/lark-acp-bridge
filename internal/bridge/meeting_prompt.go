@@ -111,7 +111,7 @@ func joinMeetingSpeech(left, right string) string {
 	if right == "" {
 		return left
 	}
-	return left + right
+	return left + " " + right
 }
 
 func meetingPromptTime(value time.Time) string {

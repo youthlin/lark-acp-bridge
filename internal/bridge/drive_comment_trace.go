@@ -67,7 +67,7 @@ func (s *driveCommentTraceSink) OnComplete(ctx context.Context, result TriggerRe
 			stream.setFinalTextWithContext(finalCtx, text)
 		}
 		stream.updatePromptStatusFromResultWithContext(finalCtx, result.ACPResult)
-		stream.updatePromptResult(result.ACPResult)
+		stream.updatePromptResultWithContext(finalCtx, result.ACPResult)
 		stream.finishPromptStatusWithContext(finalCtx, result.ACPResult.StopReason)
 		stream.updateMetaWithContext(finalCtx, s.streamCardMetaWithTitle(driveCommentStreamCardCompleted))
 		stream.closeWithContext(finalCtx)

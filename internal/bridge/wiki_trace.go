@@ -145,7 +145,7 @@ func (o *wikiTraceObserver) complete(ctx context.Context, result acp.PromptResul
 	}
 	stream.setFinalTextWithContext(finalCtx, finalText)
 	stream.updatePromptStatusFromResultWithContext(finalCtx, result)
-	stream.updatePromptResult(result)
+	stream.updatePromptResultWithContext(finalCtx, result)
 	stream.finishPromptStatusWithContext(finalCtx, result.StopReason)
 	stream.updateMetaWithContext(finalCtx, o.streamCardMeta(wikiTraceCardCompleted))
 	stream.closeWithContext(finalCtx)

@@ -246,7 +246,7 @@ func (s *promptCardStream) flushDelayedWithContext(ctx context.Context, result a
 		}
 	}
 	if showUsage {
-		s.updatePromptResult(result)
+		s.updatePromptResultWithContext(ctx, result)
 	}
 	s.closeWithContext(ctx)
 }
@@ -371,6 +371,10 @@ func (s *promptCardStream) updatePromptStatusFromResultWithContext(ctx context.C
 }
 
 func (s *promptCardStream) updatePromptResult(result acp.PromptResult) {
+	s.updatePromptResultWithContext(s.ctx, result)
+}
+
+func (s *promptCardStream) updatePromptResultWithContext(ctx context.Context, result acp.PromptResult) {
 	if !s.showUsageDetail || !promptResultHasUsageDetail(result) {
 		return
 	}
@@ -384,12 +388,12 @@ func (s *promptCardStream) updatePromptResult(result acp.PromptResult) {
 	if delayed {
 		return
 	}
-	card := s.ensureCardWithContext(s.ctx)
+	card := s.ensureCardWithContext(ctx)
 	if card == nil {
 		return
 	}
-	if err := card.UpdateUsageDetail(s.ctx, detail); err != nil {
-		slog.ErrorContext(s.ctx, "更新 ACP 流式卡片用量明细失败", "session", s.session.ACPSessionID, "错误", err)
+	if err := card.UpdateUsageDetail(ctx, detail); err != nil {
+		slog.ErrorContext(ctx, "更新 ACP 流式卡片用量明细失败", "session", s.session.ACPSessionID, "错误", err)
 	}
 }
 
