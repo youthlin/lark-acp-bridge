@@ -44,12 +44,18 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.conversationManager.loadStores(upgradedWorkspaceFiles); err != nil {
 		return err
 	}
+	if err := s.loadMeetingStores(); err != nil {
+		return err
+	}
 
 	slog.Info("启动 ACP 桥接服务", "agent列表", s.registry.Names(), "bot数量", len(s.feishu))
 	configChanged := false
 	for i, adapter := range s.feishu {
 		if err := adapter.Start(ctx); err != nil {
 			return err
+		}
+		if bot, ok := s.botConfigAt(i); ok {
+			s.setOutboundIfAbsent(bot.ID, adapter)
 		}
 		if s.syncResolvedBotConfig(i, adapter) {
 			configChanged = true
@@ -61,6 +67,7 @@ func (s *Service) Start(ctx context.Context) error {
 	if configChanged {
 		s.persistResolvedConfig(ctx)
 	}
+	s.restoreMeetings(ctx)
 	if err := s.loadAndStartScheduledTasks(ctx); err != nil {
 		return err
 	}

@@ -24,17 +24,19 @@ type TriggerSink interface {
 
 // TriggerRequest 描述一次显式 source 触发的 ACP prompt。
 type TriggerRequest struct {
-	BotID                string
-	Key                  SessionKey
-	TraceMessageID       string
-	Workspace            string
-	AgentName            string
-	Cwd                  string
-	Title                string
-	Prompt               string
-	Metadata             map[string]string
-	Sink                 TriggerSink
-	EnableWikiReflection bool
+	BotID                  string
+	Key                    SessionKey
+	TraceMessageID         string
+	Workspace              string
+	AgentName              string
+	Cwd                    string
+	Title                  string
+	Prompt                 string
+	Metadata               map[string]string
+	Sink                   TriggerSink
+	EnableWikiReflection   bool
+	DisableToolPermissions bool
+	DisableTrace           bool
 }
 
 // TriggerResult 描述 trigger prompt 的阶段性或最终结果。
@@ -403,7 +405,10 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 	}
 	chunks := &triggerTextAccumulator{}
 	out, err := runPromptTask(s, ctx, session, agent, triggerPromptTaskOptions(), func(taskCtx context.Context) (acp.PromptResult, bool, error) {
-		recorder := s.newTraceRecorderWithMessageID(session, req.Prompt, req.TraceMessageID)
+		var recorder *traceRecorder
+		if !req.DisableTrace {
+			recorder = s.newTraceRecorderWithMessageID(session, req.Prompt, req.TraceMessageID)
+		}
 		result, err := s.runtime.Prompt(taskCtx, session, agent, req.Prompt, tracePromptOptions(recorder, acp.PromptOptions{
 			OnUpdate: func(update acp.PromptUpdate) {
 				chunks.add(update)
@@ -412,6 +417,9 @@ func (s *Service) runPreparedTriggerPrompt(ctx context.Context, prepared prepare
 				}
 			},
 			OnPermissionRequest: func(permCtx context.Context, permission acp.PermissionRequest) (acp.PermissionOutcome, error) {
+				if req.DisableToolPermissions {
+					return defaultPermissionOutcome(permission), nil
+				}
 				return s.requestTriggerPermission(permCtx, req, session, permission), nil
 			},
 		}))

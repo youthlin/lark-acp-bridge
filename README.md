@@ -73,7 +73,12 @@ lark-acp-bridge bots register default
       },
       "workspace": "$HOME/.lark-acp-bridge/bots/default",
       "bot_open_id": "ou_bot",
-      "owner_open_ids": ["ou_xxx"]
+      "owner_open_ids": ["ou_xxx"],
+      "meeting": {
+        "enabled": false,
+        "recipient_open_id": "ou_xxx",
+        "trace_enabled": false
+      }
     }
   ]
 }
@@ -94,6 +99,10 @@ lark-acp-bridge bots remove default
 `workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片和执行 `/restart`。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准，也不能通过飞书命令重启服务。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
 自动读取 owner 需要飞书应用具备查询本应用信息和协作者的权限，例如 `application:application:self_manage` 或等价的应用管理只读权限。也可以直接在 `owner_open_ids` 中手动配置允许审批人的 open_id，配置后启动时不会再查询飞书应用协作者。
+
+`meeting` 配置静默会议助手。`enabled` 是处理新会议邀请的大开关，关闭后不会接受新邀请，但已经加入的会议仍会整理到结束；`recipient_open_id` 是会议纪要卡片的唯一私聊接收人，未配置且恰好只有一个 owner 时自动使用该 owner，多 owner 时必须显式配置；`trace_enabled` 控制会议整理 ACP session 是否写本地 trace，默认关闭。也可以由 bot owner 使用 `/meeting on|off|status` 和 `/meeting trace on|off` 原子更新配置文件。
+
+启用前需要在飞书开放平台开通会议机器人相关能力，授权“加入会议”和“获取会议事件列表”接口，并订阅 `vc.bot.meeting_invited_v1`、`vc.bot.meeting_activity_v1`、`vc.bot.meeting_ended_v1` 三个事件；私聊纪要卡片仍依赖现有的 IM 发消息和 Card 权限。会议机器人能力目前由飞书灰度开放，能否使用以及准确的权限 scope 以开放平台控制台和官方 API 文档为准。
 
 可选配置 `restart_command` 用于覆盖 `/restart` 的实际重启方式，格式是字符串数组，第一项是命令，后续项是参数，例如：
 
@@ -160,10 +169,13 @@ $BOT_WORKSPACE/.local/scheduled_tasks.json
 $BOT_WORKSPACE/.local/token_usage.json
 $BOT_WORKSPACE/.local/restart_ack.json
 $BOT_WORKSPACE/.local/processed_messages.json
+$BOT_WORKSPACE/.local/meetings.json
 $BOT_WORKSPACE/.local/cache/
 ```
 
-workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；会话、定时任务、token 用量、重启回执、飞书消息去重记录和飞书图片缓存这类本地运行态统一写入 `.local/`。bridge 会在服务启动和 workspace 初始化时确保 `.gitignore` 包含 `.local/`，方便后续直接对 workspace 做 git 管理。服务启动和 workspace 初始化时还会把升级前已经存在于 workspace 根目录的 `sessions.json`、`scheduled_tasks.json`、`token_usage.json`、`restart_ack.json`、`processed_messages.json` 和 `cache/` 一次性移动到 `.local/` 下，并删除外层旧路径；如果 `.local/` 下已经存在同名目标，为避免覆盖数据，会跳过该项并保留外层旧副本，同时记录 warning 日志。
+workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；会话、定时任务、token 用量、重启回执、飞书消息去重记录、会议状态和飞书图片缓存这类本地运行态统一写入 `.local/`。bridge 会在服务启动和 workspace 初始化时确保 `.gitignore` 包含 `.local/`，方便后续直接对 workspace 做 git 管理。服务启动和 workspace 初始化时还会把升级前已经存在于 workspace 根目录的 `sessions.json`、`scheduled_tasks.json`、`token_usage.json`、`restart_ack.json`、`processed_messages.json` 和 `cache/` 一次性移动到 `.local/` 下，并删除外层旧路径；如果 `.local/` 下已经存在同名目标，为避免覆盖数据，会跳过该项并保留外层旧副本，同时记录 warning 日志。`meetings.json` 是新功能状态文件，不参与旧路径迁移。
+
+会议助手收到邀请后以静音方式加入会议，只采集飞书推送的字幕、会中文字、参会人和共享文档事件，不发送会中文字或语音。它按 60 秒或累计 2000 字批量调用默认 ACP agent，要求输出严格 JSON 的完整最新纪要，并只展示有原话证据的明确 TODO；会议结束后先等待 15 秒并主动补拉事件，再触发最终整理，完成后继续保留 10 分钟迟到事件窗口。同一张 Card 2.0 纪要卡片持续私聊更新给 `recipient_open_id`，结束后由接收人自行转发。状态、事件去重键、ACP session 和卡片序号保存在 `.local/meetings.json`，进程重启后会补拉会议事件并继续未完成会议；迟到事件窗口结束后会清理字幕和去重明细，历史会议最多保留 90 天且不超过 100 条。会议整理拒绝 ACP 工具权限，避免静默任务执行外部操作。
 
 会话映射使用 JSON 文件保存 `bot_id + source + main_id + sub_id -> ACP session`。当前聊天入口使用 `source=im`，普通群和私聊的 `main_id` 是 `chat_id`、`sub_id` 为空，表示整个 chat 共用一个 ACP session；话题群的 `main_id` 是 `chat_id`、`sub_id` 是当前话题的 `thread_id`。重启后不会丢失当前会话的 `agent`、`cwd` 和 `acp_session_id`；暂不需要 SQLite。`.local/sessions.json` 还会保留同一主资源里的历史 ACP session，用于 `/session list` 和 `/session resume <index>`，并保存 chat 维度的 `/agent`、`/show`、`/at`、`/wiki`、`/rules` 配置。`/rules set <规则>` 配置的 chat 补充规则会在下一条 prompt 中随 workspace 规则注入；`/rules clear` 清除配置，但已有 ACP session 可能仍保留旧上下文，如需彻底移除应执行 `/new`。服务进程内会为活跃飞书会话维护对应的 ACP agent 子进程；重启后普通消息会按已保存的 `acp_session_id` 尝试 `session/load` 恢复。
 
@@ -317,6 +329,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki lint`、`/wiki upgrade`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀；可主动检查 workspace 知识库一致性，也可把当前内置 wiki 维护规则和内置 workspace skill 同步到已有 workspace。`/wiki lint` 会异步执行，并像普通 prompt 一样用流式卡片展示处理过程和结果。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
 - `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会按目的群 `/show` 配置展示后台反思执行过程。
+- `/meeting on|off|status`、`/meeting trace on|off`：仅 bot owner 可用。管理静默会议助手和会议整理 trace；`off` 只拒绝新邀请，不中断正在整理的会议。纪要卡片固定私聊发送给 `meeting.recipient_open_id`，未配置且只有一个 owner 时自动使用该 owner。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。

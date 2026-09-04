@@ -39,6 +39,9 @@ type serviceStores struct {
 	traceStores          map[string]*traceStore
 	companionStateStores map[string]*wikiStateStore // key=规范化 workspace 路径
 	wikiCoordinators     map[string]*wikiCoordinator
+	meetingStores        map[string]*MeetingStore
+	meetingCoordinators  map[meetingKey]*meetingCoordinator
+	meetingMu            sync.Mutex
 }
 
 type serviceOutbounds struct {
@@ -81,6 +84,8 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			traceStores:          make(map[string]*traceStore),
 			companionStateStores: make(map[string]*wikiStateStore),
 			wikiCoordinators:     make(map[string]*wikiCoordinator),
+			meetingStores:        make(map[string]*MeetingStore),
+			meetingCoordinators:  make(map[meetingKey]*meetingCoordinator),
 		},
 		serviceOutbounds: serviceOutbounds{
 			outbounds: make(map[string]feishu.Outbound),
@@ -161,6 +166,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 				trace.canPrune = coordinator.canPruneTrace
 				trace.canCompact = coordinator.canPruneTrace
 			}
+			s.meetingStores[strings.TrimSpace(bot.ID)] = NewMeetingStore(workspaceLocalPath(bot.Workspace, "meetings.json"))
 		}
 	}
 	if store != nil {
@@ -222,6 +228,7 @@ var _ feishu.ModeSelectionHandler = (*Service)(nil)
 var _ feishu.SessionSelectionHandler = (*Service)(nil)
 var _ feishu.OverviewActionHandler = (*Service)(nil)
 var _ feishu.DriveCommentCapabilityHandler = (*Service)(nil)
+var _ feishu.MeetingHandler = (*Service)(nil)
 
 const maxSessionHistoryPerChat = 10
 

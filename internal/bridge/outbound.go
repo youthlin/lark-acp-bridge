@@ -110,6 +110,21 @@ func (s *Service) setOutbound(botID string, outbound feishu.Outbound) {
 	s.outbounds[botID] = outbound
 }
 
+func (s *Service) setOutboundIfAbsent(botID string, outbound feishu.Outbound) {
+	if s == nil || outbound == nil {
+		return
+	}
+	botID = strings.TrimSpace(botID)
+	s.outboundMu.Lock()
+	defer s.outboundMu.Unlock()
+	if s.outbounds == nil {
+		s.outbounds = make(map[string]feishu.Outbound)
+	}
+	if s.outbounds[botID] == nil {
+		s.outbounds[botID] = outbound
+	}
+}
+
 func (s *Service) outboundForBot(botID string) feishu.Outbound {
 	if s == nil {
 		return nil

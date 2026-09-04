@@ -16,6 +16,55 @@ type OutboundDriveCommentHandler interface {
 	HandleDriveCommentWithOutbound(context.Context, DriveComment, Outbound) error
 }
 
+type MeetingHandler interface {
+	HandleMeetingInvited(context.Context, MeetingInvitation, Outbound) error
+	HandleMeetingActivities(context.Context, MeetingActivities, Outbound) error
+	HandleMeetingEnded(context.Context, MeetingEnded, Outbound) error
+}
+
+type MeetingJoiner interface {
+	JoinMeeting(context.Context, MeetingJoinRequest) (MeetingJoinResult, error)
+}
+
+type MeetingCard interface {
+	Snapshot() MeetingCardSnapshot
+	Update(context.Context, MeetingCardView) error
+}
+
+type MeetingCardSender interface {
+	StartMeetingCard(context.Context, string, MeetingCardView) (MeetingCard, error)
+	RestoreMeetingCard(MeetingCardSnapshot) MeetingCard
+}
+
+type MeetingCardSnapshot struct {
+	CardID    string
+	MessageID string
+	ChatID    string
+	Sequence  int
+}
+
+type MeetingCardView struct {
+	Topic           string
+	MeetingNo       string
+	Status          string
+	StartedAt       string
+	EndedAt         string
+	Summary         []string
+	Decisions       []string
+	Todos           []MeetingCardTodo
+	Risks           []string
+	OpenQuestions   []string
+	SharedDocuments []MeetingDocument
+	UpdatedAt       string
+	Error           string
+}
+
+type MeetingCardTodo struct {
+	Content  string
+	Assignee string
+	DueAt    string
+}
+
 type OutboundRenderContext struct {
 	BaseDir string
 }

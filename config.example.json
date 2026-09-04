@@ -19,6 +19,11 @@
         "trace_enabled": false,
         "trace_chat_id": ""
       },
+      "meeting": {
+        "enabled": false,
+        "recipient_open_id": "",
+        "trace_enabled": false
+      },
       "wiki_trace": {
         "enabled": false,
         "chat_id": ""

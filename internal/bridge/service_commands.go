@@ -114,6 +114,16 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name: "/meeting",
+		helpLines: []string{
+			"/meeting on|off|status - 管理当前 bot 的静默会议助手（owner only）",
+			"/meeting trace on|off - 设置会议整理 ACP trace",
+		},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleMeetingCommand(ctx, text, msg)
+		},
+	},
+	{
 		name: "/model",
 		helpLines: []string{
 			"/model - 打开模型选择卡片",
@@ -309,6 +319,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/at"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/debug"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/drive_comment"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/meeting"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/update"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/status"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/restart"),

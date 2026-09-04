@@ -3,7 +3,7 @@ module github.com/youthlin/lark-acp-bridge
 go 1.24.1
 
 require (
-	github.com/larksuite/oapi-sdk-go/v3 v3.9.9
+	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
 	github.com/spf13/cobra v1.10.2
 )
 

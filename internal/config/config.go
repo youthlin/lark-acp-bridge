@@ -54,6 +54,8 @@ type BotConfig struct {
 	Trace TraceConfig `json:"trace,omitzero"`
 	// 云文档评论处理配置
 	DriveComment DriveCommentConfig `json:"drive_comment,omitzero"`
+	// 飞书会议助手配置
+	Meeting MeetingConfig `json:"meeting,omitzero"`
 	// 自动知识沉淀过程展示配置
 	WikiTrace WikiTraceConfig `json:"wiki_trace,omitzero"`
 }
@@ -97,6 +99,12 @@ type DriveCommentConfig struct {
 	Enabled      bool   `json:"enabled,omitempty"`
 	TraceEnabled bool   `json:"trace_enabled,omitempty"`
 	TraceChatID  string `json:"trace_chat_id,omitempty"`
+}
+
+type MeetingConfig struct {
+	Enabled         bool   `json:"enabled,omitempty"`
+	RecipientOpenID string `json:"recipient_open_id,omitempty"`
+	TraceEnabled    bool   `json:"trace_enabled,omitempty"`
 }
 
 type WikiTraceConfig struct {
@@ -605,6 +613,18 @@ func UpdateBotDriveComment(path, botID string, update func(*DriveCommentConfig))
 	return updated, err
 }
 
+func UpdateBotMeeting(path, botID string, update func(*MeetingConfig)) (MeetingConfig, error) {
+	var updated MeetingConfig
+	err := updateBotSubConfig(path, botID, "meeting", &updated, func() bool {
+		if update != nil {
+			update(&updated)
+		}
+		updated.RecipientOpenID = strings.TrimSpace(updated.RecipientOpenID)
+		return updated.Enabled || updated.TraceEnabled || updated.RecipientOpenID != ""
+	})
+	return updated, err
+}
+
 func UpdateBotWikiTrace(path, botID string, update func(*WikiTraceConfig)) (WikiTraceConfig, error) {
 	var updated WikiTraceConfig
 	err := updateBotSubConfig(path, botID, "wiki_trace", &updated, func() bool {
@@ -1077,6 +1097,7 @@ func normalize(cfg *Config) error {
 		bot.OwnerOpenIDs = normalizeOpenIDs(bot.OwnerOpenIDs)
 		bot.Trace = normalizeTraceConfig(bot.Trace)
 		bot.DriveComment.TraceChatID = strings.TrimSpace(bot.DriveComment.TraceChatID)
+		bot.Meeting.RecipientOpenID = strings.TrimSpace(bot.Meeting.RecipientOpenID)
 		bot.WikiTrace.ChatID = strings.TrimSpace(bot.WikiTrace.ChatID)
 		bot.AppSecret.normalize()
 		cfg.Bots[i] = bot

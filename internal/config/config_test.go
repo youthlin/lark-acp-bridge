@@ -417,6 +417,44 @@ func TestUpdateBotDriveCommentSerializesConcurrentReadModifyWrite(t *testing.T) 
 	}
 }
 
+func TestUpdateBotMeetingUpdatesOnlyMeetingField(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := Config{Bots: []BotConfig{{
+		ID:           "bot-a",
+		AppID:        "cli_a",
+		AppSecret:    FileSecret("secret.appsecret"),
+		Workspace:    t.TempDir(),
+		OwnerOpenIDs: []string{"ou_owner"},
+		DriveComment: DriveCommentConfig{Enabled: true},
+	}}}
+	if err := Write(configPath, cfg); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	updated, err := UpdateBotMeeting(configPath, "bot-a", func(cfg *MeetingConfig) {
+		cfg.Enabled = true
+		cfg.TraceEnabled = true
+		cfg.RecipientOpenID = " ou_recipient "
+	})
+	if err != nil {
+		t.Fatalf("UpdateBotMeeting() error = %v", err)
+	}
+	want := MeetingConfig{Enabled: true, TraceEnabled: true, RecipientOpenID: "ou_recipient"}
+	if updated != want {
+		t.Fatalf("updated meeting = %+v, want %+v", updated, want)
+	}
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Bots[0].Meeting != want {
+		t.Fatalf("loaded meeting = %+v, want %+v", loaded.Bots[0].Meeting, want)
+	}
+	if !loaded.Bots[0].DriveComment.Enabled {
+		t.Fatalf("drive_comment was overwritten: %+v", loaded.Bots[0].DriveComment)
+	}
+}
+
 func TestUpdateBotWikiTraceUpdatesOnlyWikiTraceField(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

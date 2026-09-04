@@ -134,16 +134,21 @@ func (a *Adapter) requestPermission(ctx context.Context, req acp.PermissionReque
 }
 
 func (a *Adapter) sendInteractiveCardToOpenID(ctx context.Context, targetOpenID string, cardID string, name string) error {
+	_, err := a.sendInteractiveCardMessageToOpenID(ctx, targetOpenID, cardID, name)
+	return err
+}
+
+func (a *Adapter) sendInteractiveCardMessageToOpenID(ctx context.Context, targetOpenID string, cardID string, name string) (SentMessage, error) {
 	displayName := cardNameForError(name)
 	content, err := json.Marshal(map[string]any{
 		"type": "card",
 		"data": map[string]string{"card_id": cardID},
 	})
 	if err != nil {
-		return fmt.Errorf("编码飞书%s卡片消息内容: %w", displayName, err)
+		return SentMessage{}, fmt.Errorf("编码飞书%s卡片消息内容: %w", displayName, err)
 	}
 	if strings.TrimSpace(targetOpenID) == "" {
-		return fmt.Errorf("发送飞书%s卡片消息: open_id 为空", displayName)
+		return SentMessage{}, fmt.Errorf("发送飞书%s卡片消息: open_id 为空", displayName)
 	}
 	resp, err := a.client.Im.V1.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeOpenId).
@@ -154,12 +159,12 @@ func (a *Adapter) sendInteractiveCardToOpenID(ctx context.Context, targetOpenID 
 			Build()).
 		Build())
 	if err != nil {
-		return fmt.Errorf("发送飞书%s卡片消息: %w", displayName, err)
+		return SentMessage{}, fmt.Errorf("发送飞书%s卡片消息: %w", displayName, err)
 	}
 	if !resp.Success() {
-		return fmt.Errorf("发送飞书%s卡片消息返回错误: code=%d msg=%s", displayName, resp.Code, resp.Msg)
+		return SentMessage{}, fmt.Errorf("发送飞书%s卡片消息返回错误: code=%d msg=%s", displayName, resp.Code, resp.Msg)
 	}
-	return nil
+	return sentMessageFromCreateResp(resp, "", "p2p"), nil
 }
 
 func (a *Adapter) markPermissionCardCancelled(requestID string, entry permissionCardEntry) {

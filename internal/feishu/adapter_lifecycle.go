@@ -48,6 +48,9 @@ func (a *Adapter) Start(ctx context.Context) error {
 	if a.driveComments == nil {
 		a.driveComments = larkDriveCommentClient{client: a.client}
 	}
+	if a.meetings == nil {
+		a.meetings = larkMeetingClient{client: a.client}
+	}
 	a.resolveBotOpenID(ctx)
 	a.resolveOwnerOpenIDs(ctx)
 
@@ -74,6 +77,9 @@ func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
 		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
 		OnP2NoticeCommentAddV1(a.handleDriveCommentAdd).
+		OnP2BotMeetingInvitedV1(a.handleMeetingInvited).
+		OnP2BotMeetingActivityV1(a.handleMeetingActivity).
+		OnP2BotMeetingEndedV1(a.handleMeetingEnded).
 		OnP2CardActionTrigger(a.handleCardAction)
 	handler.InitConfig(larkevent.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-handler")))
 	return handler

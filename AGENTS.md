@@ -14,8 +14,8 @@
 
 - `cmd/lark-acp-bridge`：CLI 入口、默认后台 daemon（unix）、`bots`/`service` 子命令、版本号、前台运行、实例锁与 pid/log 管理。
 - `internal/config`：配置加载、路径展开、bot/agent 校验、加密 file secret、`restart_command` 与默认配置创建。
-- `internal/feishu`：飞书长连接适配、事件解析与去重、消息/卡片渲染、权限/会话/模式/模型卡片、群聊信息缓存、云文档评论事件。
-- `internal/bridge`：核心桥接层，负责 session 映射与生命周期、ACP runtime、prompt 队列与流式更新、斜杠命令、定时/循环/wiki 任务、token 用量、workspace 模板与持久化。
+- `internal/feishu`：飞书长连接适配、事件解析与去重、消息/卡片渲染、权限/会话/模式/模型卡片、群聊信息缓存、云文档评论事件和会议机器人 API。
+- `internal/bridge`：核心桥接层，负责 session 映射与生命周期、ACP runtime、prompt 队列与流式更新、斜杠命令、定时/循环/wiki/会议任务、token 用量、workspace 模板与持久化。
 - `internal/acp`：基于 stdio JSON-RPC 的 ACP client，包含进程管理、initialize、session/new/prompt/resume/close、agent 能力与配置项、权限请求处理。
 - `internal/arg`：零拷贝的 JSON 参数封装工具。
 - `internal/logging`：带 context 的 `slog` handler、日志级别与 debug 开关。
@@ -40,15 +40,16 @@
 - 同一会话中新普通消息优先级最高：新消息会取消上一轮正在执行的用户 prompt，再处理新消息；自动 wiki 使用独立伴生会话，不受原会话新消息影响。
 - 群聊默认需要 at 当前 bot 才响应；`/at off`、`/at off auto`、`/at off auto-reaction` 可改为免 at，`/at on` 恢复。私聊始终响应，不支持 `/at`。
 
-斜杠命令仅限 bot owner 执行（sender open_id 命中 `owner_open_ids` 或启动时解析到的应用所有者/管理员）。完整命令以 `internal/bridge/service_commands.go` 的 `slashRoutedCommandTable` 为准，当前包含：`/help`、`/new`、`/agent`、`/session`、`/wiki`、`/drive_comment`、`/loop`、`/queue`、`/rules`、`/schedule`、`/card`、`/cmds`、`//command`、`/compact`、`/config`、`/model`、`/mode`、`/usage`、`/show`、`/at`、`/debug`、`/update`、`/restart`、`/status`。`/rules` 管理当前 chat 的补充规则，并在 workspace 规则注入时一并传给 ACP agent。`/update` 只替换二进制，不自动重启，完成后需再用 `/restart`。
+斜杠命令仅限 bot owner 执行（sender open_id 命中 `owner_open_ids` 或启动时解析到的应用所有者/管理员）。完整命令以 `internal/bridge/service_commands.go` 的 `slashRoutedCommandTable` 为准，当前包含：`/help`、`/new`、`/agent`、`/session`、`/wiki`、`/meeting`、`/drive_comment`、`/loop`、`/queue`、`/rules`、`/schedule`、`/card`、`/cmds`、`//command`、`/compact`、`/config`、`/model`、`/mode`、`/usage`、`/show`、`/at`、`/debug`、`/update`、`/restart`、`/status`。`/rules` 管理当前 chat 的补充规则，并在 workspace 规则注入时一并传给 ACP agent。`/meeting` 管理新会议邀请和会议 trace；关闭时不打断已加入会议。`/update` 只替换二进制，不自动重启，完成后需再用 `/restart`。
 
 ## Workspace 与知识沉淀
 
-- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json`、`processed_messages.json` 和图片 `cache/`。服务启动和 workspace 初始化时会确保 `.gitignore` 包含 `.local/`，并把旧根目录运行态一次性移动进 `.local/`，但如果目标已存在则不覆盖旧副本。
+- 每个 bot 的 `workspace` 是持久化目录，用于存放 `SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`、`knowledge/`、`skills/` 等适合 git 管理的 L0/L1/L2 内容；本地运行态统一放到 `.local/`，包括 `sessions.json`、`scheduled_tasks.json`、`restart_ack.json`、`token_usage.json`、`processed_messages.json`、`meetings.json` 和图片 `cache/`。服务启动和 workspace 初始化时会确保 `.gitignore` 包含 `.local/`，并把旧根目录运行态一次性移动进 `.local/`，但如果目标已存在则不覆盖旧副本。
 - 首次对话且 workspace 未 ready 时，bridge 创建基础模板文件和 `Bootstrap.md`；第一条 `session/prompt` 把 ready workspace 内容注入给 ACP agent，由 agent 完成一次性初始化询问并写入文件后删除 `Bootstrap.md`。bridge 不实现多轮 onboarding 状态机，也不做旧记忆文件名迁移。
 - bridge 只负责创建模板、注入 workspace 内容和提供受限 workspace 文件读写能力；长期记忆、知识和技能文件由 ACP agent 用自身本地工具维护。新增/删除/重命名知识或技能文件需同步 `knowledge/index.md` 并追加 `knowledge/log.md`。
 - 自动知识沉淀（wiki）默认开启。普通消息的完整终止记录落入 `.local/traces/<acp_session_id>.jsonl` 后，workspace 级 coordinator 默认等待 5 分钟，再由独立 `wiki-companion` ACP session 按冻结的 `seq` 区间增量读取 trace 并维护知识。原用户 session 不接收 wiki prompt；新消息与 `/new` 不取消、不搬运 companion job。成功或 `NoReply` 后才推进 `.local/wiki/state.json` 的 cursor，失败保持原 cursor 并有限重试；同一 workspace 的自动 wiki 和 `/wiki lint` 串行写入。
 - trace 的 `seq` 在单文件内严格递增，`turn_result`/`error` 是完整轮次边界；压缩必须保留 `user`、final assistant 和终止记录，且未消费 trace 不得压缩或按 retention 删除。companion 自身 trace 使用 `source=wiki`，禁止再次作为知识沉淀来源。bot 级 `wiki_trace` 默认关闭；开启后把 companion 执行过程旁路到指定群的流式卡片。
+- bot 级 `meeting` 默认关闭。启用后机器人静音入会，按飞书会议事件批量维护结构化纪要和明确 TODO，并持续更新唯一接收人的私聊卡片；会议状态写入 `.local/meetings.json`，重启后补拉事件恢复。结束后等待 15 秒并最终补拉，完成后保留 10 分钟迟到事件窗口；随后压缩事件明细，历史最多保留 90 天且不超过 100 条。会议 ACP prompt 必须拒绝工具权限；`meeting.trace_enabled` 独立控制 trace。
 
 ## 配置
 

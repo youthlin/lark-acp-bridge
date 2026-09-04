@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -54,6 +55,7 @@ type Adapter struct {
 	chatInfo        chatInfoClient          // 群信息读取
 	applications    applicationClient       // 应用信息读取
 	driveComments   driveCommentClient      // 云文档评论读取和回复
+	meetings        meetingClient           // 视频会议机器人入会
 	permissionCards *permissionCardRegistry // ACP 权限卡片等待表
 	chatInfoCache   *chatInfoCache          // 群信息缓存
 }
@@ -84,6 +86,11 @@ type applicationClient interface {
 type driveCommentClient interface {
 	GetComment(ctx context.Context, fileToken, fileType, commentID string) (DriveCommentDetail, error)
 	ReplyComment(ctx context.Context, comment DriveComment, text string) error
+}
+
+type meetingClient interface {
+	Join(context.Context, MeetingJoinRequest) (MeetingJoinResult, error)
+	ListActivities(context.Context, string, time.Time) ([]MeetingActivity, error)
 }
 
 type BotInfo struct {
