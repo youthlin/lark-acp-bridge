@@ -291,10 +291,11 @@ func formatCurrentAtUserMessage(msg feishu.Message, promptText string) string {
 	if promptText == "" {
 		return promptText
 	}
-	lines := []string{
-		"sender：" + formatPendingAtSender(msg.SenderID),
-		"content：" + promptText,
+	lines := make([]string, 0, 2)
+	if sender := formatPendingAtSender(msg.SenderID); sender != "" {
+		lines = append(lines, "sender: "+sender)
 	}
+	lines = append(lines, "content："+promptText)
 	return strings.Join(lines, "\n")
 }
 
@@ -303,19 +304,15 @@ func formatPendingAtMessageLine(messageID string, senderID string, text string) 
 	if messageID == "" {
 		messageID = "unknown-message"
 	}
-	senderID = strings.TrimSpace(senderID)
-	if senderID == "" {
-		senderID = "unknown-sender"
+	metadata := []string{"msgid=" + messageID}
+	if senderID = formatPendingAtSender(senderID); senderID != "" {
+		metadata = append(metadata, "sender="+senderID)
 	}
-	return fmt.Sprintf("- （%s）（%s）%s", messageID, senderID, text)
+	return fmt.Sprintf("- [%s]: %s", strings.Join(metadata, ", "), text)
 }
 
 func formatPendingAtSender(senderID string) string {
-	senderID = strings.TrimSpace(senderID)
-	if senderID == "" {
-		return "用户"
-	}
-	return "用户(" + senderID + ")"
+	return strings.TrimSpace(senderID)
 }
 
 func (s *Service) shouldQueueAtAutoMessage(msg feishu.Message) bool {

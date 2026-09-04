@@ -1086,18 +1086,18 @@ func TestHandleFeishuGroupChatCachesMessagesUntilNextMention(t *testing.T) {
 	prompt := rt.promptCalls[1].Text
 	for _, want := range []string{
 		"## 以下是当前对话历史消息",
-		"- （om_group_cached_1）（ou_b）b 的补充",
-		"- （om_group_cached_2）（ou_c）c 的补充",
+		"- [msgid=om_group_cached_1, sender=ou_b]: b 的补充",
+		"- [msgid=om_group_cached_2, sender=ou_c]: c 的补充",
 		"## User Message",
-		"sender：用户(ou_a)",
+		"sender: ou_a",
 		"content：第二轮，你说得对 @用户b(ou_b),你也看看 @用户c(ou_c)",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
 	}
-	if strings.Index(prompt, "（om_group_cached_1）") > strings.Index(prompt, "content：第二轮") ||
-		strings.Index(prompt, "（om_group_cached_2）") > strings.Index(prompt, "content：第二轮") {
+	if strings.Index(prompt, "[msgid=om_group_cached_1") > strings.Index(prompt, "content：第二轮") ||
+		strings.Index(prompt, "[msgid=om_group_cached_2") > strings.Index(prompt, "content：第二轮") {
 		t.Fatalf("prompt = %q, want cached messages before current mention", prompt)
 	}
 	if strings.Contains(prompt, "/at off") {
@@ -1215,7 +1215,7 @@ func TestHandleFeishuTopicGroupPendingMentionCacheIsTopicScoped(t *testing.T) {
 	topic1Prompt := rt.promptCalls[1].Text
 	for _, want := range []string{
 		"## 以下是当前对话历史消息",
-		"- （om_topic_1_pending）（ou_a）话题1里后续不at的消息",
+		"- [msgid=om_topic_1_pending, sender=ou_a]: 话题1里后续不at的消息",
 		"content：总结一下",
 	} {
 		if !strings.Contains(topic1Prompt, want) {
@@ -1274,12 +1274,12 @@ func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *tes
 		t.Fatalf("promptCalls = %+v, want one prompt after consuming cache", rt.promptCalls)
 	}
 	prompt := rt.promptCalls[0].Text
-	if strings.Contains(prompt, "cached-000") || strings.Contains(prompt, "用户(ou_000)") {
+	if strings.Contains(prompt, "cached-000") || strings.Contains(prompt, "sender=ou_000") {
 		t.Fatalf("prompt = %q, should drop oldest cached message", prompt)
 	}
 	for _, want := range []string{
-		"- （om_group_cached_001）（ou_001）cached-001",
-		"- （om_group_cached_100）（ou_100）cached-100",
+		"- [msgid=om_group_cached_001, sender=ou_001]: cached-001",
+		"- [msgid=om_group_cached_100, sender=ou_100]: cached-100",
 		"content：汇总一下",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -1417,8 +1417,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	for _, want := range []string{
 		"# 群聊自动响应判断",
 		"## 以下是待判断是否需要响应的群消息",
-		"- （om_auto_pending_1）（ou_b）无 at 补充 1",
-		"- （om_auto_pending_2）（ou_c）无 at 补充 2",
+		"- [msgid=om_auto_pending_1, sender=ou_b]: 无 at 补充 1",
+		"- [msgid=om_auto_pending_2, sender=ou_c]: 无 at 补充 2",
 		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
 	} {
 		if !strings.Contains(autoDecisionPrompt, want) {
@@ -1429,8 +1429,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesWhileMentionPromptRuns(t *testing.T) {
 	for _, want := range []string{
 		"## User Message",
 		"下面是需要处理的群消息：",
-		"- （om_auto_pending_1）（ou_b）无 at 补充 1",
-		"- （om_auto_pending_2）（ou_c）无 at 补充 2",
+		"- [msgid=om_auto_pending_1, sender=ou_b]: 无 at 补充 1",
+		"- [msgid=om_auto_pending_2, sender=ou_c]: 无 at 补充 2",
 		"请结合上下文综合处理，并只回复一次。",
 	} {
 		if !strings.Contains(autoResponsePrompt, want) {
@@ -1542,8 +1542,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 	for _, want := range []string{
 		"# 群聊自动响应判断",
 		"## 以下是待判断是否需要响应的群消息",
-		"- （om_auto_2）（ou_b）无 at 第二条",
-		"- （om_auto_3）（ou_c）无 at 第三条",
+		"- [msgid=om_auto_2, sender=ou_b]: 无 at 第二条",
+		"- [msgid=om_auto_3, sender=ou_c]: 无 at 第三条",
 		"多条消息中只要任意一条需要主会话响应，就输出 RESPOND",
 	} {
 		if !strings.Contains(autoPrompt, want) {
@@ -1555,8 +1555,8 @@ func TestHandleFeishuGroupChatAtAutoQueuesBehindAutoPrompt(t *testing.T) {
 		t.Fatalf("main prompt = %q, should not contain auto decision rules", mainPrompt)
 	}
 	for _, want := range []string{
-		"- （om_auto_2）（ou_b）无 at 第二条",
-		"- （om_auto_3）（ou_c）无 at 第三条",
+		"- [msgid=om_auto_2, sender=ou_b]: 无 at 第二条",
+		"- [msgid=om_auto_3, sender=ou_c]: 无 at 第三条",
 		"请结合上下文综合处理，并只回复一次。",
 	} {
 		if !strings.Contains(mainPrompt, want) {
