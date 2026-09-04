@@ -43,13 +43,18 @@ func (s *Service) handleMeetingCommand(_ context.Context, text string, msg feish
 		}
 		switch strings.ToLower(strings.TrimSpace(fields[2])) {
 		case "on":
+			chatID := strings.TrimSpace(msg.ChatID)
+			if chatID == "" {
+				return "当前消息缺少 chat_id，不能设置为会议整理过程卡片目的地。"
+			}
 			return s.updateMeetingConfig(func(cfg *config.MeetingConfig) {
 				cfg.TraceEnabled = true
-			}, msg.BotID, "已开启会议整理 ACP trace。\n")
+				cfg.TraceChatID = chatID
+			}, msg.BotID, "已开启会议整理过程展示，并设置当前聊天为卡片目的地。\n")
 		case "off":
 			return s.updateMeetingConfig(func(cfg *config.MeetingConfig) {
 				cfg.TraceEnabled = false
-			}, msg.BotID, "已关闭会议整理 ACP trace。\n")
+			}, msg.BotID, "已关闭会议整理过程展示。\n")
 		default:
 			return "请使用 /meeting trace on 或 /meeting trace off。"
 		}
@@ -135,6 +140,13 @@ func formatMeetingConfigStatus(bot config.BotConfig) string {
 	return strings.Join([]string{
 		"静默会议助手：" + onOffStatus(bot.Meeting.Enabled),
 		"会议卡片接收人：" + recipient,
-		"会议整理 ACP trace：" + onOffStatus(bot.Meeting.TraceEnabled),
-	}, "\n")
+		"会议整理过程展示：" + onOffStatus(bot.Meeting.TraceEnabled),
+	}, "\n") + formatMeetingTraceChatStatus(bot.Meeting)
+}
+
+func formatMeetingTraceChatStatus(cfg config.MeetingConfig) string {
+	if strings.TrimSpace(cfg.TraceChatID) == "" {
+		return ""
+	}
+	return "\n过程卡片目的地：" + strings.TrimSpace(cfg.TraceChatID)
 }

@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -243,7 +244,7 @@ func TestMeetingCoordinatorFinalFlushCompletesAndPersistsMinutes(t *testing.T) {
 	state, err := store.Upsert(MeetingState{
 		BotID: "bot-a", MeetingID: "meeting-1", Topic: "发布会", RecipientOpenID: "ou_owner",
 		Status: meetingStatusEnding, PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "小王周五前准备发布"}},
-		SeenKeys: []string{"transcript:s1"}, Minutes: MeetingMinutes{},
+		SeenKeys: []string{"transcript:s1"}, Participants: map[string]string{"ou_owner": "负责人"}, Minutes: MeetingMinutes{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -260,11 +261,76 @@ func TestMeetingCoordinatorFinalFlushCompletesAndPersistsMinutes(t *testing.T) {
 		t.Fatalf("minutes = %+v, want explicit TODO", got.Minutes)
 	}
 	calls := runtime.promptCallsSnapshot()
-	if len(calls) != 1 || !strings.Contains(calls[0].Text, `"final": true`) {
+	if len(calls) != 1 || !strings.Contains(calls[0].Text, `"meeting_ended": true`) {
 		t.Fatalf("prompt calls = %+v, want one final meeting prompt", calls)
 	}
-	if !strings.Contains(calls[0].Text, `"recipient_open_id": "ou_owner"`) {
+	if !strings.Contains(calls[0].Text, `"recipient": "负责人"`) {
 		t.Fatalf("meeting prompt = %q, want recipient identity", calls[0].Text)
+	}
+}
+
+func TestMeetingPromptMergesSpeechAndHidesInternalEventFields(t *testing.T) {
+	prompt := meetingPrompt(MeetingState{
+		MeetingID:       "meeting-1",
+		MeetingNo:       "123456789",
+		Topic:           "发布会",
+		RecipientOpenID: "ou_owner",
+		Participants:    map[string]string{"ou_owner": "负责人", "ou_user": "小王"},
+		Minutes: MeetingMinutes{
+			Summary: []string{"上一版结论"},
+		},
+	}, []MeetingEvent{
+		{
+			Key:       "transcript:s1",
+			Type:      feishu.MeetingActivityTranscript,
+			Time:      time.Date(2026, 9, 4, 10, 0, 0, 0, time.Local),
+			ActorID:   "ou_user",
+			ActorName: "小王",
+			Text:      "没有收到卡片。",
+			Payload:   map[string]string{"language": "zh_cn", "end_time": "1788515217984"},
+		},
+		{
+			Key:       "transcript:s2",
+			Type:      feishu.MeetingActivityTranscript,
+			Time:      time.Date(2026, 9, 4, 10, 0, 3, 0, time.Local),
+			ActorID:   "ou_user",
+			ActorName: "小王",
+			Text:      "啊，应该是配置还没开。",
+			Payload:   map[string]string{"language": "zh_cn"},
+		},
+		{
+			Key:       "participant:joined",
+			Type:      feishu.MeetingActivityParticipantJoined,
+			Time:      time.Date(2026, 9, 4, 10, 0, 4, 0, time.Local),
+			ActorID:   "ou_bot",
+			ActorName: "助手",
+		},
+		{
+			Key:     "share:doc",
+			Type:    feishu.MeetingActivityDocumentChanged,
+			Payload: map[string]string{"share_id": "share-1", "document_title": "发布文档", "document_url": "https://example.com/release"},
+		},
+	}, false)
+	input := meetingPromptInputFromPrompt(t, prompt)
+	if input.Meeting.Topic != "发布会" || input.Meeting.MeetingNo != "123456789" || input.Meeting.Recipient != "负责人" {
+		t.Fatalf("meeting prompt input = %+v, want readable meeting metadata", input.Meeting)
+	}
+	if input.MeetingEnded {
+		t.Fatal("meeting prompt input meeting_ended = true, want false for live flush")
+	}
+	if len(input.NewTranscript) != 1 || input.NewTranscript[0].Speaker != "小王" || input.NewTranscript[0].Text != "没有收到卡片。啊，应该是配置还没开。" {
+		t.Fatalf("new transcript = %+v, want consecutive speech merged", input.NewTranscript)
+	}
+	if len(input.NewDocuments) != 1 || input.NewDocuments[0].Title != "发布文档" {
+		t.Fatalf("new documents = %+v, want shared document retained", input.NewDocuments)
+	}
+	for _, forbidden := range []string{`"key"`, `"type"`, `"actor_id"`, `"payload"`, `"language"`, `"end_time"`, `"share_id"`} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("meeting prompt contains internal field %s: %s", forbidden, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "会议操作或系统噪声") || !strings.Contains(prompt, "meeting_ended=false") {
+		t.Fatalf("meeting prompt = %q, want operation-noise and incremental guidance", prompt)
 	}
 }
 
@@ -294,6 +360,119 @@ func TestMeetingTriggerDisablesTraceAndRejectsToolPermission(t *testing.T) {
 	if runtime.permissionOutcome.Outcome != "selected" || runtime.permissionOutcome.OptionID != "reject" {
 		t.Fatalf("permission outcome = %+v, want reject option", runtime.permissionOutcome)
 	}
+}
+
+func TestMeetingTraceShowsFullProcess(t *testing.T) {
+	workspace := t.TempDir()
+	svc := newMeetingTestService(t, workspace)
+	svc.cfg.Bots[0].Meeting.TraceEnabled = true
+	svc.cfg.Bots[0].Meeting.TraceChatID = "oc_trace"
+	store := svc.storeForBotID("bot-a")
+	if err := store.UpsertChat(ChatConfig{
+		Key:          ChatKey{BotID: "bot-a", ChatID: "oc_trace"},
+		ShowThoughts: true,
+	}); err != nil {
+		t.Fatalf("UpsertChat(trace show config) error = %v", err)
+	}
+	runtime := &fakeRuntime{
+		newSessionID: "acp-meeting",
+		promptReply:  `{"summary":["确认上线"],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[]}`,
+		promptUpdates: []acp.PromptUpdate{
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: "正在整理。"},
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "tool_call",
+				ToolCallID:    "tool-1",
+				Title:         "读取会议事件",
+				Status:        "in_progress",
+			}},
+			{Update: acp.SessionUpdate{
+				SessionUpdate: "agent_message_chunk",
+				Content:       &acp.ContentBlock{Type: "text", Text: `{"summary":["确认上线"],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[]}`},
+			}},
+		},
+	}
+	svc.setRuntime(runtime)
+	var targets []feishu.Message
+	var initialMetas []feishu.StreamCardMeta
+	var cards []*fakeStreamCard
+	cardIDs := []string{"om_meeting_trace", "om_meeting_trace_2"}
+	svc.setScheduledTaskStreamStarter("bot-a", func(_ context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		targets = append(targets, msg)
+		initialMetas = append(initialMetas, options.Meta)
+		card := &fakeStreamCard{}
+		if len(cards) < len(cardIDs) {
+			card.message = feishu.SentMessage{MessageID: cardIDs[len(cards)], ChatID: "oc_trace"}
+		} else {
+			card.message = feishu.SentMessage{MessageID: "om_meeting_trace_extra", ChatID: "oc_trace"}
+		}
+		cards = append(cards, card)
+		return card, nil
+	})
+	meetingState, err := svc.meetingStore("bot-a").Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", MeetingNo: "123456789", Topic: "发布会",
+		RecipientOpenID: "ou_owner", Status: meetingStatusActive,
+		PendingEvents: []MeetingEvent{{Key: "transcript:s1", Text: "确认上线"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator := &meetingCoordinator{service: svc, store: svc.meetingStore("bot-a"), key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
+	coordinator.flush(context.Background(), meetingState)
+
+	if len(targets) != 1 || targets[0].ChatID != "oc_trace" || targets[0].MessageID != "" || targets[0].ThreadID != "" || targets[0].ForceReplyInThread {
+		t.Fatalf("stream targets = %+v, want first card as new root in trace chat", targets)
+	}
+	initialMeta := initialMetas[0]
+	if initialMeta.Title != meetingTraceCardRunning || !initialMeta.HideHeaderIcon || !strings.Contains(initialMeta.Metadata, "**会议主题：** 发布会") || !strings.Contains(initialMeta.Metadata, "**会议号：** 123456789") || !strings.Contains(initialMeta.Metadata, "**会议 ID：** meeting-1") {
+		t.Fatalf("initial meta = %+v, want meeting metadata", initialMeta)
+	}
+	card := cards[0]
+	process := strings.Join(card.processUpdatesSnapshot(), "\n")
+	if !strings.Contains(process, "msg: meeting\\_meeting\\_meeting-1\\_live") || !strings.Contains(process, "读取会议事件") {
+		t.Fatalf("process updates = %q, want meeting trace message id and tool progress", process)
+	}
+	if got := strings.Join(card.textUpdatesSnapshot(), "\n"); !strings.Contains(got, "正在整理") {
+		t.Fatalf("text updates = %q, want agent text", got)
+	}
+	final := card.finalTextUpdatesSnapshot()
+	if len(final) != 1 || !strings.Contains(final[0], "确认上线") {
+		t.Fatalf("final text updates = %+v, want meeting JSON result", final)
+	}
+	if !card.isClosed() {
+		t.Fatal("meeting trace card was not closed")
+	}
+	got, binding, ok := store.SessionForMessage("bot-a", "oc_trace", "om_meeting_trace")
+	if !ok {
+		t.Fatalf("SessionForMessage(meeting trace card) ok=false binding=%+v", binding)
+	}
+	wantKey := meetingSessionKey("bot-a", "meeting-1")
+	if got.Key != wantKey || got.ACPSessionID != "acp-meeting" {
+		t.Fatalf("bound session = %+v, want meeting session key %+v", got, wantKey)
+	}
+
+	secondState, _, err := svc.meetingStore("bot-a").Update("meeting-1", func(state *MeetingState) error {
+		state.PendingEvents = append(state.PendingEvents, MeetingEvent{Key: "transcript:s2", Text: "继续确认验收"})
+		state.SeenKeys = append(state.SeenKeys, "transcript:s2")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.flush(context.Background(), secondState)
+	if len(targets) != 2 {
+		t.Fatalf("stream targets = %+v, want second meeting trace card", targets)
+	}
+	secondTarget := targets[1]
+	if secondTarget.ChatID != "oc_trace" || secondTarget.MessageID != "om_meeting_trace" || !secondTarget.ForceReplyInThread || secondTarget.ThreadID != "" {
+		t.Fatalf("second stream target = %+v, want topic reply to first meeting trace card", secondTarget)
+	}
+	if _, _, ok := store.SessionForMessage("bot-a", "oc_trace", "om_meeting_trace_2"); !ok {
+		t.Fatal("second meeting trace card was not bound to meeting session")
+	}
+	stopMeetingTestService(svc)
 }
 
 func TestValidateMeetingMinutesRequiresTraceableEvidenceAndDocuments(t *testing.T) {
@@ -335,7 +514,7 @@ func TestParseMeetingMinutesRejectsUnsupportedOutput(t *testing.T) {
 	}
 }
 
-func TestMeetingActivitiesWithEndTimeStartFinalFlush(t *testing.T) {
+func TestMeetingActivitiesWithEndTimeDoNotStartFinalFlush(t *testing.T) {
 	svc := newMeetingTestService(t, t.TempDir())
 	store := svc.meetingStore("bot-a")
 	_, err := store.Upsert(MeetingState{
@@ -353,10 +532,23 @@ func TestMeetingActivitiesWithEndTimeStartFinalFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, _ := store.Get("meeting-1")
-	if state.Status != meetingStatusEnding || state.EndedAt.IsZero() {
-		t.Fatalf("meeting state = %+v, want ending from backfilled end_time", state)
+	if state.Status != meetingStatusActive || !state.EndedAt.IsZero() {
+		t.Fatalf("meeting state = %+v, want live activity end_time to be ignored for meeting finalization", state)
 	}
 	stopMeetingTestService(svc)
+}
+
+func meetingPromptInputFromPrompt(t *testing.T, prompt string) meetingPromptInput {
+	t.Helper()
+	parts := strings.Split(prompt, "输入 JSON：")
+	if len(parts) != 2 {
+		t.Fatalf("prompt = %q, want one input marker", prompt)
+	}
+	var input meetingPromptInput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(parts[1])), &input); err != nil {
+		t.Fatalf("parse meeting prompt input: %v\n%s", err, parts[1])
+	}
+	return input
 }
 
 func TestMeetingRetryAndCardRetryAreIndependent(t *testing.T) {

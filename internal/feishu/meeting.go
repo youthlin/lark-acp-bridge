@@ -1,16 +1,21 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	larkvc "github.com/larksuite/oapi-sdk-go/v3/service/vc/v1"
+	"github.com/youthlin/lark-acp-bridge/internal/arg"
 	"github.com/youthlin/lark-acp-bridge/internal/logging"
 )
 
@@ -94,6 +99,9 @@ type larkMeetingClient struct {
 	client *lark.Client
 }
 
+const larkJoinBotPath = "/open-apis/vc/v1/bots/join"
+const larkBotEventsPath = "/open-apis/vc/v1/bots/events"
+
 func (c larkMeetingClient) Join(ctx context.Context, request MeetingJoinRequest) (MeetingJoinResult, error) {
 	if c.client == nil {
 		return MeetingJoinResult{}, fmt.Errorf("飞书客户端未初始化")
@@ -108,28 +116,555 @@ func (c larkMeetingClient) Join(ctx context.Context, request MeetingJoinRequest)
 		JoinIdentify(larkvc.NewJoinIdentifyBuilder().MeetingNo(request.MeetingNo).Build()).
 		CallId(request.CallID).
 		Build()
-	resp, err := c.client.Vc.V1.Bot.Join(ctx, larkvc.NewJoinBotReqBuilder().Body(body).Build())
+	resp, err := c.client.Post(ctx, larkJoinBotPath, body, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		return MeetingJoinResult{}, fmt.Errorf("调用飞书机器人入会接口: %w", err)
 	}
-	if resp == nil || !resp.Success() {
-		code, msg := 0, ""
-		if resp != nil {
-			code, msg = resp.Code, resp.Msg
-		}
+	if resp == nil {
+		return MeetingJoinResult{}, fmt.Errorf("飞书机器人入会接口返回为空")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return MeetingJoinResult{}, fmt.Errorf("飞书机器人入会接口 HTTP 状态异常: %d", resp.StatusCode)
+	}
+	result, code, msg, err := parseMeetingJoinResponse(resp.RawBody)
+	if err != nil {
+		return MeetingJoinResult{}, fmt.Errorf("解析飞书机器人入会接口响应: %w", err)
+	}
+	if code != 0 {
 		return MeetingJoinResult{}, fmt.Errorf("飞书机器人入会接口返回错误: code=%d msg=%s", code, msg)
 	}
+	return result, nil
+}
+
+func parseMeetingJoinResponse(raw []byte) (MeetingJoinResult, int, string, error) {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Meeting  *rawMeetingAgentEventMeeting `json:"meeting"`
+			JoinUser *rawMeetingAgentEventUser    `json:"join_user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return MeetingJoinResult{}, 0, "", err
+	}
 	var result MeetingJoinResult
-	if resp.Data != nil {
-		if raw := resp.Data.Meeting; raw != nil {
-			result.Meeting = MeetingInfo{ID: value(raw.Id), MeetingNo: value(raw.MeetingNo), Topic: value(raw.Topic), StartTime: value(raw.StartTime)}
+	if resp.Data.Meeting != nil {
+		result.Meeting = meetingInfo(resp.Data.Meeting.toSDK())
+	}
+	if resp.Data.JoinUser != nil {
+		result.BotUser = meetingUser(resp.Data.JoinUser.toSDK())
+	}
+	return result, resp.Code, resp.Msg, nil
+}
+
+type meetingFlexibleID struct {
+	value string
+}
+
+func (id *meetingFlexibleID) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	if raw[0] == '"' {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
 		}
-		if raw := resp.Data.JoinUser; raw != nil {
-			result.BotUser.ID = value(raw.Id)
-			result.BotUser.UserType = valueInt(raw.UserType)
+		id.value = strings.TrimSpace(value)
+		return nil
+	}
+	if raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9') {
+		var value json.Number
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		id.value = strings.TrimSpace(value.String())
+		return nil
+	}
+	var value struct {
+		ID           meetingFlexibleID `json:"id,omitempty"`
+		OpenID       meetingFlexibleID `json:"open_id,omitempty"`
+		OpenIDCamel  meetingFlexibleID `json:"openId,omitempty"`
+		UserID       meetingFlexibleID `json:"user_id,omitempty"`
+		UserIDCamel  meetingFlexibleID `json:"userId,omitempty"`
+		UnionID      meetingFlexibleID `json:"union_id,omitempty"`
+		UnionIDCamel meetingFlexibleID `json:"unionId,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	id.value = strings.TrimSpace(firstNonEmpty(
+		value.OpenID.String(),
+		value.OpenIDCamel.String(),
+		value.UserID.String(),
+		value.UserIDCamel.String(),
+		value.UnionID.String(),
+		value.UnionIDCamel.String(),
+		value.ID.String(),
+	))
+	return nil
+}
+
+func (id meetingFlexibleID) String() string {
+	return strings.TrimSpace(id.value)
+}
+
+type rawMeetingAgentEventMeeting struct {
+	ID        meetingFlexibleID         `json:"id,omitempty"`
+	Topic     *string                   `json:"topic,omitempty"`
+	MeetingNo *string                   `json:"meeting_no,omitempty"`
+	StartTime *string                   `json:"start_time,omitempty"`
+	EndTime   *string                   `json:"end_time,omitempty"`
+	HostUser  *rawMeetingAgentEventUser `json:"host_user,omitempty"`
+}
+
+func (m *rawMeetingAgentEventMeeting) toSDK() *larkvc.MeetingAgentEventMeeting {
+	if m == nil {
+		return nil
+	}
+	out := &larkvc.MeetingAgentEventMeeting{
+		Topic:     m.Topic,
+		MeetingNo: m.MeetingNo,
+		StartTime: m.StartTime,
+		EndTime:   m.EndTime,
+		HostUser:  m.HostUser.toSDK(),
+	}
+	if id := m.ID.String(); id != "" {
+		out.Id = &id
+	}
+	return out
+}
+
+type rawMeetingAgentEventUser struct {
+	ID       meetingFlexibleID `json:"id,omitempty"`
+	UserType *int              `json:"user_type,omitempty"`
+	UserRole *int              `json:"user_role,omitempty"`
+	UserName *string           `json:"user_name,omitempty"`
+}
+
+func (u *rawMeetingAgentEventUser) toSDK() *larkvc.MeetingAgentEventUser {
+	if u == nil {
+		return nil
+	}
+	out := &larkvc.MeetingAgentEventUser{
+		UserType: u.UserType,
+		UserRole: u.UserRole,
+		UserName: u.UserName,
+	}
+	if id := u.ID.String(); id != "" {
+		out.Id = &id
+	}
+	return out
+}
+
+type rawMeetingInvitedEventData struct {
+	Meeting    *rawMeetingAgentEventMeeting `json:"meeting,omitempty"`
+	Bot        *rawMeetingAgentEventUser    `json:"bot,omitempty"`
+	Inviter    *rawMeetingAgentEventUser    `json:"inviter,omitempty"`
+	InviteTime *string                      `json:"invite_time,omitempty"`
+	CallId     *string                      `json:"call_id,omitempty"`
+}
+
+func (data *rawMeetingInvitedEventData) toSDK() *larkvc.P2BotMeetingInvitedV1Data {
+	if data == nil {
+		return nil
+	}
+	return &larkvc.P2BotMeetingInvitedV1Data{
+		Meeting:    data.Meeting.toSDK(),
+		Bot:        data.Bot.toSDK(),
+		Inviter:    data.Inviter.toSDK(),
+		InviteTime: data.InviteTime,
+		CallId:     data.CallId,
+	}
+}
+
+type rawMeetingActivityEventData struct {
+	MeetingActivityItems []*rawMeetingActivityItem `json:"meeting_activity_items,omitempty"`
+}
+
+func (data *rawMeetingActivityEventData) toSDK() *larkvc.P2BotMeetingActivityV1Data {
+	if data == nil {
+		return nil
+	}
+	items := make([]*larkvc.MeetingActivityItem, 0, len(data.MeetingActivityItems))
+	for _, item := range data.MeetingActivityItems {
+		if converted := item.toSDK(); converted != nil {
+			items = append(items, converted)
 		}
 	}
-	return result, nil
+	return &larkvc.P2BotMeetingActivityV1Data{MeetingActivityItems: items}
+}
+
+type rawMeetingEndedEventData struct {
+	Meeting *rawMeetingAgentEventMeeting `json:"meeting,omitempty"`
+}
+
+func (data *rawMeetingEndedEventData) toSDK() *larkvc.P2BotMeetingEndedV1Data {
+	if data == nil {
+		return nil
+	}
+	return &larkvc.P2BotMeetingEndedV1Data{Meeting: data.Meeting.toSDK()}
+}
+
+type rawMeetingActivityItem struct {
+	Meeting                     *rawMeetingAgentEventMeeting     `json:"meeting,omitempty"`
+	ActivityEventType           *string                          `json:"activity_event_type,omitempty"`
+	ParticipantJoinedItems      []*rawParticipantJoinedItem      `json:"participant_joined_items,omitempty"`
+	ParticipantLeftItems        []*rawParticipantLeftItem        `json:"participant_left_items,omitempty"`
+	TranscriptReceivedItems     []*rawTranscriptItem             `json:"transcript_received_items,omitempty"`
+	ChatReceivedItems           []*rawChatMessageItem            `json:"chat_received_items,omitempty"`
+	MagicShareStartedItems      []*rawMagicShareStartedItem      `json:"magic_share_started_items,omitempty"`
+	MagicShareEndedItems        []*rawMagicShareEndedItem        `json:"magic_share_ended_items,omitempty"`
+	DocumentContextChangedItems []*rawDocumentContextChangedItem `json:"document_context_changed_items,omitempty"`
+}
+
+func (item *rawMeetingActivityItem) toSDK() *larkvc.MeetingActivityItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.MeetingActivityItem{
+		Meeting:                     item.Meeting.toSDK(),
+		ActivityEventType:           item.ActivityEventType,
+		ParticipantJoinedItems:      rawParticipantJoinedItemsToSDK(item.ParticipantJoinedItems),
+		ParticipantLeftItems:        rawParticipantLeftItemsToSDK(item.ParticipantLeftItems),
+		TranscriptReceivedItems:     rawTranscriptItemsToSDK(item.TranscriptReceivedItems),
+		ChatReceivedItems:           rawChatMessageItemsToSDK(item.ChatReceivedItems),
+		MagicShareStartedItems:      rawMagicShareStartedItemsToSDK(item.MagicShareStartedItems),
+		MagicShareEndedItems:        rawMagicShareEndedItemsToSDK(item.MagicShareEndedItems),
+		DocumentContextChangedItems: rawDocumentContextChangedItemsToSDK(item.DocumentContextChangedItems),
+	}
+}
+
+type rawParticipantJoinedItem struct {
+	Participant *rawMeetingAgentEventUser `json:"participant,omitempty"`
+	JoinTime    *string                   `json:"join_time,omitempty"`
+}
+
+func (item *rawParticipantJoinedItem) toSDK() *larkvc.ParticipantJoinedItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.ParticipantJoinedItem{
+		Participant: item.Participant.toSDK(),
+		JoinTime:    item.JoinTime,
+	}
+}
+
+func rawParticipantJoinedItemsToSDK(items []*rawParticipantJoinedItem) []*larkvc.ParticipantJoinedItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.ParticipantJoinedItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawParticipantLeftItem struct {
+	Participant *rawMeetingAgentEventUser `json:"participant,omitempty"`
+	LeaveReason *int                      `json:"leave_reason,omitempty"`
+	LeaveTime   *string                   `json:"leave_time,omitempty"`
+}
+
+func (item *rawParticipantLeftItem) toSDK() *larkvc.ParticipantLeftItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.ParticipantLeftItem{
+		Participant: item.Participant.toSDK(),
+		LeaveReason: item.LeaveReason,
+		LeaveTime:   item.LeaveTime,
+	}
+}
+
+func rawParticipantLeftItemsToSDK(items []*rawParticipantLeftItem) []*larkvc.ParticipantLeftItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.ParticipantLeftItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawTranscriptItem struct {
+	Speaker     *rawMeetingAgentEventUser `json:"speaker,omitempty"`
+	Text        *string                   `json:"text,omitempty"`
+	Language    *string                   `json:"language,omitempty"`
+	StartTimeMs *string                   `json:"start_time_ms,omitempty"`
+	EndTimeMs   *string                   `json:"end_time_ms,omitempty"`
+	SentenceID  *string                   `json:"sentence_id,omitempty"`
+}
+
+func (item *rawTranscriptItem) toSDK() *larkvc.TranscriptItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.TranscriptItem{
+		Speaker:     item.Speaker.toSDK(),
+		Text:        item.Text,
+		Language:    item.Language,
+		StartTimeMs: item.StartTimeMs,
+		EndTimeMs:   item.EndTimeMs,
+		SentenceId:  item.SentenceID,
+	}
+}
+
+func rawTranscriptItemsToSDK(items []*rawTranscriptItem) []*larkvc.TranscriptItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.TranscriptItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawChatMessageItem struct {
+	Operator    *rawMeetingAgentEventUser `json:"operator,omitempty"`
+	MessageID   *string                   `json:"message_id,omitempty"`
+	MessageType *int                      `json:"message_type,omitempty"`
+	Content     *string                   `json:"content,omitempty"`
+	SendTime    *string                   `json:"send_time,omitempty"`
+}
+
+func (item *rawChatMessageItem) toSDK() *larkvc.ChatMessageItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.ChatMessageItem{
+		Operator:    item.Operator.toSDK(),
+		MessageId:   item.MessageID,
+		MessageType: item.MessageType,
+		Content:     item.Content,
+		SendTime:    item.SendTime,
+	}
+}
+
+func rawChatMessageItemsToSDK(items []*rawChatMessageItem) []*larkvc.ChatMessageItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.ChatMessageItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawMagicShareStartedItem struct {
+	Operator *rawMeetingAgentEventUser `json:"operator,omitempty"`
+	ShareID  *string                   `json:"share_id,omitempty"`
+	ShareDoc *rawShareDoc              `json:"share_doc,omitempty"`
+	Time     *string                   `json:"time,omitempty"`
+}
+
+func (item *rawMagicShareStartedItem) toSDK() *larkvc.MagicShareStartedItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.MagicShareStartedItem{
+		Operator: item.Operator.toSDK(),
+		ShareId:  item.ShareID,
+		ShareDoc: item.ShareDoc.toSDK(),
+		Time:     item.Time,
+	}
+}
+
+func rawMagicShareStartedItemsToSDK(items []*rawMagicShareStartedItem) []*larkvc.MagicShareStartedItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.MagicShareStartedItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawMagicShareEndedItem struct {
+	Operator *rawMeetingAgentEventUser `json:"operator,omitempty"`
+	ShareID  *string                   `json:"share_id,omitempty"`
+	Time     *string                   `json:"time,omitempty"`
+}
+
+func (item *rawMagicShareEndedItem) toSDK() *larkvc.MagicShareEndedItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.MagicShareEndedItem{
+		Operator: item.Operator.toSDK(),
+		ShareId:  item.ShareID,
+		Time:     item.Time,
+	}
+}
+
+func rawMagicShareEndedItemsToSDK(items []*rawMagicShareEndedItem) []*larkvc.MagicShareEndedItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.MagicShareEndedItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawDocumentContextChangedItem struct {
+	Operator *rawMeetingAgentEventUser `json:"operator,omitempty"`
+	ShareID  *string                   `json:"share_id,omitempty"`
+	ShareDoc *rawShareDoc              `json:"share_doc,omitempty"`
+	Time     *string                   `json:"time,omitempty"`
+}
+
+func (item *rawDocumentContextChangedItem) toSDK() *larkvc.DocumentContextChangedItem {
+	if item == nil {
+		return nil
+	}
+	return &larkvc.DocumentContextChangedItem{
+		Operator: item.Operator.toSDK(),
+		ShareId:  item.ShareID,
+		ShareDoc: item.ShareDoc.toSDK(),
+		Time:     item.Time,
+	}
+}
+
+func rawDocumentContextChangedItemsToSDK(items []*rawDocumentContextChangedItem) []*larkvc.DocumentContextChangedItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*larkvc.DocumentContextChangedItem, 0, len(items))
+	for _, item := range items {
+		if converted := item.toSDK(); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+type rawShareDoc struct {
+	URL   *string `json:"url,omitempty"`
+	Title *string `json:"title,omitempty"`
+}
+
+func (doc *rawShareDoc) toSDK() *larkvc.ShareDoc {
+	if doc == nil {
+		return nil
+	}
+	return &larkvc.ShareDoc{
+		Url:   doc.URL,
+		Title: doc.Title,
+	}
+}
+
+type rawMeetingEventRecord struct {
+	EventID   *string                   `json:"event_id,omitempty"`
+	EventType *string                   `json:"event_type,omitempty"`
+	EventTime *string                   `json:"event_time,omitempty"`
+	Payload   rawMeetingActivityPayload `json:"payload,omitempty"`
+}
+
+type rawMeetingActivityPayload struct {
+	item *rawMeetingActivityItem
+}
+
+func (p *rawMeetingActivityPayload) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	if raw[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return err
+		}
+		encoded = strings.TrimSpace(encoded)
+		if encoded == "" {
+			return nil
+		}
+		raw = []byte(encoded)
+	}
+	var item rawMeetingActivityItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return err
+	}
+	p.item = &item
+	return nil
+}
+
+func parseMeetingRawEventData[T any](event *larkevent.EventReq) (*T, error) {
+	var body []byte
+	if event != nil {
+		body = event.Body
+	}
+	var payload struct {
+		Event json.RawMessage `json:"event"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Event) == 0 {
+		return nil, fmt.Errorf("缺少 event")
+	}
+	var data T
+	if err := json.Unmarshal(payload.Event, &data); err != nil {
+		return nil, err
+	}
+	return &data, nil
+}
+
+func parseMeetingEventsResponse(raw []byte, fallbackMeetingID string) ([]MeetingActivity, bool, string, int, string, error) {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data *struct {
+			HasMore   bool                     `json:"has_more"`
+			PageToken string                   `json:"page_token"`
+			Events    []*rawMeetingEventRecord `json:"events"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, false, "", 0, "", err
+	}
+	if resp.Data == nil {
+		return nil, false, "", resp.Code, resp.Msg, nil
+	}
+	var out []MeetingActivity
+	for _, event := range resp.Data.Events {
+		if event == nil || event.Payload.item == nil {
+			continue
+		}
+		items := parseMeetingActivityItem(event.Payload.item.toSDK())
+		for i := range items {
+			if items[i].Meeting.ID == "" {
+				items[i].Meeting.ID = fallbackMeetingID
+			}
+			if items[i].Time == "" {
+				items[i].Time = value(event.EventTime)
+			}
+		}
+		out = append(out, items...)
+	}
+	return out, resp.Data.HasMore, strings.TrimSpace(resp.Data.PageToken), resp.Code, resp.Msg, nil
 }
 
 func (c larkMeetingClient) ListActivities(ctx context.Context, meetingID string, since time.Time) ([]MeetingActivity, error) {
@@ -143,46 +678,43 @@ func (c larkMeetingClient) ListActivities(ctx context.Context, meetingID string,
 	pageToken := ""
 	var out []MeetingActivity
 	for {
-		builder := larkvc.NewEventsBotReqBuilder().MeetingId(meetingID).PageSize(100).UserIdType("open_id")
+		query := larkcore.QueryParams{}
+		query.Set("meeting_id", meetingID)
+		query.Set("page_size", "100")
+		query.Set("user_id_type", "open_id")
 		if !since.IsZero() {
-			builder.StartTime(strconv.FormatInt(since.Unix(), 10))
+			query.Set("start_time", strconv.FormatInt(since.Unix(), 10))
 		}
 		if pageToken != "" {
-			builder.PageToken(pageToken)
+			query.Set("page_token", pageToken)
 		}
-		resp, err := c.client.Vc.V1.Bot.Events(ctx, builder.Build())
+		resp, err := c.client.Do(ctx, &larkcore.ApiReq{
+			HttpMethod:                http.MethodGet,
+			ApiPath:                   larkBotEventsPath,
+			QueryParams:               query,
+			SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("调用飞书获取会议事件接口: %w", err)
 		}
-		if resp == nil || !resp.Success() {
-			code, msg := 0, ""
-			if resp != nil {
-				code, msg = resp.Code, resp.Msg
-			}
+		if resp == nil {
+			return nil, fmt.Errorf("飞书获取会议事件接口返回为空")
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("飞书获取会议事件接口 HTTP 状态异常: %d", resp.StatusCode)
+		}
+		items, hasMore, nextPageToken, code, msg, err := parseMeetingEventsResponse(resp.RawBody, meetingID)
+		if err != nil {
+			return nil, fmt.Errorf("解析飞书获取会议事件接口响应: %w", err)
+		}
+		if code != 0 {
 			return nil, fmt.Errorf("飞书获取会议事件接口返回错误: code=%d msg=%s", code, msg)
 		}
-		if resp.Data == nil {
+		out = append(out, items...)
+		if !hasMore {
 			return out, nil
 		}
-		for _, event := range resp.Data.Events {
-			if event == nil || event.Payload == nil {
-				continue
-			}
-			items := parseMeetingActivityItem(event.Payload)
-			for i := range items {
-				if items[i].Meeting.ID == "" {
-					items[i].Meeting.ID = meetingID
-				}
-				if items[i].Time == "" {
-					items[i].Time = value(event.EventTime)
-				}
-			}
-			out = append(out, items...)
-		}
-		if !valueBool(resp.Data.HasMore) {
-			return out, nil
-		}
-		pageToken = value(resp.Data.PageToken)
+		pageToken = nextPageToken
 		if pageToken == "" {
 			return out, nil
 		}
@@ -286,7 +818,29 @@ func ParseMeetingEnded(event *larkvc.P2BotMeetingEndedV1) (MeetingEnded, error) 
 	return MeetingEnded{Meeting: meeting}, nil
 }
 
+func (a *Adapter) handleMeetingInvitedRaw(ctx context.Context, event *larkevent.EventReq) error {
+	var body []byte
+	if event != nil {
+		body = event.Body
+	}
+	slog.InfoContext(ctx, "收到飞书会议邀请原始事件",
+		"bot", a.cfg.ID,
+		"event_type", "vc.bot.meeting_invited_v1",
+		"body", eventLogBody(body, event),
+	)
+	data, err := parseMeetingRawEventData[rawMeetingInvitedEventData](event)
+	if err != nil {
+		return logMeetingParseError(ctx, "会议邀请", event, err)
+	}
+	event2 := &larkvc.P2BotMeetingInvitedV1{
+		EventReq: event,
+		Event:    data.toSDK(),
+	}
+	return a.handleMeetingInvited(ctx, event2)
+}
+
 func (a *Adapter) handleMeetingInvited(ctx context.Context, event *larkvc.P2BotMeetingInvitedV1) (err error) {
+	slog.InfoContext(ctx, "收到入会邀请", "事件", arg.JSON(event.Event))
 	defer recoverEventHandler(ctx, "meeting_invited", &err)
 	invitation, err := ParseMeetingInvitation(event)
 	if err != nil {
@@ -302,7 +856,29 @@ func (a *Adapter) handleMeetingInvited(ctx context.Context, event *larkvc.P2BotM
 	return nil
 }
 
+func (a *Adapter) handleMeetingActivityRaw(ctx context.Context, event *larkevent.EventReq) error {
+	var body []byte
+	if event != nil {
+		body = event.Body
+	}
+	slog.DebugContext(ctx, "收到飞书会议活动原始事件",
+		"bot", a.cfg.ID,
+		"event_type", "vc.bot.meeting_activity_v1",
+		"body", eventLogBody(body, event),
+	)
+	data, err := parseMeetingRawEventData[rawMeetingActivityEventData](event)
+	if err != nil {
+		return logMeetingParseError(ctx, "会议活动", event, err)
+	}
+	event2 := &larkvc.P2BotMeetingActivityV1{
+		EventReq: event,
+		Event:    data.toSDK(),
+	}
+	return a.handleMeetingActivity(ctx, event2)
+}
+
 func (a *Adapter) handleMeetingActivity(ctx context.Context, event *larkvc.P2BotMeetingActivityV1) (err error) {
+	slog.InfoContext(ctx, "收到飞书会议Activity")
 	defer recoverEventHandler(ctx, "meeting_activity", &err)
 	activities, err := ParseMeetingActivities(event)
 	if err != nil {
@@ -319,6 +895,27 @@ func (a *Adapter) handleMeetingActivity(ctx context.Context, event *larkvc.P2Bot
 		}
 	}
 	return nil
+}
+
+func (a *Adapter) handleMeetingEndedRaw(ctx context.Context, event *larkevent.EventReq) error {
+	var body []byte
+	if event != nil {
+		body = event.Body
+	}
+	slog.InfoContext(ctx, "收到飞书会议结束原始事件",
+		"bot", a.cfg.ID,
+		"event_type", "vc.bot.meeting_ended_v1",
+		"body", eventLogBody(body, event),
+	)
+	data, err := parseMeetingRawEventData[rawMeetingEndedEventData](event)
+	if err != nil {
+		return logMeetingParseError(ctx, "会议结束", event, err)
+	}
+	event2 := &larkvc.P2BotMeetingEndedV1{
+		EventReq: event,
+		Event:    data.toSDK(),
+	}
+	return a.handleMeetingEnded(ctx, event2)
 }
 
 func (a *Adapter) handleMeetingEnded(ctx context.Context, event *larkvc.P2BotMeetingEndedV1) (err error) {

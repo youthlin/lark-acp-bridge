@@ -117,7 +117,7 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		name: "/meeting",
 		helpLines: []string{
 			"/meeting on|off|status - 管理当前 bot 的静默会议助手（owner only）",
-			"/meeting trace on|off - 设置会议整理 ACP trace",
+			"/meeting trace on|off - 设置会议整理过程卡片展示",
 		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleMeetingCommand(ctx, text, msg)

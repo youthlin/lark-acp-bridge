@@ -105,6 +105,7 @@ type MeetingConfig struct {
 	Enabled         bool   `json:"enabled,omitempty"`
 	RecipientOpenID string `json:"recipient_open_id,omitempty"`
 	TraceEnabled    bool   `json:"trace_enabled,omitempty"`
+	TraceChatID     string `json:"trace_chat_id,omitempty"`
 }
 
 type WikiTraceConfig struct {
@@ -620,7 +621,8 @@ func UpdateBotMeeting(path, botID string, update func(*MeetingConfig)) (MeetingC
 			update(&updated)
 		}
 		updated.RecipientOpenID = strings.TrimSpace(updated.RecipientOpenID)
-		return updated.Enabled || updated.TraceEnabled || updated.RecipientOpenID != ""
+		updated.TraceChatID = strings.TrimSpace(updated.TraceChatID)
+		return updated.Enabled || updated.TraceEnabled || updated.RecipientOpenID != "" || updated.TraceChatID != ""
 	})
 	return updated, err
 }
@@ -1098,6 +1100,7 @@ func normalize(cfg *Config) error {
 		bot.Trace = normalizeTraceConfig(bot.Trace)
 		bot.DriveComment.TraceChatID = strings.TrimSpace(bot.DriveComment.TraceChatID)
 		bot.Meeting.RecipientOpenID = strings.TrimSpace(bot.Meeting.RecipientOpenID)
+		bot.Meeting.TraceChatID = strings.TrimSpace(bot.Meeting.TraceChatID)
 		bot.WikiTrace.ChatID = strings.TrimSpace(bot.WikiTrace.ChatID)
 		bot.AppSecret.normalize()
 		cfg.Bots[i] = bot

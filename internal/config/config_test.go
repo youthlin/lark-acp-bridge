@@ -435,11 +435,12 @@ func TestUpdateBotMeetingUpdatesOnlyMeetingField(t *testing.T) {
 		cfg.Enabled = true
 		cfg.TraceEnabled = true
 		cfg.RecipientOpenID = " ou_recipient "
+		cfg.TraceChatID = " oc_trace "
 	})
 	if err != nil {
 		t.Fatalf("UpdateBotMeeting() error = %v", err)
 	}
-	want := MeetingConfig{Enabled: true, TraceEnabled: true, RecipientOpenID: "ou_recipient"}
+	want := MeetingConfig{Enabled: true, TraceEnabled: true, RecipientOpenID: "ou_recipient", TraceChatID: "oc_trace"}
 	if updated != want {
 		t.Fatalf("updated meeting = %+v, want %+v", updated, want)
 	}

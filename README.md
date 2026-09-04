@@ -100,7 +100,7 @@ lark-acp-bridge bots remove default
 
 自动读取 owner 需要飞书应用具备查询本应用信息和协作者的权限，例如 `application:application:self_manage` 或等价的应用管理只读权限。也可以直接在 `owner_open_ids` 中手动配置允许审批人的 open_id，配置后启动时不会再查询飞书应用协作者。
 
-`meeting` 配置静默会议助手。`enabled` 是处理新会议邀请的大开关，关闭后不会接受新邀请，但已经加入的会议仍会整理到结束；`recipient_open_id` 是会议纪要卡片的唯一私聊接收人，未配置且恰好只有一个 owner 时自动使用该 owner，多 owner 时必须显式配置；`trace_enabled` 控制会议整理 ACP session 是否写本地 trace，默认关闭。也可以由 bot owner 使用 `/meeting on|off|status` 和 `/meeting trace on|off` 原子更新配置文件。
+`meeting` 配置静默会议助手。`enabled` 是处理新会议邀请的大开关，关闭后不会接受新邀请，但已经加入的会议仍会整理到结束；`recipient_open_id` 是会议纪要卡片的唯一私聊接收人，未配置且恰好只有一个 owner 时自动使用该 owner，多 owner 时必须显式配置；`trace_enabled` 控制会议整理 ACP session 是否写本地 trace 和过程卡片，默认关闭；`trace_chat_id` 是会议整理过程卡片目的地。也可以由 bot owner 使用 `/meeting on|off|status` 和 `/meeting trace on|off` 原子更新配置文件，其中 `/meeting trace on` 会把当前聊天设置为过程卡片目的地。
 
 启用前需要在飞书开放平台开通会议机器人相关能力，授权“加入会议”和“获取会议事件列表”接口，并订阅 `vc.bot.meeting_invited_v1`、`vc.bot.meeting_activity_v1`、`vc.bot.meeting_ended_v1` 三个事件；私聊纪要卡片仍依赖现有的 IM 发消息和 Card 权限。会议机器人能力目前由飞书灰度开放，能否使用以及准确的权限 scope 以开放平台控制台和官方 API 文档为准。
 
@@ -329,7 +329,7 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/session title <title>`：设置当前 ACP 会话标题，便于 `/session list` 区分。
 - `/wiki on`、`/wiki off`、`/wiki status`、`/wiki lint`、`/wiki upgrade`、`/wiki interval <duration>`：管理当前会话的自动知识沉淀；可主动检查 workspace 知识库一致性，也可把当前内置 wiki 维护规则和内置 workspace skill 同步到已有 workspace。`/wiki lint` 会异步执行，并像普通 prompt 一样用流式卡片展示处理过程和结果。`duration` 支持 `5m`、`30s`，纯数字按分钟理解。
 - `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会按目的群 `/show` 配置展示后台反思执行过程。
-- `/meeting on|off|status`、`/meeting trace on|off`：仅 bot owner 可用。管理静默会议助手和会议整理 trace；`off` 只拒绝新邀请，不中断正在整理的会议。纪要卡片固定私聊发送给 `meeting.recipient_open_id`，未配置且只有一个 owner 时自动使用该 owner。
+- `/meeting on|off|status`、`/meeting trace on|off`：仅 bot owner 可用。管理静默会议助手和会议整理过程展示；`/meeting trace on` 会把当前聊天设为过程卡片目的地，`off` 只拒绝新邀请，不中断正在整理的会议。纪要卡片固定私聊发送给 `meeting.recipient_open_id`，未配置且只有一个 owner 时自动使用该 owner。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。

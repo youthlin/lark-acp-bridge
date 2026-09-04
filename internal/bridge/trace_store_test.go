@@ -551,6 +551,14 @@ func TestNonIMTraceMessageIDBuilders(t *testing.T) {
 			}, 3),
 			want: "wiki_acp_session_generation_3",
 		},
+		{
+			name: "meeting",
+			got: meetingTraceMessageID(MeetingState{
+				BotID:     "bot-a",
+				MeetingID: "meeting-1",
+			}),
+			want: "meeting_meeting_meeting-1_live",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.got != tt.want {

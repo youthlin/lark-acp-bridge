@@ -160,13 +160,6 @@ func (s *Service) HandleMeetingActivities(ctx context.Context, activities feishu
 				state.BackfillAttempts = 0
 			}
 			mergeMeetingInfo(state, info[meetingID])
-			if endedAt := parseMeetingTime(info[meetingID].EndTime); !endedAt.IsZero() {
-				state.EndedAt = endedAt
-				state.Status = meetingStatusEnding
-				if state.FinalizeAfter.IsZero() {
-					state.FinalizeAfter = time.Now().Add(defaultMeetingFinalizeGrace)
-				}
-			}
 			if state.Status == meetingStatusJoining {
 				state.Status = meetingStatusActive
 				state.RetryCount = 0

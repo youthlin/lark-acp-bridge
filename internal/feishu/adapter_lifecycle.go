@@ -77,9 +77,12 @@ func (a *Adapter) newEventDispatcher() *dispatcher.EventDispatcher {
 		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		OnP2MessageReactionDeletedV1(a.handleReactionDeleted).
 		OnP2NoticeCommentAddV1(a.handleDriveCommentAdd).
-		OnP2BotMeetingInvitedV1(a.handleMeetingInvited).
-		OnP2BotMeetingActivityV1(a.handleMeetingActivity).
-		OnP2BotMeetingEndedV1(a.handleMeetingEnded).
+		// OnP2BotMeetingInvitedV1(a.handleMeetingInvited).
+		OnCustomizedEvent("vc.bot.meeting_invited_v1", a.handleMeetingInvitedRaw).
+		// OnP2BotMeetingActivityV1(a.handleMeetingActivity).
+		OnCustomizedEvent("vc.bot.meeting_activity_v1", a.handleMeetingActivityRaw).
+		// OnP2BotMeetingEndedV1(a.handleMeetingEnded).
+		OnCustomizedEvent("vc.bot.meeting_ended_v1", a.handleMeetingEndedRaw).
 		OnP2CardActionTrigger(a.handleCardAction)
 	handler.InitConfig(larkevent.WithLogger(NewLogger(slog.LevelInfo, a.cfg.ID, "lark-handler")))
 	return handler

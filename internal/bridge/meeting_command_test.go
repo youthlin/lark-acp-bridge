@@ -27,14 +27,14 @@ func TestHandleMeetingCommandPersistsConfig(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	svc := NewService(loaded, NewSessionStore("")).WithConfigPath(configPath)
-	msg := feishu.Message{BotID: "bot-a", SenderID: testOwnerOpenID}
+	msg := feishu.Message{BotID: "bot-a", ChatID: "oc_trace", SenderID: testOwnerOpenID}
 
 	got := svc.handleMeetingCommand(context.Background(), "/meeting on", msg)
 	if !strings.Contains(got, "静默会议助手：开启") || !strings.Contains(got, testOwnerOpenID) {
 		t.Fatalf("on reply = %q", got)
 	}
 	got = svc.handleMeetingCommand(context.Background(), "/meeting trace on", msg)
-	if !strings.Contains(got, "会议整理 ACP trace：开启") {
+	if !strings.Contains(got, "会议整理过程展示：开启") || !strings.Contains(got, "过程卡片目的地：oc_trace") {
 		t.Fatalf("trace reply = %q", got)
 	}
 	got = svc.handleMeetingCommand(context.Background(), "/meeting off", msg)
@@ -46,7 +46,7 @@ func TestHandleMeetingCommandPersistsConfig(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	meeting := persisted.Bots[0].Meeting
-	if meeting.Enabled || !meeting.TraceEnabled || meeting.RecipientOpenID != testOwnerOpenID {
+	if meeting.Enabled || !meeting.TraceEnabled || meeting.TraceChatID != "oc_trace" || meeting.RecipientOpenID != testOwnerOpenID {
 		t.Fatalf("meeting = %+v", meeting)
 	}
 }

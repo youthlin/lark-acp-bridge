@@ -73,7 +73,7 @@ func newMeetingCardData(view MeetingCardView) cardJSON {
 	if strings.TrimSpace(view.Error) != "" {
 		status, template = "会议纪要更新异常", "orange"
 	}
-	elements := []any{meetingCardMarkdown("**状态：**" + status + meetingCardTimeText(view))}
+	elements := []any{meetingCardMarkdown("**状态：** " + status + meetingCardTimeText(view))}
 	elements = append(elements, meetingCardSection("摘要", view.Summary, "等待会议内容。"))
 	elements = append(elements, meetingCardSection("决策", view.Decisions, "暂无明确决策。"))
 	elements = append(elements, meetingCardTodoSection(view.Todos))
@@ -98,7 +98,7 @@ func newMeetingCardData(view MeetingCardView) cardJSON {
 		elements = append(elements, meetingCardMarkdown("**最近错误**\n"+errText))
 	}
 	if updated := strings.TrimSpace(view.UpdatedAt); updated != "" {
-		elements = append(elements, cardJSON{"tag": "note", "elements": []any{cardJSON{"tag": "plain_text", "content": "最近更新：" + updated}}})
+		elements = append(elements, meetingCardMarkdown("最近更新："+updated))
 	}
 	subtitle := strings.TrimSpace(view.MeetingNo)
 	return cardJSON{

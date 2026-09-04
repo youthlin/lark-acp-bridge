@@ -349,16 +349,17 @@ func (c *meetingCoordinator) triggerRequest(state MeetingState, batch []MeetingE
 		return TriggerRequest{}, fmt.Errorf("未找到 bot 配置")
 	}
 	return TriggerRequest{
-		BotID:        state.BotID,
-		Key:          meetingSessionKey(state.BotID, state.MeetingID),
-		Workspace:    bot.Workspace,
-		AgentName:    agentName,
-		Cwd:          cwd,
-		Title:        "会议纪要 " + firstNonEmptyBridge(state.Topic, state.MeetingNo, state.MeetingID),
-		Prompt:       meetingPrompt(state, batch, final),
-		Metadata:     map[string]string{"meeting_id": state.MeetingID, "final": strconvFormatBool(final)},
-		Sink:         noopTriggerSink{},
-		DisableTrace: !bot.Meeting.TraceEnabled,
+		BotID:          state.BotID,
+		Key:            meetingSessionKey(state.BotID, state.MeetingID),
+		TraceMessageID: meetingTraceMessageID(state),
+		Workspace:      bot.Workspace,
+		AgentName:      agentName,
+		Cwd:            cwd,
+		Title:          "会议纪要 " + firstNonEmptyBridge(state.Topic, state.MeetingNo, state.MeetingID),
+		Prompt:         meetingPrompt(state, batch, final),
+		Metadata:       map[string]string{"meeting_id": state.MeetingID, "final": strconvFormatBool(final)},
+		Sink:           c.service.meetingTraceSink(state),
+		DisableTrace:   !bot.Meeting.TraceEnabled,
 		// 会议处理, 权限请求全部拒绝
 		DisableToolPermissions: true,
 	}, nil
