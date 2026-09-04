@@ -201,7 +201,7 @@ func (s *Service) cachePendingAtText(msg feishu.Message) {
 	if strings.TrimSpace(entry.Text) == "" {
 		return
 	}
-	key := chatKeyFromMessage(msg)
+	key := normalizeSessionKey(sessionKeyFromMessage(msg))
 	if !key.Valid() {
 		return
 	}
@@ -218,7 +218,7 @@ func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText st
 	if !messageIsGroupChat(msg) || !s.chatRequiresMention(msg) || !messageMentionsBot(msg) {
 		return promptText
 	}
-	key := chatKeyFromMessage(msg)
+	key := normalizeSessionKey(sessionKeyFromMessage(msg))
 	if !key.Valid() {
 		return promptText
 	}

@@ -1126,6 +1126,107 @@ func TestHandleFeishuGroupChatCachesMessagesUntilNextMention(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuTopicGroupPendingMentionCacheIsTopicScoped(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	workDir := t.TempDir()
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = workDir
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionIDs: []string{"acp-session-topic-2", "acp-session-topic-1"}, promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_topic_1_pending",
+		ChatID:           "oc_group",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic_1",
+		RootID:           "om_topic_1_root",
+		ParentID:         "om_topic_1_root",
+		SenderID:         "ou_a",
+		Text:             "话题1里后续不at的消息",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic 1 pending) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want silent cache for topic 1 pending message", reply)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_topic_2_mention",
+		ChatID:           "oc_group",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic_2",
+		RootID:           "om_topic_2_root",
+		ParentID:         "om_topic_2_root",
+		SenderID:         "ou_a",
+		Text:             "@智能助手 ping",
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic 2 mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 1 {
+		t.Fatalf("promptCalls = %+v, want topic 2 prompt only", rt.promptCalls)
+	}
+	topic2Prompt := rt.promptCalls[0].Text
+	if strings.Contains(topic2Prompt, "话题1里后续不at的消息") || strings.Contains(topic2Prompt, "om_topic_1_pending") {
+		t.Fatalf("topic 2 prompt = %q, should not include topic 1 pending message", topic2Prompt)
+	}
+	if !strings.Contains(topic2Prompt, "ping") {
+		t.Fatalf("topic 2 prompt = %q, want current mention content", topic2Prompt)
+	}
+	if rt.promptCalls[0].Session.Key.SubID != "omt_topic_2" {
+		t.Fatalf("topic 2 session key = %+v, want topic scoped session", rt.promptCalls[0].Session.Key)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_topic_1_mention",
+		ChatID:           "oc_group",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_topic_1",
+		RootID:           "om_topic_1_root",
+		ParentID:         "om_topic_1_root",
+		SenderID:         "ou_a",
+		Text:             "@智能助手 总结一下",
+		Mentions:         []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(topic 1 mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want topic 1 prompt after topic 2 prompt", rt.promptCalls)
+	}
+	topic1Prompt := rt.promptCalls[1].Text
+	for _, want := range []string{
+		"## 以下是当前对话历史消息",
+		"- （om_topic_1_pending）（ou_a）话题1里后续不at的消息",
+		"content：总结一下",
+	} {
+		if !strings.Contains(topic1Prompt, want) {
+			t.Fatalf("topic 1 prompt = %q, want %q", topic1Prompt, want)
+		}
+	}
+	if rt.promptCalls[1].Session.Key.SubID != "omt_topic_1" {
+		t.Fatalf("topic 1 session key = %+v, want topic scoped session", rt.promptCalls[1].Session.Key)
+	}
+}
+
 func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()

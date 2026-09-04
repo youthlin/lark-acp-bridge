@@ -59,7 +59,7 @@ type serviceTasks struct {
 	workspaceLocks  workspaceTaskLocks
 	loopStatuses    map[SessionKey]loopRunStatus
 	acpErrors       map[SessionKey]acpErrorSnapshot
-	pendingAtTexts  map[ChatKey][]pendingAtMessage
+	pendingAtTexts  map[SessionKey][]pendingAtMessage
 	pendingAtAuto   map[SessionKey][]pendingAtMessage
 	atAutoFlows     map[SessionKey]bool
 	promptQueues    map[SessionKey]*promptQueue
@@ -99,7 +99,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			workspaceLocks:  newWorkspaceTaskLocks(),
 			loopStatuses:    make(map[SessionKey]loopRunStatus),
 			acpErrors:       make(map[SessionKey]acpErrorSnapshot),
-			pendingAtTexts:  make(map[ChatKey][]pendingAtMessage),
+			pendingAtTexts:  make(map[SessionKey][]pendingAtMessage),
 			pendingAtAuto:   make(map[SessionKey][]pendingAtMessage),
 			atAutoFlows:     make(map[SessionKey]bool),
 			promptQueues:    make(map[SessionKey]*promptQueue),
