@@ -235,9 +235,11 @@ const maxSessionHistoryPerChat = 10
 const mentionOnlyPromptText = "（用户提及你，但本次无消息内容，请按历史消息，引用上下文回复）"
 
 type incomingPromptMessage struct {
-	msg        feishu.Message
-	text       string
-	promptText string
+	msg           feishu.Message
+	rawText       string // 原始消息
+	rawTextRedact string // 原始消息-隐藏敏感信息-用于日志
+	text          string // 去除 at bot 的部分, 用于判断斜杠命令
+	promptText    string // 本消息如果要发给模型就用这个字段, 含文本、图片下载后的本地路径等
 }
 
 // HandleFeishuMessage 消息处理
@@ -245,10 +247,6 @@ type incomingPromptMessage struct {
 func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (string, error) {
 	incoming := s.normalizeIncomingMessage(msg)
 	ctx = incomingMessageTraceContext(ctx, incoming.msg)
-	slog.DebugContext(ctx, "处理解析后的消息",
-		"text", redactSensitiveValuesForDisplay(incoming.text),
-		"prompt_text", redactSensitiveValuesForDisplay(incoming.promptText),
-	)
 
 	if s.shouldSkipIncomingMessage(ctx, incoming) {
 		return "", nil
@@ -310,6 +308,7 @@ func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMes
 	if strings.TrimSpace(msg.BotOpenID) == "" {
 		msg.BotOpenID = s.botOpenID(msg.BotID)
 	}
+	rawText := strings.TrimSpace(msg.Text)
 	text := strings.TrimSpace(msg.Text)
 	text = stripCurrentBotMentionNames(text, msg)
 	msg.Text = text
@@ -317,7 +316,13 @@ func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMes
 	if promptText == "" && messageMentionsBot(msg) {
 		promptText = mentionOnlyPromptText
 	}
-	return incomingPromptMessage{msg: msg, text: text, promptText: promptText}
+	return incomingPromptMessage{
+		msg:           msg,
+		rawText:       rawText,
+		rawTextRedact: redactSensitiveValuesForDisplay(rawText),
+		text:          text,
+		promptText:    promptText,
+	}
 }
 
 func (s *Service) shouldSkipIncomingMessage(ctx context.Context, incoming incomingPromptMessage) bool {
@@ -325,7 +330,9 @@ func (s *Service) shouldSkipIncomingMessage(ctx context.Context, incoming incomi
 		if !strings.HasPrefix(incoming.text, "/") {
 			s.cachePendingAtText(incoming.msg)
 		}
-		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过")
+		slog.InfoContext(ctx, "群聊消息未 at bot，按当前 chat 配置跳过",
+			"rawTextRedact", incoming.rawTextRedact,
+		)
 		return true
 	}
 	return false
