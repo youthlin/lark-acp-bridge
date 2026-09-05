@@ -1140,9 +1140,95 @@ func (r *runtimeManager) startAndResumeClient(ctx context.Context, session Sessi
 			_ = client.Close()
 			return nil, acp.SessionInfo{}, fmt.Errorf("%w: session/resume: %v; session/load fallback: %v", errACPSessionUnavailable, err, loadErr)
 		}
-		return client, loadInfo, nil
+		sessionInfo = loadInfo
 	}
+	sessionInfo = restoreResumedSessionConfig(ctx, client, session, sessionInfo)
 	return client, sessionInfo, nil
+}
+
+type resumedSessionConfigClient interface {
+	SetConfigOption(ctx context.Context, sessionID, configID string, value any) ([]acp.SessionConfigOption, error)
+	SetMode(ctx context.Context, sessionID, modeID string) error
+}
+
+// restoreResumedSessionConfig 尽力把持久化的模型和模式恢复到新启动的 ACP runtime。
+// 配置恢复失败不应阻断原本可用的 session；此时保留 ACP 实际上报的状态并继续执行。
+func restoreResumedSessionConfig(ctx context.Context, client resumedSessionConfigClient, persisted Session, info acp.SessionInfo) acp.SessionInfo {
+	desiredModel := strings.TrimSpace(currentModelDisplay(persisted))
+	desiredMode := strings.TrimSpace(currentModeDisplay(persisted))
+	resumed := Session{
+		ConfigOptions: info.ConfigOptions,
+		Models:        info.Models,
+		Mode:          info.Mode,
+	}
+
+	modelOpt, hasModelOption := findModelConfigOption(resumed)
+	if !hasModelOption {
+		modelOpt, hasModelOption = findModelConfigOption(persisted)
+	}
+	if hasModelOption && desiredModel != "" && currentModelDisplay(resumed) != desiredModel {
+		options, err := client.SetConfigOption(ctx, persisted.ACPSessionID, modelOpt.ID, desiredModel)
+		if err != nil {
+			slog.WarnContext(ctx, "恢复 ACP session 模型失败，继续使用 ACP 当前模型",
+				"session", persisted.ACPSessionID,
+				"期望模型", desiredModel,
+				"当前模型", currentModelDisplay(resumed),
+				"错误", err,
+			)
+		} else {
+			info.ConfigOptions = options
+			resumed.ConfigOptions = options
+			if updated, ok := findModelConfigOption(resumed); ok && configOptionValueString(updated.CurrentValue) == desiredModel {
+				if info.Models != nil {
+					info.Models.CurrentModelID = desiredModel
+				}
+				resumed.Models = info.Models
+			}
+		}
+	}
+
+	if desiredMode == "" || currentModeDisplay(resumed) == desiredMode {
+		return info
+	}
+	modeOpt, hasModeOption := findModeConfigOption(resumed)
+	if !hasModeOption {
+		modeOpt, hasModeOption = findModeConfigOption(persisted)
+	}
+	if hasModeOption {
+		options, err := client.SetConfigOption(ctx, persisted.ACPSessionID, modeOpt.ID, desiredMode)
+		if err != nil {
+			slog.WarnContext(ctx, "恢复 ACP session 模式失败，继续使用 ACP 当前模式",
+				"session", persisted.ACPSessionID,
+				"期望模式", desiredMode,
+				"当前模式", currentModeDisplay(resumed),
+				"错误", err,
+			)
+			return info
+		}
+		info.ConfigOptions = options
+		resumed.ConfigOptions = options
+		if updated, ok := findModeConfigOption(resumed); ok && configOptionValueString(updated.CurrentValue) == desiredMode && info.Mode != nil {
+			info.Mode.CurrentModeID = desiredMode
+		}
+		return info
+	}
+	if info.Mode == nil && persisted.Mode == nil {
+		return info
+	}
+	if err := client.SetMode(ctx, persisted.ACPSessionID, desiredMode); err != nil {
+		slog.WarnContext(ctx, "恢复 ACP session legacy 模式失败，继续使用 ACP 当前模式",
+			"session", persisted.ACPSessionID,
+			"期望模式", desiredMode,
+			"当前模式", currentModeDisplay(resumed),
+			"错误", err,
+		)
+		return info
+	}
+	if info.Mode == nil {
+		info.Mode = &acp.SessionModeState{}
+	}
+	info.Mode.CurrentModeID = desiredMode
+	return info
 }
 
 func (r *runtimeManager) swapClient(key runtimeKey, client *acp.Client, sessionID string) runtimeClientSlot {

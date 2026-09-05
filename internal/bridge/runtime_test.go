@@ -69,6 +69,172 @@ func TestRuntimeDispatchSessionInfoSendsMetaUpdate(t *testing.T) {
 	}
 }
 
+type fakeResumedSessionConfigClient struct {
+	setConfigOption func(context.Context, string, string, any) ([]acp.SessionConfigOption, error)
+	setMode         func(context.Context, string, string) error
+}
+
+func (f fakeResumedSessionConfigClient) SetConfigOption(ctx context.Context, sessionID, configID string, value any) ([]acp.SessionConfigOption, error) {
+	return f.setConfigOption(ctx, sessionID, configID, value)
+}
+
+func (f fakeResumedSessionConfigClient) SetMode(ctx context.Context, sessionID, modeID string) error {
+	return f.setMode(ctx, sessionID, modeID)
+}
+
+func TestRestoreResumedSessionConfigRestoresPersistedModelAndMode(t *testing.T) {
+	persisted := Session{
+		ACPSessionID: "session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.6-sol"},
+			{ID: "mode", Category: "mode", Type: "select", CurrentValue: "plan"},
+		},
+	}
+	info := acp.SessionInfo{
+		SessionID: "session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+			{ID: "mode", Category: "mode", Type: "select", CurrentValue: "default"},
+		},
+		Models: &acp.SessionModelState{CurrentModelID: "gpt-5.5"},
+		Mode:   &acp.SessionModeState{CurrentModeID: "default"},
+	}
+	var calls []string
+	client := fakeResumedSessionConfigClient{
+		setConfigOption: func(_ context.Context, sessionID, configID string, value any) ([]acp.SessionConfigOption, error) {
+			if sessionID != "session-1" {
+				t.Fatalf("sessionID = %q, want session-1", sessionID)
+			}
+			calls = append(calls, fmt.Sprintf("%s=%v", configID, value))
+			options := append([]acp.SessionConfigOption(nil), info.ConfigOptions...)
+			for i := range options {
+				if options[i].ID == configID {
+					options[i].CurrentValue = value
+				}
+			}
+			info.ConfigOptions = options
+			return options, nil
+		},
+		setMode: func(context.Context, string, string) error {
+			t.Fatal("SetMode() called for config-option mode")
+			return nil
+		},
+	}
+
+	got := restoreResumedSessionConfig(context.Background(), client, persisted, info)
+	if strings.Join(calls, ",") != "model=gpt-5.6-sol,mode=plan" {
+		t.Fatalf("set config calls = %v, want model then mode", calls)
+	}
+	gotSession := Session{ConfigOptions: got.ConfigOptions, Models: got.Models, Mode: got.Mode}
+	if model := currentModelDisplay(gotSession); model != "gpt-5.6-sol" {
+		t.Fatalf("current model = %q, want gpt-5.6-sol", model)
+	}
+	if mode := currentModeDisplay(gotSession); mode != "plan" {
+		t.Fatalf("current mode = %q, want plan", mode)
+	}
+}
+
+func TestRestoreResumedSessionConfigUsesPersistedOptionsWhenResumeStateIsPartial(t *testing.T) {
+	persisted := Session{
+		ACPSessionID: "session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "preferred_model", Category: "model", Type: "select", CurrentValue: "gpt-5.6-sol"},
+			{ID: "permission_mode", Category: "mode", Type: "select", CurrentValue: "plan"},
+		},
+	}
+	info := acp.SessionInfo{SessionID: "session-1"}
+	var calls []string
+	currentOptions := []acp.SessionConfigOption{
+		{ID: "preferred_model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+		{ID: "permission_mode", Category: "mode", Type: "select", CurrentValue: "default"},
+	}
+	client := fakeResumedSessionConfigClient{
+		setConfigOption: func(_ context.Context, sessionID, configID string, value any) ([]acp.SessionConfigOption, error) {
+			if sessionID != "session-1" {
+				t.Fatalf("sessionID = %q, want session-1", sessionID)
+			}
+			calls = append(calls, fmt.Sprintf("%s=%v", configID, value))
+			options := append([]acp.SessionConfigOption(nil), currentOptions...)
+			for i := range options {
+				if options[i].ID == configID {
+					options[i].CurrentValue = value
+				}
+			}
+			currentOptions = options
+			return options, nil
+		},
+		setMode: func(context.Context, string, string) error {
+			t.Fatal("SetMode() called for persisted config-option mode")
+			return nil
+		},
+	}
+
+	got := restoreResumedSessionConfig(context.Background(), client, persisted, info)
+	if strings.Join(calls, ",") != "preferred_model=gpt-5.6-sol,permission_mode=plan" {
+		t.Fatalf("set config calls = %v, want persisted model then mode options", calls)
+	}
+	gotSession := Session{ConfigOptions: got.ConfigOptions, Models: got.Models, Mode: got.Mode}
+	if currentModelDisplay(gotSession) != "gpt-5.6-sol" || currentModeDisplay(gotSession) != "plan" {
+		t.Fatalf("restored session = %+v, want persisted model and mode", gotSession)
+	}
+}
+
+func TestRestoreResumedSessionConfigFailureKeepsACPState(t *testing.T) {
+	persisted := Session{
+		ACPSessionID: "session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.6-sol"},
+		},
+	}
+	info := acp.SessionInfo{
+		SessionID: "session-1",
+		ConfigOptions: []acp.SessionConfigOption{
+			{ID: "model", Category: "model", Type: "select", CurrentValue: "gpt-5.5"},
+		},
+		Models: &acp.SessionModelState{CurrentModelID: "gpt-5.5"},
+	}
+	client := fakeResumedSessionConfigClient{
+		setConfigOption: func(context.Context, string, string, any) ([]acp.SessionConfigOption, error) {
+			return nil, errors.New("temporary failure")
+		},
+		setMode: func(context.Context, string, string) error { return nil },
+	}
+
+	got := restoreResumedSessionConfig(context.Background(), client, persisted, info)
+	gotSession := Session{ConfigOptions: got.ConfigOptions, Models: got.Models, Mode: got.Mode}
+	if model := currentModelDisplay(gotSession); model != "gpt-5.5" {
+		t.Fatalf("current model = %q, want ACP state gpt-5.5", model)
+	}
+}
+
+func TestRestoreResumedSessionConfigRestoresLegacyMode(t *testing.T) {
+	persisted := Session{
+		ACPSessionID: "session-1",
+		Mode:         &acp.SessionModeState{CurrentModeID: "plan"},
+	}
+	info := acp.SessionInfo{
+		SessionID: "session-1",
+		Mode:      &acp.SessionModeState{CurrentModeID: "default"},
+	}
+	client := fakeResumedSessionConfigClient{
+		setConfigOption: func(context.Context, string, string, any) ([]acp.SessionConfigOption, error) {
+			t.Fatal("SetConfigOption() called for legacy mode")
+			return nil, nil
+		},
+		setMode: func(_ context.Context, sessionID, modeID string) error {
+			if sessionID != "session-1" || modeID != "plan" {
+				t.Fatalf("SetMode(%q, %q), want session-1, plan", sessionID, modeID)
+			}
+			return nil
+		},
+	}
+
+	got := restoreResumedSessionConfig(context.Background(), client, persisted, info)
+	if got.Mode == nil || got.Mode.CurrentModeID != "plan" {
+		t.Fatalf("mode = %+v, want plan", got.Mode)
+	}
+}
+
 func TestRuntimeTransitionCurrentSessionUpdatesMarkerWithoutClient(t *testing.T) {
 	r := newRuntimeManager()
 	key := imSessionKey("bot-a", "oc_chat", "thread-a")

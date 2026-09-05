@@ -335,6 +335,43 @@ func TestSessionForkRetryReusesCreatedTargetSession(t *testing.T) {
 	}
 }
 
+func TestSessionForkRetryFromSourceCreatesMissingTarget(t *testing.T) {
+	fixture := newSessionForkFixture(t, imSessionKey("bot-a", "oc_source", ""))
+	createCalls := 0
+	fixture.outbound.chatCreator = func(_ context.Context, request feishu.CreateChatRequest) (feishu.CreatedChat, error) {
+		createCalls++
+		if createCalls == 1 {
+			return feishu.CreatedChat{}, errors.New("temporary create failure")
+		}
+		return feishu.CreatedChat{ChatID: "oc_retry_source", Name: request.Name, ChatType: "private", GroupMessageType: "chat"}, nil
+	}
+	command := feishu.Message{
+		BotID: "bot-a", Workspace: fixture.workspace, ChatID: "oc_source", ChatType: "p2p",
+		MessageID: "om_fork_command", SenderID: testOwnerOpenID,
+		Mentions: []feishu.Mention{{ID: "ou_alice", Name: "Alice", Type: "user"}},
+	}
+	if reply := fixture.service.handleSessionForkCommand(context.Background(), "/session fork 可恢复 @Alice", command); reply != "" {
+		t.Fatalf("failed fork reply = %q, want outbound error response", reply)
+	}
+	operation, ok := fixture.service.forkStoreForWorkspace(fixture.workspace).GetByCommand(command.MessageID)
+	if !ok || operation.State != forkStateFailed || operation.TargetChatID != "" || !reflect.DeepEqual(operation.ExtraUserOpenIDs, []string{"ou_alice"}) {
+		t.Fatalf("failed operation = %+v, %v; want source-retryable operation", operation, ok)
+	}
+
+	retry := command
+	retry.MessageID = "om_retry_from_source"
+	if reply := fixture.service.handleSessionForkCommand(context.Background(), "/session fork retry", retry); reply != "" {
+		t.Fatalf("source retry reply = %q, want outbound-only reply", reply)
+	}
+	operation, ok = fixture.service.forkStoreForWorkspace(fixture.workspace).Get(operation.ID)
+	if !ok || operation.State != forkStateReady || operation.TargetChatID != "oc_retry_source" || operation.TargetSession != "acp-fork" {
+		t.Fatalf("retried operation = %+v, %v; want ready target", operation, ok)
+	}
+	if createCalls != 2 || len(runtimeNewCallsSnapshot(fixture.runtime)) != 1 || fixture.runtime.promptCallCount() != 1 {
+		t.Fatalf("create calls = %d, new calls = %d, prompt calls = %d; want one resumed attempt", createCalls, len(runtimeNewCallsSnapshot(fixture.runtime)), fixture.runtime.promptCallCount())
+	}
+}
+
 func TestSessionForkConcurrentRetryOnlyBootstrapsOnce(t *testing.T) {
 	fixture := newSessionForkFixture(t, imSessionKey("bot-a", "oc_source", ""))
 	fixture.outbound.chatCreator = func(_ context.Context, request feishu.CreateChatRequest) (feishu.CreatedChat, error) {
@@ -573,7 +610,7 @@ func TestForkOperationStoreIsIdempotentAndRecoversInterrupted(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered, ok := reloaded.Get(first.ID)
-	if !ok || recovered.State != forkStateFailed || !strings.Contains(recovered.Error, "Bridge 在分支初始化期间重启") {
+	if !ok || recovered.State != forkStateFailed || !strings.Contains(recovered.Error, "请在源位置执行 /session fork retry") {
 		t.Fatalf("recovered operation = %+v, %v; want retryable failure", recovered, ok)
 	}
 	info, err := os.Stat(reloaded.indexPath)

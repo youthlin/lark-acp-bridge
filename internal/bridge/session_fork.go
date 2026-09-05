@@ -71,6 +71,10 @@ func (s *Service) startSessionFork(ctx context.Context, msg feishu.Message, req 
 		return s.replySessionForkCommand(ctx, msg, "Session fork 操作存储未初始化。")
 	}
 	if existing, exists := operationStore.GetByCommand(msg.MessageID); exists {
+		if existing.State == forkStateFailed && strings.TrimSpace(existing.TargetChatID) == "" &&
+			normalizeSessionKey(existing.Source.SourceKey) == normalizeSessionKey(sessionKeyFromMessage(msg)) {
+			return s.retrySessionForkFromSource(ctx, msg, operationStore, existing)
+		}
 		return s.replySessionForkCommand(ctx, msg, formatExistingForkOperation(existing))
 	}
 	if err := s.validateForkSource(source); err != nil {
@@ -119,12 +123,13 @@ func (s *Service) startSessionFork(ctx context.Context, msg feishu.Message, req 
 		return s.replySessionForkCommand(ctx, msg, "保存分支上下文失败："+err.Error())
 	}
 	operation := ForkOperation{
-		ID:          origin.ForkID,
-		State:       forkStatePreparing,
-		Source:      origin,
-		SourceTitle: displaySessionTitle(source),
-		TargetTitle: title,
-		BundlePath:  bundle.ContextPath,
+		ID:               origin.ForkID,
+		State:            forkStatePreparing,
+		Source:           origin,
+		SourceTitle:      displaySessionTitle(source),
+		TargetTitle:      title,
+		BundlePath:       bundle.ContextPath,
+		ExtraUserOpenIDs: append([]string(nil), req.ExtraUserOpenIDs...),
 	}
 	stored, inserted, err := operationStore.PutIfCommandAbsent(operation)
 	if err != nil {
@@ -149,6 +154,14 @@ func (s *Service) startSessionFork(ctx context.Context, msg feishu.Message, req 
 		}
 		return s.failSessionFork(ctx, msg, operationStore, operation, feishu.Message{}, "创建分支位置失败："+err.Error())
 	}
+	operation = forkOperationWithTarget(operation, target, sent, inviteWarning)
+	if err := operationStore.Put(operation); err != nil {
+		return s.failSessionFork(ctx, msg, operationStore, operation, target, "保存分支目标失败："+err.Error())
+	}
+	return s.finishSessionFork(ctx, msg, target, source, operationStore, operation)
+}
+
+func forkOperationWithTarget(operation ForkOperation, target feishu.Message, sent feishu.SentMessage, inviteWarning string) ForkOperation {
 	operation.State = forkStateTargetCreated
 	operation.TargetKey = sessionKeyFromMessage(target)
 	operation.TargetChatID = target.ChatID
@@ -156,10 +169,7 @@ func (s *Service) startSessionFork(ctx context.Context, msg feishu.Message, req 
 	operation.TargetRootID = target.RootID
 	operation.TargetMessageID = sent.MessageID
 	operation.InviteWarning = inviteWarning
-	if err := operationStore.Put(operation); err != nil {
-		return s.failSessionFork(ctx, msg, operationStore, operation, target, "保存分支目标失败："+err.Error())
-	}
-	return s.finishSessionFork(ctx, msg, target, source, operationStore, operation)
+	return operation
 }
 
 func (s *Service) validateForkSource(source Session) error {
@@ -406,7 +416,10 @@ func (s *Service) retrySessionFork(ctx context.Context, msg feishu.Message) stri
 	}
 	operation, ok := s.findSessionForkOperationForTarget(store, msg)
 	if !ok {
-		return "当前位置不是 Session fork 的目标位置。"
+		if sourceOperation, sourceOK := store.GetFailedWithoutTargetBySource(sessionKeyFromMessage(msg)); sourceOK {
+			return s.retrySessionForkFromSource(ctx, msg, store, sourceOperation)
+		}
+		return "当前位置不是 Session fork 的目标位置，也没有等待恢复的分叉操作。"
 	}
 	if operation.State == forkStateReady {
 		return "分支上下文已经接续完成，无需重试。"
@@ -482,6 +495,42 @@ func (s *Service) retrySessionFork(ctx context.Context, msg feishu.Message) stri
 		}
 	}
 	return s.bootstrapSessionFork(ctx, feishu.Message{}, target, targetSession, targetAgent, store, operation)
+}
+
+func (s *Service) retrySessionForkFromSource(ctx context.Context, msg feishu.Message, store *forkOperationStore, operation ForkOperation) string {
+	if operation.State != forkStateFailed || strings.TrimSpace(operation.TargetChatID) != "" {
+		return formatExistingForkOperation(operation)
+	}
+	if _, err := os.Stat(operation.BundlePath); err != nil {
+		return s.replySessionForkCommand(ctx, msg, "无法重试：分支上下文文件不可访问："+err.Error())
+	}
+	sessionStore := s.storeForMessage(msg)
+	if sessionStore == nil {
+		return s.replySessionForkCommand(ctx, msg, "会话持久化未初始化。")
+	}
+	source, ok := sessionStore.SessionByACPSessionID(msg.BotID, operation.Source.SourceACPSessionID)
+	if !ok || normalizeSessionKey(source.Key) != normalizeSessionKey(operation.Source.SourceKey) {
+		return s.replySessionForkCommand(ctx, msg, "无法重试：找不到源 ACP session。")
+	}
+	claimed, acquired, err := store.ClaimSourceRetry(operation.ID, operation.Revision)
+	if err != nil {
+		return s.replySessionForkCommand(ctx, msg, "无法重试：抢占分支目标创建失败："+err.Error())
+	}
+	if !acquired {
+		return s.replySessionForkCommand(ctx, msg, formatExistingForkOperation(claimed))
+	}
+	operation = claimed
+	target, sent, inviteWarning, err := s.createSessionForkTarget(ctx, msg, source, operation.TargetTitle, operation.ExtraUserOpenIDs)
+	if strings.TrimSpace(target.ChatID) != "" {
+		operation = forkOperationWithTarget(operation, target, sent, inviteWarning)
+		if persistErr := store.Put(operation); persistErr != nil {
+			return s.failSessionFork(ctx, msg, store, operation, target, "保存分支目标失败："+persistErr.Error())
+		}
+	}
+	if err != nil {
+		return s.failSessionFork(ctx, msg, store, operation, target, "创建分支位置失败："+err.Error())
+	}
+	return s.finishSessionFork(ctx, msg, target, source, store, operation)
 }
 
 func forkTargetMessage(msg feishu.Message, operation ForkOperation) feishu.Message {
@@ -600,6 +649,9 @@ func formatExistingForkOperation(operation ForkOperation) string {
 	case forkStateReady:
 		return "这条命令已经创建过分支。目标 chat_id：" + operation.TargetChatID
 	case forkStateFailed:
+		if strings.TrimSpace(operation.TargetChatID) == "" {
+			return "这条分叉命令此前在创建目标位置前中断，请在源位置执行 /session fork retry。"
+		}
 		return "这条分叉命令此前执行失败：" + operation.Error
 	default:
 		return "这条分叉命令正在处理中，请稍候。"

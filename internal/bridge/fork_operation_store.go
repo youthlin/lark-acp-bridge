@@ -41,6 +41,7 @@ type ForkOperation struct {
 	OriginalNoticeSent    bool              `json:"original_notice_sent,omitempty"`
 	OriginalShareChatSent bool              `json:"original_share_chat_sent,omitempty"`
 	InviteWarning         string            `json:"invite_warning,omitempty"`
+	ExtraUserOpenIDs      []string          `json:"extra_user_open_ids,omitempty"`
 	CreatedAt             time.Time         `json:"created_at"`
 	UpdatedAt             time.Time         `json:"updated_at"`
 }
@@ -110,7 +111,11 @@ func (s *forkOperationStore) RecoverInterrupted() error {
 			continue
 		}
 		operation.State = forkStateFailed
-		operation.Error = "Bridge 在分支初始化期间重启，请在目标位置执行 /session fork retry"
+		if strings.TrimSpace(operation.TargetChatID) == "" {
+			operation.Error = "Bridge 在创建分支目标位置前重启，请在源位置执行 /session fork retry"
+		} else {
+			operation.Error = "Bridge 在分支初始化期间重启，请在目标位置执行 /session fork retry"
+		}
 		operation.Revision++
 		operation.UpdatedAt = time.Now()
 		s.operations[id] = operation
@@ -191,6 +196,15 @@ func (s *forkOperationStore) PutIfCommandAbsent(operation ForkOperation) (ForkOp
 // ClaimRetry 原子地把指定版本的失败 operation 抢占为 bootstrap 状态。状态和
 // revision 必须同时匹配，避免旧请求在另一次 retry 已失败后再次抢占。
 func (s *forkOperationStore) ClaimRetry(id string, expectedRevision uint64) (ForkOperation, bool, error) {
+	return s.claimRetry(id, expectedRevision, forkStateBootstrapping)
+}
+
+// ClaimSourceRetry 原子地抢占尚未创建目标位置的失败 operation。
+func (s *forkOperationStore) ClaimSourceRetry(id string, expectedRevision uint64) (ForkOperation, bool, error) {
+	return s.claimRetry(id, expectedRevision, forkStatePreparing)
+}
+
+func (s *forkOperationStore) claimRetry(id string, expectedRevision uint64, nextState string) (ForkOperation, bool, error) {
 	if s == nil {
 		return ForkOperation{}, false, fmt.Errorf("session fork 操作存储未初始化")
 	}
@@ -208,7 +222,7 @@ func (s *forkOperationStore) ClaimRetry(id string, expectedRevision uint64) (For
 		return operation, false, nil
 	}
 	previous := cloneForkOperations(s.operations)
-	operation.State = forkStateBootstrapping
+	operation.State = nextState
 	operation.Error = ""
 	operation.Revision++
 	operation.UpdatedAt = time.Now()
@@ -300,6 +314,28 @@ func (s *forkOperationStore) GetByTargetMessageIDs(botID, chatID string, message
 	return ForkOperation{}, false
 }
 
+func (s *forkOperationStore) GetFailedWithoutTargetBySource(key SessionKey) (ForkOperation, bool) {
+	if s == nil {
+		return ForkOperation{}, false
+	}
+	key = normalizeSessionKey(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var latest ForkOperation
+	found := false
+	for _, operation := range s.operations {
+		if operation.State != forkStateFailed || strings.TrimSpace(operation.TargetChatID) != "" ||
+			normalizeSessionKey(operation.Source.SourceKey) != key {
+			continue
+		}
+		if !found || operation.UpdatedAt.After(latest.UpdatedAt) {
+			latest = operation
+			found = true
+		}
+	}
+	return latest, found
+}
+
 func (s *forkOperationStore) writeLocked() error {
 	operations := make([]ForkOperation, 0, len(s.operations))
 	for _, operation := range s.operations {
@@ -352,7 +388,25 @@ func normalizeForkOperation(operation ForkOperation) ForkOperation {
 	operation.BundlePath = strings.TrimSpace(operation.BundlePath)
 	operation.Error = strings.TrimSpace(operation.Error)
 	operation.InviteWarning = strings.TrimSpace(operation.InviteWarning)
+	operation.ExtraUserOpenIDs = normalizeForkOpenIDs(operation.ExtraUserOpenIDs)
 	return operation
+}
+
+func normalizeForkOpenIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized
 }
 
 func writePrivateFileAtomic(path string, data []byte) error {
