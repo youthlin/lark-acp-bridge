@@ -101,6 +101,7 @@ type fakeSentMessageClient struct {
 	traceChatCreator        func(context.Context, feishu.CreateDriveCommentTraceChatRequest) (feishu.CreatedChat, error)
 	chatCreator             func(context.Context, feishu.CreateChatRequest) (feishu.CreatedChat, error)
 	chatMemberAdder         func(context.Context, feishu.AddChatMembersRequest) (feishu.AddChatMembersResult, error)
+	shareChatSender         func(context.Context, feishu.Message, string) (feishu.SentMessage, error)
 	traceBotNameProvider    func(context.Context) (string, error)
 	sent                    []string
 	msgs                    []feishu.Message
@@ -111,6 +112,7 @@ type fakeSentMessageClient struct {
 	loopRequests            []feishu.LoopStatusCardRequest
 	textUpdates             []string
 	textUpdateIDs           []string
+	sharedChatIDs           []string
 }
 
 func newFakeSentMessageClient(nextID string) *fakeSentMessageClient {
@@ -151,6 +153,17 @@ func (f *fakeSentMessageClient) UpdateText(ctx context.Context, messageID string
 	f.textUpdateIDs = append(f.textUpdateIDs, messageID)
 	f.textUpdates = append(f.textUpdates, text)
 	return nil
+}
+
+func (f *fakeSentMessageClient) SendShareChatMessage(ctx context.Context, msg feishu.Message, chatID string) (feishu.SentMessage, error) {
+	if f != nil && f.shareChatSender != nil {
+		return f.shareChatSender(ctx, msg, chatID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sharedChatIDs = append(f.sharedChatIDs, chatID)
+	f.msgs = append(f.msgs, msg)
+	return feishu.SentMessage{MessageID: "om_share_chat", ChatID: msg.ChatID, ChatType: msg.ChatType, ThreadID: msg.ThreadID}, nil
 }
 
 func (f *fakeSentMessageClient) SendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error) {

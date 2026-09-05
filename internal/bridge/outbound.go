@@ -17,6 +17,14 @@ type sentMessageSender interface {
 	SendTextMessage(context.Context, feishu.Message, string) (feishu.SentMessage, error)
 }
 
+type shareChatSender interface {
+	SendShareChatMessage(context.Context, feishu.Message, string) (feishu.SentMessage, error)
+}
+
+type textMessageUpdater interface {
+	UpdateText(context.Context, string, string) error
+}
+
 type loopStatusCardSender interface {
 	SendLoopStatusCard(context.Context, feishu.Message, feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, error)
 }
@@ -141,6 +149,32 @@ func (s *Service) sendIntermediateReply(ctx context.Context, msg feishu.Message,
 		return false, nil
 	}
 	return true, sender.SendText(ctx, msg, text)
+}
+
+func (s *Service) sendTextMessageOutbound(ctx context.Context, msg feishu.Message, text string) (feishu.SentMessage, bool, error) {
+	sender, ok := s.outboundForBot(msg.BotID).(sentMessageSender)
+	if !ok || sender == nil {
+		return feishu.SentMessage{}, false, nil
+	}
+	sent, err := sender.SendTextMessage(ctx, msg, text)
+	return sent, true, err
+}
+
+func (s *Service) sendShareChatOutbound(ctx context.Context, msg feishu.Message, chatID string) (feishu.SentMessage, bool, error) {
+	sender, ok := s.outboundForBot(msg.BotID).(shareChatSender)
+	if !ok || sender == nil {
+		return feishu.SentMessage{}, false, nil
+	}
+	sent, err := sender.SendShareChatMessage(ctx, msg, chatID)
+	return sent, true, err
+}
+
+func (s *Service) updateTextMessageOutbound(ctx context.Context, msg feishu.Message, messageID string, text string) (bool, error) {
+	updater, ok := s.outboundForBot(msg.BotID).(textMessageUpdater)
+	if !ok || updater == nil {
+		return false, nil
+	}
+	return true, updater.UpdateText(ctx, messageID, text)
 }
 
 func (s *Service) sendLoopStatusCard(ctx context.Context, msg feishu.Message, request feishu.LoopStatusCardRequest) (feishu.LoopStatusCard, bool, error) {

@@ -548,7 +548,7 @@ func (s *Service) runPromptWithStreamOptions(ctx context.Context, msg feishu.Mes
 	recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
 	chunks := newPromptChunkAccumulator(stream)
 	stopStatusRefresh := stream.startStatusRefresh(ctx)
-	result, err := s.runtime.Prompt(ctx, session, agent, text, tracePromptOptions(recorder, s.promptStreamOptions(msg, stream, chunks)))
+	result, err := s.runtime.Prompt(ctx, session, agent, text, tracePromptOptions(recorder, s.promptStreamOptionsWithTaskOptions(msg, stream, chunks, opts)))
 	stopStatusRefresh()
 	rawResult := result
 	chunks.close()
@@ -572,6 +572,10 @@ func (s *Service) runPromptWithStreamOptions(ctx context.Context, msg feishu.Mes
 }
 
 func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStream, chunks *promptChunkAccumulator) acp.PromptOptions {
+	return s.promptStreamOptionsWithTaskOptions(msg, stream, chunks, runningTaskOptions{})
+}
+
+func (s *Service) promptStreamOptionsWithTaskOptions(msg feishu.Message, stream *promptCardStream, chunks *promptChunkAccumulator, taskOpts runningTaskOptions) acp.PromptOptions {
 	return acp.PromptOptions{
 		OnUpdate: func(update acp.PromptUpdate) {
 			sessionID := strings.TrimSpace(update.SessionID)
@@ -595,6 +599,9 @@ func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStre
 			stream.updatePromptUpdate(update)
 		},
 		OnPermissionRequest: func(reqCtx context.Context, req acp.PermissionRequest) (acp.PermissionOutcome, error) {
+			if taskOpts.rejectPermissions {
+				return defaultPermissionOutcome(req), nil
+			}
 			outcome, ok, err := s.requestPermission(reqCtx, msg, req)
 			if err != nil {
 				return acp.PermissionOutcome{}, err

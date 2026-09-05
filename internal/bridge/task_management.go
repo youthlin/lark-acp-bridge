@@ -57,6 +57,7 @@ type runningTaskOptions struct {
 	skipPostPromptWork   bool
 	triggerWiki          bool
 	silentPrompt         bool
+	rejectPermissions    bool
 	blockWorkspaceTasks  bool
 	skipPromptQueueDrain bool
 	replacementWait      replacedTaskWaitObserver
@@ -104,6 +105,14 @@ func autoCompactTaskOptions() runningTaskOptions {
 	return runningTaskOptions{
 		skipPostPromptWork: true,
 		silentPrompt:       true,
+	}
+}
+
+func forkBootstrapTaskOptions() runningTaskOptions {
+	return runningTaskOptions{
+		skipPostPromptWork:   true,
+		rejectPermissions:    true,
+		skipPromptQueueDrain: true,
 	}
 }
 
@@ -444,25 +453,7 @@ func (s *Service) sessionRuntimeStatusSnapshot(key SessionKey) sessionRuntimeSta
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
-	var status sessionRuntimeStatus
-	if task := s.tasks[key]; task != nil {
-		status.Busy = true
-		status.RunningKind = task.kind
-	}
-	if !status.Busy {
-		for runtime := range s.wikiTasks {
-			if normalizeSessionKey(runtime.SessionKey) == key {
-				status.Busy = true
-				status.RunningKind = taskKindWiki
-				break
-			}
-		}
-	}
-	if queue := s.promptQueues[key]; queue != nil {
-		status.QueueLen = len(queue.items)
-		status.QueueDraining = queue.draining
-	}
-	return status
+	return s.sessionRuntimeStatusLocked(key)
 }
 
 func (s *Service) recordACPError(session Session, operation string, err error) {

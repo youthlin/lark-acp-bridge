@@ -169,6 +169,67 @@ func (s *conversationManager) createSession(ctx context.Context, fields []string
 	return session, plan.Agent, plan.Source, ""
 }
 
+// createForkSession 只在目标飞书位置创建并绑定新 ACP session，不切换或取消源位置。
+func (s *conversationManager) createForkSession(ctx context.Context, target feishu.Message, source Session, origin SessionForkOrigin, title string) (Session, config.AgentConfig, error) {
+	store := s.storeForMessage(target)
+	if store == nil {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("会话持久化未初始化")
+	}
+	key := normalizeSessionKey(sessionKeyFromMessage(target))
+	if !key.Valid() {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("目标飞书位置无效")
+	}
+	if _, ok := store.Get(key); ok {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("目标位置已经存在 ACP session")
+	}
+	cwd := filepath.Clean(strings.TrimSpace(source.Cwd))
+	if cwd == "" || cwd == "." {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("源会话缺少工作目录")
+	}
+	if info, err := os.Stat(cwd); err != nil {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("源会话工作目录不可访问: %w", err)
+	} else if !info.IsDir() {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("源会话工作目录不是目录: %s", cwd)
+	}
+	agent, ok := s.registry.Get(source.AgentName)
+	if !ok {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("未找到源会话 agent 配置: %s", source.AgentName)
+	}
+	workspace := strings.TrimSpace(firstNonEmpty(target.Workspace, source.Workspace))
+	if _, err := ensureWorkspace(workspace, target.BotID); err != nil {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("初始化 workspace: %w", err)
+	}
+	target.Workspace = workspace
+	plan := newSessionPlan{
+		Req: newSessionRequest{
+			Cwd:         cwd,
+			Title:       normalizeSessionTitle(title),
+			ManualTitle: true,
+		},
+		Cwd:       cwd,
+		AgentName: source.AgentName,
+		Agent:     agent,
+	}
+	s.subscribeACPStateUpdates(ctx, target, key)
+	candidate, err := s.startACPSessionCandidate(ctx, key, target, plan)
+	if err != nil {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("创建 ACP session: %w", err)
+	}
+	defer candidate.Abort()
+	session := newSessionFromCandidate(key, target, plan, candidate)
+	session.ForkOrigin = &origin
+	session.AutoCompact = source.AutoCompact
+	session.AutoCompactPct = source.AutoCompactPct
+	if err := candidate.Commit(func() error {
+		return store.InsertIfAbsent(session)
+	}); err != nil {
+		return Session{}, config.AgentConfig{}, fmt.Errorf("保存分支会话映射: %w", err)
+	}
+	session = s.inheritNewSessionConfig(ctx, target, session, inheritedSessionConfigFromPreviousSession(source, true, source.AgentName))
+	s.afterSessionCommitted(sessionTransition{Key: key}, session)
+	return session, agent, nil
+}
+
 func (s *conversationManager) resolveNewSessionPlan(fields []string, msg feishu.Message) (newSessionPlan, string) {
 	req, source, errText := s.resolveNewSessionRequest(fields, msg)
 	if errText != "" {

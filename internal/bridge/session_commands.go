@@ -13,7 +13,7 @@ import (
 func (s *Service) handleSessionCommand(ctx context.Context, text string, msg feishu.Message) string {
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		return "可用命令：/session list、/session resume <index> 或 /session title <title>"
+		return "可用命令：/session list、/session resume <index>、/session title <title> 或 /session fork [--force] [标题] [mentions...]"
 	}
 	switch strings.ToLower(strings.TrimSpace(fields[1])) {
 	case "list":
@@ -33,8 +33,10 @@ func (s *Service) handleSessionCommand(ctx context.Context, text string, msg fei
 			return "请使用 /session title <title> 设置当前会话标题。"
 		}
 		return s.setSessionTitle(ctx, msg, title)
+	case "fork":
+		return s.handleSessionForkCommand(ctx, text, msg)
 	default:
-		return "暂不支持这个 session 命令。可用 /session list、/session resume <index> 或 /session title <title>。"
+		return "暂不支持这个 session 命令。可用 /session list、/session resume <index>、/session title <title> 或 /session fork [--force] [标题] [mentions...]。"
 	}
 }
 

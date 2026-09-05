@@ -207,6 +207,8 @@ var slashRoutedCommandTable = []slashCommandSpec{
 			"/session list - 列出当前聊天的历史 ACP 会话",
 			"/session resume <index> - 恢复 /session list 中的指定会话",
 			"/session title <title> - 设置当前 ACP 会话标题",
+			"/session fork [--force] [标题] [mentions...] - 从最后一个完整 turn 创建独立分支",
+			"/session fork retry - 在分支目标位置重试上下文接续",
 		},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
 			return s.handleSessionCommand(ctx, text, msg)

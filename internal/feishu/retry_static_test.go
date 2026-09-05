@@ -22,6 +22,7 @@ func TestNonIdempotentMessageSendPathsDoNotUseRetryHelper(t *testing.T) {
 		"ReplyPostMessage":            true,
 		"SendChatImageMessage":        true,
 		"ReplyImageMessage":           true,
+		"SendShareChatMessage":        true,
 		"UploadImage":                 true,
 		"sendInteractiveCard":         true,
 		"sendInteractiveCardToOpenID": true,

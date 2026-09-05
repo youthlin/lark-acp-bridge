@@ -16,6 +16,10 @@ func (s *Service) createSession(ctx context.Context, fields []string, msg feishu
 	return s.conversationManager.createSession(ctx, fields, msg)
 }
 
+func (s *Service) createForkSession(ctx context.Context, target feishu.Message, source Session, origin SessionForkOrigin, title string) (Session, config.AgentConfig, error) {
+	return s.conversationManager.createForkSession(ctx, target, source, origin, title)
+}
+
 func (s *Service) inheritNewSessionConfig(ctx context.Context, msg feishu.Message, session Session, inherited inheritedSessionConfig) Session {
 	return s.conversationManager.inheritNewSessionConfig(ctx, msg, session, inherited)
 }

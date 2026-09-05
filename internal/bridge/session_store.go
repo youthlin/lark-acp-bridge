@@ -186,6 +186,22 @@ func (s *SessionStore) Upsert(session Session) error {
 	return s.writeOrRestoreLocked(snapshot)
 }
 
+func (s *SessionStore) InsertIfAbsent(session Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session = normalizeSessionForStore(session)
+	if !session.Key.Valid() {
+		return fmt.Errorf("会话 key 不能为空")
+	}
+	if _, ok := s.sessions[session.Key]; ok {
+		return fmt.Errorf("目标位置已经存在 ACP session")
+	}
+	snapshot := s.snapshotLocked()
+	s.upsertSessionLocked(session, time.Now())
+	return s.writeOrRestoreLocked(snapshot)
+}
+
 func (s *SessionStore) UpsertWithDefaultTitle(session Session) (Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1066,6 +1082,10 @@ func cloneSession(session Session) Session {
 		mode := *session.Mode
 		mode.AvailableModes = append([]acp.SessionMode(nil), session.Mode.AvailableModes...)
 		session.Mode = &mode
+	}
+	if session.ForkOrigin != nil {
+		origin := *session.ForkOrigin
+		session.ForkOrigin = &origin
 	}
 	return session
 }

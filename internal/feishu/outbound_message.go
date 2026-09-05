@@ -155,6 +155,53 @@ func (a *Adapter) ReplyTextMessage(ctx context.Context, msg Message, text string
 	return sentMessageFromReplyResp(resp, msg), nil
 }
 
+func (a *Adapter) SendShareChatMessage(ctx context.Context, msg Message, chatID string) (SentMessage, error) {
+	if a.client == nil {
+		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return SentMessage{}, fmt.Errorf("飞书 chat_id 为空")
+	}
+	content, err := json.Marshal(map[string]string{"chat_id": chatID})
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("编码飞书群名片内容: %w", err)
+	}
+	if strings.TrimSpace(msg.MessageID) != "" {
+		replyInThread := replyInThreadForMessage(msg)
+		resp, err := a.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+			MessageId(msg.MessageID).
+			Body(&larkim.ReplyMessageReqBody{
+				Content:       larkcore.StringPtr(string(content)),
+				MsgType:       larkcore.StringPtr("share_chat"),
+				ReplyInThread: &replyInThread,
+			}).
+			Build())
+		if err != nil {
+			return SentMessage{}, fmt.Errorf("调用飞书回复群名片接口: %w", err)
+		}
+		if !resp.Success() {
+			return SentMessage{}, fmt.Errorf("飞书回复群名片接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		return sentMessageFromReplyResp(resp, msg), nil
+	}
+	resp, err := a.client.Im.V1.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(msg.ChatID).
+			MsgType("share_chat").
+			Content(string(content)).
+			Build()).
+		Build())
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("调用飞书发送群名片接口: %w", err)
+	}
+	if !resp.Success() {
+		return SentMessage{}, fmt.Errorf("飞书发送群名片接口返回错误: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return sentMessageFromCreateResp(resp, msg.ChatID, msg.ChatType), nil
+}
+
 func (a *Adapter) ReplyPostMessage(ctx context.Context, msg Message, blocks []outboundBlock) (SentMessage, error) {
 	if a.client == nil {
 		return SentMessage{}, fmt.Errorf("飞书客户端未初始化")

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -37,6 +38,8 @@ type serviceStores struct {
 	usageStores          map[string]*TokenUsageStore
 	traceStoreMu         sync.RWMutex
 	traceStores          map[string]*traceStore
+	forkStoreMu          sync.Mutex
+	forkStores           map[string]*forkOperationStore
 	companionStateStores map[string]*wikiStateStore // key=规范化 workspace 路径
 	wikiCoordinators     map[string]*wikiCoordinator
 	meetingStores        map[string]*MeetingStore
@@ -82,6 +85,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		serviceStores: serviceStores{
 			usageStores:          make(map[string]*TokenUsageStore),
 			traceStores:          make(map[string]*traceStore),
+			forkStores:           make(map[string]*forkOperationStore),
 			companionStateStores: make(map[string]*wikiStateStore),
 			wikiCoordinators:     make(map[string]*wikiCoordinator),
 			meetingStores:        make(map[string]*MeetingStore),
@@ -161,6 +165,14 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 			)
 			trace := newTraceStore(bot.Workspace, bot.Trace)
 			s.setTraceStore(bot.ID, trace)
+			forkStore := newForkOperationStore(bot.Workspace)
+			if err := forkStore.Load(); err != nil {
+				slog.Warn("加载 session fork 操作记录失败", "bot", displayBotID(bot.ID), "错误", err)
+			}
+			if err := forkStore.RecoverInterrupted(); err != nil {
+				slog.Warn("恢复中断的 session fork 操作失败", "bot", displayBotID(bot.ID), "错误", err)
+			}
+			s.forkStores[workspaceKey] = forkStore
 			if coordinator := newWikiCoordinator(s, bot, trace, state); coordinator != nil {
 				s.wikiCoordinators[strings.TrimSpace(bot.ID)] = coordinator
 				trace.canPrune = coordinator.canPruneTrace
@@ -173,6 +185,18 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		s.conversationManager.setStore("", store)
 		if strings.TrimSpace(store.path) != "" {
 			s.usageStores[""] = NewTokenUsageStore(sessionStoreSiblingPath(store.path, "token_usage.json"))
+			workspace := filepath.Dir(filepath.Dir(store.path))
+			if filepath.Base(filepath.Dir(store.path)) != workspaceLocalDir {
+				workspace = filepath.Dir(store.path)
+			}
+			forkStore := newForkOperationStore(workspace)
+			if err := forkStore.Load(); err != nil {
+				slog.Warn("加载 session fork 操作记录失败", "workspace", workspace, "错误", err)
+			}
+			if err := forkStore.RecoverInterrupted(); err != nil {
+				slog.Warn("恢复中断的 session fork 操作失败", "workspace", workspace, "错误", err)
+			}
+			s.forkStores[normalizeWorkspaceLockPath(workspace)] = forkStore
 		}
 	}
 	return s
@@ -256,6 +280,9 @@ func (s *Service) HandleFeishuMessage(ctx context.Context, msg feishu.Message) (
 	}
 	if errText := s.ensureIncomingWorkspace(ctx, incoming.msg, incoming.text); errText != "" {
 		return errText, nil
+	}
+	if notice := s.forkTargetGuard(incoming.msg, incoming.text); notice != "" {
+		return notice, nil
 	}
 	if incoming.promptText == "" {
 		if s.shouldSilenceAtAutoUnsupported(incoming.msg) {

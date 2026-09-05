@@ -63,6 +63,18 @@ type MessageSessionBinding struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
+type SessionForkOrigin struct {
+	ForkID               string     `json:"fork_id,omitempty"`
+	SourceKey            SessionKey `json:"source_key"`
+	SourceACPSessionID   string     `json:"source_acp_session_id"`
+	SourceMessageID      string     `json:"source_message_id,omitempty"`
+	SourceSnapshotSeq    uint64     `json:"source_snapshot_seq,omitempty"`
+	SourceCutoffSeq      uint64     `json:"source_cutoff_seq,omitempty"`
+	ForkCommandMessageID string     `json:"fork_command_message_id,omitempty"`
+	Forced               bool       `json:"forced,omitempty"`
+	ForkedAt             time.Time  `json:"forked_at"`
+}
+
 type Session struct {
 	Key               SessionKey                `json:"key"`
 	Title             string                    `json:"title,omitempty"`
@@ -92,6 +104,7 @@ type Session struct {
 	ConfigOptions     []acp.SessionConfigOption `json:"config_options,omitempty"`
 	Models            *acp.SessionModelState    `json:"models,omitempty"`
 	Mode              *acp.SessionModeState     `json:"mode,omitempty"`
+	ForkOrigin        *SessionForkOrigin        `json:"fork_origin,omitempty"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	UpdatedAt         time.Time                 `json:"updated_at"`
 }
