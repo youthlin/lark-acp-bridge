@@ -42,13 +42,15 @@ type MeetingEvent struct {
 }
 
 type MeetingTodo struct {
-	ID         string `json:"id"`
-	Content    string `json:"content"`
-	Assignee   string `json:"assignee,omitempty"`
-	DueAt      string `json:"due_at,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Confidence string `json:"confidence,omitempty"`
-	Evidence   string `json:"evidence,omitempty"`
+	ID             string `json:"id"`
+	Content        string `json:"content"`
+	Assignee       string `json:"assignee,omitempty"`
+	DueAt          string `json:"due_at,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+	Evidence       string `json:"evidence,omitempty"`
+	EvidenceStatus string `json:"evidence_status,omitempty"`
+	EvidenceError  string `json:"evidence_error,omitempty"`
 }
 
 type MeetingDocument struct {
@@ -334,6 +336,10 @@ func normalizeMeetingMinutes(minutes MeetingMinutes) MeetingMinutes {
 	}
 	if minutes.Todos == nil {
 		minutes.Todos = []MeetingTodo{}
+	}
+	for i := range minutes.Todos {
+		minutes.Todos[i].EvidenceStatus = strings.TrimSpace(minutes.Todos[i].EvidenceStatus)
+		minutes.Todos[i].EvidenceError = strings.TrimSpace(minutes.Todos[i].EvidenceError)
 	}
 	if minutes.Risks == nil {
 		minutes.Risks = []string{}

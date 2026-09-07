@@ -260,9 +260,12 @@ func TestParseMeetingActivitiesExtractsTranscriptAndChatIDs(t *testing.T) {
 func TestMeetingCardJSONShowsFinalMinutes(t *testing.T) {
 	card := newMeetingCardJSON(MeetingCardView{
 		Topic: "发布会", MeetingNo: "123456789", Status: "completed", Summary: []string{"确认上线"},
-		Todos: []MeetingCardTodo{{Content: "准备发布", Assignee: "小王", DueAt: "周五"}}, UpdatedAt: "15:24",
+		Todos: []MeetingCardTodo{{
+			ID: "todo-2", Content: "准备发布", Assignee: "小王", DueAt: "周五", Evidence: "小王周五前准备发布",
+			EvidenceStatus: "failed", EvidenceError: "校验不通过，会议原文没有这句话",
+		}}, UpdatedAt: "15:24",
 	})
-	for _, want := range []string{"发布会", "会议已结束，可转发", "确认上线", "准备发布", "小王", "周五", "最近更新：15:24"} {
+	for _, want := range []string{"发布会", "会议已结束，可转发", "确认上线", "todo#2: 准备发布", "小王", "周五", "依据：小王周五前准备发布", "校验不通过，会议原文没有这句话", "最近更新：15:24"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("card JSON = %s, want %q", card, want)
 		}

@@ -139,7 +139,21 @@ func meetingCardTodoSection(todos []MeetingCardTodo) cardJSON {
 		if value := strings.TrimSpace(todo.DueAt); value != "" {
 			detail = append(detail, "截止："+value)
 		}
-		line := "- " + strings.TrimSpace(todo.Content)
+		if strings.EqualFold(strings.TrimSpace(todo.EvidenceStatus), "failed") {
+			if value := strings.TrimSpace(todo.Evidence); value != "" {
+				detail = append(detail, "依据："+value)
+			}
+			reason := strings.TrimSpace(todo.EvidenceError)
+			if reason == "" {
+				reason = "校验不通过"
+			}
+			detail = append(detail, reason)
+		}
+		prefix := "- "
+		if id := meetingCardTodoLabel(todo.ID); id != "" {
+			prefix += id + ": "
+		}
+		line := prefix + strings.TrimSpace(todo.Content)
 		if len(detail) > 0 {
 			line += "（" + strings.Join(detail, "；") + "）"
 		}
@@ -149,6 +163,31 @@ func meetingCardTodoSection(todos []MeetingCardTodo) cardJSON {
 		lines = append(lines, "暂无明确 TODO。")
 	}
 	return meetingCardMarkdown("**TODO**\n" + strings.Join(lines, "\n"))
+}
+
+func meetingCardTodoLabel(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	for _, prefix := range []string{"todo-", "todo_"} {
+		if suffix, ok := strings.CutPrefix(id, prefix); ok && allASCIIDigits(suffix) {
+			return "todo#" + suffix
+		}
+	}
+	return id
+}
+
+func allASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func meetingCardTimeText(view MeetingCardView) string {

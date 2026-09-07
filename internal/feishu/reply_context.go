@@ -60,9 +60,13 @@ type MeetingCardView struct {
 }
 
 type MeetingCardTodo struct {
-	Content  string
-	Assignee string
-	DueAt    string
+	ID             string
+	Content        string
+	Assignee       string
+	DueAt          string
+	Evidence       string
+	EvidenceStatus string
+	EvidenceError  string
 }
 
 type OutboundRenderContext struct {

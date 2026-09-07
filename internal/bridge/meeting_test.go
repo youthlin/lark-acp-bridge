@@ -269,6 +269,135 @@ func TestMeetingCoordinatorFinalFlushCompletesAndPersistsMinutes(t *testing.T) {
 	}
 }
 
+func TestMeetingCoordinatorPersistsTodoWithFailedEvidence(t *testing.T) {
+	workspace := t.TempDir()
+	svc := newMeetingTestService(t, workspace)
+	runtime := &fakeRuntime{
+		newSessionID: "acp-meeting",
+		promptReply:  `{"summary":["确认本周上线"],"decisions":[],"todos":[{"id":"todo-1","content":"准备发布","assignee":"小王","due_at":"周五","status":"open","confidence":"explicit","evidence":"小王周五前准备发布"},{"id":"todo-2","content":"补充验收","status":"open","confidence":"explicit","evidence":"小李下周验收"}],"risks":[],"open_questions":[],"shared_documents":[]}`,
+	}
+	svc.setRuntime(runtime)
+	store := svc.meetingStore("bot-a")
+	state, err := store.Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", Topic: "发布会", RecipientOpenID: "ou_owner",
+		Status: meetingStatusActive, PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "小王周五前准备发布"}},
+		SeenKeys: []string{"transcript:s1"}, Card: MeetingCardState{CardID: "card-1", MessageID: "msg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound := &fakeMeetingOutbound{}
+	svc.setOutbound("bot-a", outbound)
+	coordinator := &meetingCoordinator{service: svc, store: store, key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
+	coordinator.flush(context.Background(), state)
+	got, _ := store.Get("meeting-1")
+	if got.LastError != "" || got.RetryCount != 0 || len(got.PendingEvents) != 0 {
+		t.Fatalf("meeting state = %+v, want successful flush despite one failed todo evidence", got)
+	}
+	if len(got.Minutes.Todos) != 2 || got.Minutes.Todos[0].EvidenceStatus != meetingTodoEvidenceVerified ||
+		got.Minutes.Todos[1].EvidenceStatus != meetingTodoEvidenceFailed ||
+		!strings.Contains(got.Minutes.Todos[1].EvidenceError, "校验不通过") {
+		t.Fatalf("todos = %+v, want failed evidence marked on one todo", got.Minutes.Todos)
+	}
+	if outbound.card == nil || len(outbound.card.updates) != 1 ||
+		len(outbound.card.updates[0].Todos) != 2 ||
+		outbound.card.updates[0].Todos[1].EvidenceStatus != meetingTodoEvidenceFailed {
+		t.Fatalf("card updates = %+v, want marked failed todo rendered", outbound.card)
+	}
+}
+
+func TestMeetingCoordinatorStopsFinalFlushAfterRetryLimit(t *testing.T) {
+	svc := newMeetingTestService(t, t.TempDir())
+	runtime := &fakeRuntime{
+		newSessionID: "acp-meeting",
+		promptReply:  `{"summary":[],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[{"title":"未知文档","url":"https://invalid.example/doc"}]}`,
+	}
+	svc.setRuntime(runtime)
+	store := svc.meetingStore("bot-a")
+	state, err := store.Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", Topic: "发布会", RecipientOpenID: "ou_owner",
+		Status: meetingStatusFinalFailed, RetryCount: defaultMeetingFinalMaxTries - 1, LastFlushAt: time.Now().Add(-time.Hour),
+		PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "小王周五前准备发布"}},
+		SeenKeys:      []string{"transcript:s1"}, Card: MeetingCardState{CardID: "card-1", MessageID: "msg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound := &fakeMeetingOutbound{}
+	svc.setOutbound("bot-a", outbound)
+	coordinator := &meetingCoordinator{service: svc, store: store, key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
+	if !coordinator.shouldFlush(state, time.Now()) {
+		t.Fatal("shouldFlush() = false before the final retry is attempted")
+	}
+	coordinator.flush(context.Background(), state)
+	got, _ := store.Get("meeting-1")
+	if got.Status != meetingStatusCompleted || got.CompletedAt.IsZero() || len(got.PendingEvents) != 0 {
+		t.Fatalf("meeting state = %+v, want terminal completed state without pending events", got)
+	}
+	if got.RetryCount != defaultMeetingFinalMaxTries || !strings.Contains(got.LastError, "已停止自动重试") || !strings.Contains(got.LastError, "shared_documents") {
+		t.Fatalf("meeting error state = %+v, want stopped retry error", got)
+	}
+	if meetingStateIncomplete(got) {
+		t.Fatalf("meetingStateIncomplete(%+v) = true, want restored coordinator to stop", got)
+	}
+	if len(runtime.promptCallsSnapshot()) != 1 {
+		t.Fatalf("prompt calls = %+v, want one final retry attempt", runtime.promptCallsSnapshot())
+	}
+}
+
+func TestMeetingCoordinatorStopsPersistedFinalFailureWithoutPrompting(t *testing.T) {
+	svc := newMeetingTestService(t, t.TempDir())
+	runtime := &fakeRuntime{promptReply: "should not run"}
+	svc.setRuntime(runtime)
+	store := svc.meetingStore("bot-a")
+	state, err := store.Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", Topic: "发布会", RecipientOpenID: "ou_owner",
+		Status: meetingStatusFinalFailed, RetryCount: defaultMeetingFinalMaxTries, LastError: "旧错误",
+		PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "待整理内容"}},
+		SeenKeys:      []string{"transcript:s1"}, Card: MeetingCardState{CardID: "card-1", MessageID: "msg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.setOutbound("bot-a", &fakeMeetingOutbound{})
+	coordinator := &meetingCoordinator{service: svc, store: store, key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
+	if coordinator.shouldFlush(state, time.Now().Add(time.Hour)) {
+		t.Fatal("shouldFlush() = true for exhausted final failure")
+	}
+	coordinator.stopFinalRetry(context.Background(), state)
+	got, _ := store.Get("meeting-1")
+	if got.Status != meetingStatusCompleted || got.CompletedAt.IsZero() || len(got.PendingEvents) != 0 || !strings.Contains(got.LastError, "旧错误") {
+		t.Fatalf("meeting state = %+v, want stopped terminal state with original error", got)
+	}
+	if len(runtime.promptCallsSnapshot()) != 0 {
+		t.Fatalf("prompt calls = %+v, want no prompt for already exhausted final failure", runtime.promptCallsSnapshot())
+	}
+}
+
+func TestHandleMeetingEndedDoesNotReopenFinalFailedMeeting(t *testing.T) {
+	svc := newMeetingTestService(t, t.TempDir())
+	defer stopMeetingTestService(svc)
+	store := svc.meetingStore("bot-a")
+	lastFlushAt := time.Now()
+	if _, err := store.Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", RecipientOpenID: "ou_owner",
+		Status: meetingStatusFinalFailed, RetryCount: 1, LastFlushAt: lastFlushAt, LastError: "整理失败",
+		PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "待整理内容"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.HandleMeetingEnded(context.Background(), feishu.MeetingEnded{
+		BotID:   "bot-a",
+		Meeting: feishu.MeetingInfo{ID: "meeting-1", EndTime: time.Now().Format(time.RFC3339Nano)},
+	}, &fakeMeetingOutbound{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get("meeting-1")
+	if got.Status != meetingStatusFinalFailed || got.RetryCount != 1 || got.LastFlushAt != lastFlushAt {
+		t.Fatalf("meeting state = %+v, want duplicate ended event to preserve final_failed retry state", got)
+	}
+}
+
 func TestMeetingPromptMergesSpeechAndHidesInternalEventFields(t *testing.T) {
 	prompt := meetingPrompt(MeetingState{
 		MeetingID:       "meeting-1",
@@ -529,17 +658,62 @@ func TestValidateMeetingMinutesRequiresTraceableEvidenceAndDocuments(t *testing.
 		Todos:           []MeetingTodo{{ID: "todo-1", Content: "准备发布", Confidence: "explicit", Evidence: "小王周五前准备发布"}},
 		SharedDocuments: []MeetingDocument{{Title: "发布文档", URL: "https://example.com/release"}},
 	}
-	if err := validateMeetingMinutes(MeetingMinutes{}, events, valid); err != nil {
+	validated, err := validateMeetingMinutes(MeetingMinutes{}, events, valid)
+	if err != nil {
 		t.Fatalf("validateMeetingMinutes(valid) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceVerified {
+		t.Fatalf("validated todo = %+v, want verified", validated.Todos[0])
+	}
+	splitEvidence := valid
+	splitEvidence.Todos = []MeetingTodo{{ID: "todo-1", Content: "准备发布", Confidence: "explicit", Evidence: "小王周五前准备发布 / 文档 https://example.com/release"}}
+	validated, err = validateMeetingMinutes(MeetingMinutes{}, events, splitEvidence)
+	if err != nil {
+		t.Fatalf("validateMeetingMinutes(split evidence) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceVerified {
+		t.Fatalf("validated split todo = %+v, want verified", validated.Todos[0])
+	}
+	spacedEvidence := MeetingMinutes{}
+	spacedEvidence.Todos = []MeetingTodo{{ID: "todo-1", Content: "跟进验收", Confidence: "explicit", Evidence: "这个是不是验收了没有？没做呢 / 那这周跟进一下，验收一下呗"}}
+	spacedEvents := []MeetingEvent{{Text: "这个是不是验收了没有？ 没做呢。那这周跟进一下，验收一下呗。"}}
+	validated, err = validateMeetingMinutes(MeetingMinutes{}, spacedEvents, spacedEvidence)
+	if err != nil {
+		t.Fatalf("validateMeetingMinutes(spaced evidence) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceVerified {
+		t.Fatalf("validated spaced todo = %+v, want verified", validated.Todos[0])
 	}
 	invalidEvidence := valid
 	invalidEvidence.Todos = []MeetingTodo{{ID: "todo-1", Content: "准备发布", Confidence: "explicit", Evidence: "小李下周发布"}}
-	if err := validateMeetingMinutes(MeetingMinutes{}, events, invalidEvidence); err == nil {
-		t.Fatal("validateMeetingMinutes() accepted fabricated evidence")
+	validated, err = validateMeetingMinutes(MeetingMinutes{}, events, invalidEvidence)
+	if err != nil {
+		t.Fatalf("validateMeetingMinutes(invalid evidence) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceFailed || !strings.Contains(validated.Todos[0].EvidenceError, "校验不通过") {
+		t.Fatalf("validated invalid todo = %+v, want failed evidence marker", validated.Todos[0])
+	}
+	invalidSplitEvidence := valid
+	invalidSplitEvidence.Todos = []MeetingTodo{{ID: "todo-1", Content: "准备发布", Confidence: "explicit", Evidence: "小王周五前准备发布 / 小李下周发布"}}
+	validated, err = validateMeetingMinutes(MeetingMinutes{}, events, invalidSplitEvidence)
+	if err != nil {
+		t.Fatalf("validateMeetingMinutes(invalid split evidence) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceFailed || !strings.Contains(validated.Todos[0].EvidenceError, "校验不通过") {
+		t.Fatalf("validated invalid split todo = %+v, want failed evidence marker", validated.Todos[0])
+	}
+	inferredTodo := valid
+	inferredTodo.Todos = []MeetingTodo{{ID: "todo-1", Content: "准备发布", Confidence: "inferred", Evidence: "猜测"}}
+	validated, err = validateMeetingMinutes(MeetingMinutes{}, events, inferredTodo)
+	if err != nil {
+		t.Fatalf("validateMeetingMinutes(inferred todo) error = %v", err)
+	}
+	if validated.Todos[0].EvidenceStatus != meetingTodoEvidenceFailed || !strings.Contains(validated.Todos[0].EvidenceError, "不是明确行动项") {
+		t.Fatalf("validated inferred todo = %+v, want failed confidence marker", validated.Todos[0])
 	}
 	invalidDocument := valid
 	invalidDocument.SharedDocuments = []MeetingDocument{{Title: "未知文档", URL: "https://invalid.example/doc"}}
-	if err := validateMeetingMinutes(MeetingMinutes{}, events, invalidDocument); err == nil {
+	if _, err := validateMeetingMinutes(MeetingMinutes{}, events, invalidDocument); err == nil {
 		t.Fatal("validateMeetingMinutes() accepted unsupported document")
 	}
 }
@@ -547,7 +721,6 @@ func TestValidateMeetingMinutesRequiresTraceableEvidenceAndDocuments(t *testing.
 func TestParseMeetingMinutesRejectsUnsupportedOutput(t *testing.T) {
 	tests := []string{
 		`{"summary":[],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[],"extra":true}`,
-		`{"summary":[],"decisions":[],"todos":[{"id":"todo-1","content":"上线","confidence":"inferred","evidence":"猜测"}],"risks":[],"open_questions":[],"shared_documents":[]}`,
 		`{"summary":[],"decisions":[],"todos":[],"risks":[],"open_questions":[]}`,
 		`{"summary":null,"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[]}`,
 		`not json`,

@@ -8,6 +8,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+)
+
+const (
+	meetingTodoEvidenceVerified = "verified"
+	meetingTodoEvidenceFailed   = "failed"
+
+	meetingTodoEvidenceMissingSource = "校验不通过，会议原文没有这句话"
 )
 
 type meetingPromptInput struct {
@@ -36,7 +44,7 @@ func meetingPrompt(state MeetingState, events []MeetingEvent, final bool) string
 	input.Meeting.MeetingNo = state.MeetingNo
 	input.Meeting.Recipient = participantDisplayName(state.RecipientOpenID, state.Participants)
 	input.Meeting.Participants = meetingParticipantNames(state.Participants)
-	input.Previous = normalizeMeetingMinutes(state.Minutes)
+	input.Previous = meetingMinutesForPrompt(state.Minutes)
 	input.NewTranscript, input.NewChat, input.NewDocuments = meetingPromptEvents(events)
 	input.MeetingEnded = final
 	payload, _ := json.MarshalIndent(input, "", "  ")
@@ -45,7 +53,7 @@ func meetingPrompt(state MeetingState, events []MeetingEvent, final bool) string
 		"只允许使用输入中明确出现的信息，不得虚构决策、负责人、截止时间或完成状态。",
 		"meeting_ended=false 表示会议仍在进行，只做增量更新；meeting_ended=true 才是会议结束后的最终纪要。",
 		"参会人入会/离会、开始或停止录制、共享或停止共享屏幕、邀请或移出智能体等会议操作或系统噪声，不要写入 summary、decisions、risks 或 open_questions，除非发言者明确把它作为会议议题、结论、风险或行动项讨论。",
-		"TODO 只有在会议中明确提出行动项时才记录；confidence 使用 explicit，evidence 必须引用简短原话。不能确认的内容放入 open_questions。",
+		"TODO 只有在会议中明确提出行动项时才记录；confidence 使用 explicit，evidence 必须引用简短原话；如需引用多段原话，可用 / 分隔。不能确认的内容放入 open_questions。",
 		"recipient 是纪要接收人；若会议明确给他分配行动项，请使用对应姓名作为 assignee。不要仅因其是接收人就创建 TODO。",
 		"保留仍然有效的上一版内容，合并重复项；todos.id 在后续批次保持稳定。",
 		"shared_documents 只记录输入里实际出现的文档。",
@@ -197,14 +205,22 @@ func parseMeetingMinutes(text string) (MeetingMinutes, error) {
 		todo.Status = strings.TrimSpace(todo.Status)
 		todo.Confidence = strings.ToLower(strings.TrimSpace(todo.Confidence))
 		todo.Evidence = strings.TrimSpace(todo.Evidence)
+		todo.EvidenceStatus = strings.TrimSpace(todo.EvidenceStatus)
+		todo.EvidenceError = strings.TrimSpace(todo.EvidenceError)
 		if todo.ID == "" || todo.Content == "" {
 			return MeetingMinutes{}, fmt.Errorf("会议纪要 todos[%d] 缺少 id 或 content", i)
 		}
-		if todo.Confidence != "explicit" || todo.Evidence == "" {
-			return MeetingMinutes{}, fmt.Errorf("会议纪要 todos[%d] 缺少明确证据", i)
-		}
 	}
 	return minutes, nil
+}
+
+func meetingMinutesForPrompt(minutes MeetingMinutes) MeetingMinutes {
+	minutes = normalizeMeetingMinutes(minutes)
+	for i := range minutes.Todos {
+		minutes.Todos[i].EvidenceStatus = ""
+		minutes.Todos[i].EvidenceError = ""
+	}
+	return minutes
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -217,9 +233,12 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return fmt.Errorf("会议纪要 JSON 后存在额外内容")
 }
 
-func validateMeetingMinutes(previous MeetingMinutes, events []MeetingEvent, minutes MeetingMinutes) error {
+func validateMeetingMinutes(previous MeetingMinutes, events []MeetingEvent, minutes MeetingMinutes) (MeetingMinutes, error) {
 	evidenceSources := make([]string, 0, len(previous.Todos)+len(events))
 	for _, todo := range previous.Todos {
+		if strings.EqualFold(strings.TrimSpace(todo.EvidenceStatus), meetingTodoEvidenceFailed) {
+			continue
+		}
 		if evidence := strings.TrimSpace(todo.Evidence); evidence != "" {
 			evidenceSources = append(evidenceSources, evidence)
 		}
@@ -250,29 +269,126 @@ func validateMeetingMinutes(previous MeetingMinutes, events []MeetingEvent, minu
 	seenTodoIDs := make(map[string]struct{}, len(minutes.Todos))
 	for i, todo := range minutes.Todos {
 		if _, duplicate := seenTodoIDs[todo.ID]; duplicate {
-			return fmt.Errorf("会议纪要 todos[%d] 的 id 重复: %s", i, todo.ID)
+			return MeetingMinutes{}, fmt.Errorf("会议纪要 todos[%d] 的 id 重复: %s", i, todo.ID)
 		}
 		seenTodoIDs[todo.ID] = struct{}{}
-		if !containedInMeetingSources(todo.Evidence, evidenceSources) {
-			return fmt.Errorf("会议纪要 todos[%d] 的 evidence 无法回溯到会议原话", i)
-		}
+		validateMeetingTodoEvidence(&minutes.Todos[i], evidenceSources)
 	}
 	for i, doc := range minutes.SharedDocuments {
 		if !meetingDocumentSupported(doc, documentSources, events) {
-			return fmt.Errorf("会议纪要 shared_documents[%d] 无法回溯到会议事件", i)
+			return MeetingMinutes{}, fmt.Errorf("会议纪要 shared_documents[%d] 无法回溯到会议事件", i)
 		}
 	}
-	return nil
+	return minutes, nil
+}
+
+func validateMeetingTodoEvidence(todo *MeetingTodo, evidenceSources []string) {
+	if todo == nil {
+		return
+	}
+	if todo.Confidence != "explicit" {
+		markMeetingTodoEvidenceFailed(todo, "校验不通过，TODO 不是明确行动项")
+		return
+	}
+	if todo.Evidence == "" {
+		markMeetingTodoEvidenceFailed(todo, "校验不通过，缺少依据")
+		return
+	}
+	if !containedInMeetingSources(todo.Evidence, evidenceSources) {
+		markMeetingTodoEvidenceFailed(todo, meetingTodoEvidenceMissingSource)
+		return
+	}
+	todo.EvidenceStatus = meetingTodoEvidenceVerified
+	todo.EvidenceError = ""
+}
+
+func markMeetingTodoEvidenceFailed(todo *MeetingTodo, reason string) {
+	todo.EvidenceStatus = meetingTodoEvidenceFailed
+	todo.EvidenceError = strings.TrimSpace(reason)
 }
 
 func containedInMeetingSources(value string, sources []string) bool {
 	value = strings.TrimSpace(value)
+	if containedInAnyMeetingSource(value, sources) {
+		return true
+	}
+	parts := splitMeetingEvidence(value)
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if !containedInAnyMeetingSource(part, sources) {
+			return false
+		}
+	}
+	return true
+}
+
+func containedInAnyMeetingSource(value string, sources []string) bool {
+	value = normalizeMeetingEvidenceText(value)
+	if value == "" {
+		return false
+	}
+	compactValue := compactMeetingEvidenceText(value)
 	for _, source := range sources {
-		if strings.Contains(source, value) {
+		normalizedSource := normalizeMeetingEvidenceText(source)
+		if strings.Contains(normalizedSource, value) ||
+			(compactValue != "" && strings.Contains(compactMeetingEvidenceText(normalizedSource), compactValue)) {
 			return true
 		}
 	}
 	return false
+}
+
+func splitMeetingEvidence(value string) []string {
+	runes := []rune(value)
+	parts := []string{}
+	var current strings.Builder
+	for i, r := range runes {
+		if isMeetingEvidenceSeparator(runes, i) {
+			parts = append(parts, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteRune(r)
+	}
+	parts = append(parts, current.String())
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(part, " \t\"'“”‘’")
+		if len([]rune(part)) < 2 {
+			return nil
+		}
+		cleaned = append(cleaned, part)
+	}
+	return cleaned
+}
+
+func isMeetingEvidenceSeparator(runes []rune, index int) bool {
+	switch runes[index] {
+	case '／', '｜', ';', '；', '\n', '\r':
+		return true
+	case '/', '|':
+		return index > 0 && unicode.IsSpace(runes[index-1]) &&
+			index+1 < len(runes) && unicode.IsSpace(runes[index+1])
+	default:
+		return false
+	}
+}
+
+func normalizeMeetingEvidenceText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func compactMeetingEvidenceText(value string) string {
+	var builder strings.Builder
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
 }
 
 func meetingDocumentSupported(doc MeetingDocument, sources []MeetingDocument, events []MeetingEvent) bool {

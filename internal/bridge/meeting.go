@@ -204,9 +204,22 @@ func (s *Service) HandleMeetingEnded(ctx context.Context, ended feishu.MeetingEn
 		if state.Status == meetingStatusCompleted || state.Status == meetingStatusFailed {
 			return nil
 		}
-		state.Status = meetingStatusEnding
 		mergeMeetingInfo(state, ended.Meeting)
-		state.EndedAt = parseMeetingTime(ended.Meeting.EndTime)
+		endedAt := parseMeetingTime(ended.Meeting.EndTime)
+		if endedAt.IsZero() {
+			endedAt = time.Now()
+		}
+		if state.EndedAt.IsZero() || endedAt.After(state.EndedAt) {
+			state.EndedAt = endedAt
+		}
+		if state.Status == meetingStatusFinalFailed {
+			if state.FinalizeAfter.IsZero() {
+				state.FinalizeAfter = time.Now()
+			}
+			state.Card.Dirty = true
+			return nil
+		}
+		state.Status = meetingStatusEnding
 		if state.EndedAt.IsZero() {
 			state.EndedAt = time.Now()
 		}

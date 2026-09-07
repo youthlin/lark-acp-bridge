@@ -18,6 +18,7 @@ const (
 	defaultMeetingJoinMaxAge    = 30 * time.Minute
 	defaultMeetingJoinMaxTries  = 6
 	defaultMeetingBackfillTries = 3
+	defaultMeetingFinalMaxTries = 3
 	meetingRetryBase            = 5 * time.Second
 	meetingRetryMax             = 2 * time.Minute
 )
@@ -88,6 +89,10 @@ func (c *meetingCoordinator) run(ctx context.Context, restored bool) {
 			c.failJoinPermanently(ctx, state, fmt.Errorf("机器人入会重试已达到上限"))
 			continue
 		}
+		if state.Status == meetingStatusFinalFailed && meetingFinalRetryExhausted(state) {
+			c.stopFinalRetry(ctx, state)
+			continue
+		}
 		if state.Status == meetingStatusJoining && c.shouldRetry(state, now) {
 			c.retryJoin(ctx, state)
 			continue
@@ -140,7 +145,8 @@ func (c *meetingCoordinator) shouldFlush(state MeetingState, now time.Time) bool
 			(state.BackfillAttempts == 0 || state.BackfillAttempts >= defaultMeetingBackfillTries)
 	}
 	if state.Status == meetingStatusFinalFailed {
-		return !now.Before(state.LastFlushAt.Add(meetingRetryDelay(state.RetryCount)))
+		return !meetingFinalRetryExhausted(state) &&
+			!now.Before(state.LastFlushAt.Add(meetingRetryDelay(state.RetryCount)))
 	}
 	if len(state.PendingEvents) == 0 {
 		return false
@@ -299,7 +305,8 @@ func (c *meetingCoordinator) flush(ctx context.Context, state MeetingState) {
 		c.recordFailure(ctx, state, err, final)
 		return
 	}
-	if err := validateMeetingMinutes(state.Minutes, batch, minutes); err != nil {
+	minutes, err = validateMeetingMinutes(state.Minutes, batch, minutes)
+	if err != nil {
 		c.recordFailure(ctx, state, err, final)
 		return
 	}
@@ -366,13 +373,24 @@ func (c *meetingCoordinator) triggerRequest(state MeetingState, batch []MeetingE
 }
 
 func (c *meetingCoordinator) recordFailure(ctx context.Context, state MeetingState, cause error, final bool) {
+	now := time.Now()
 	updated, _, err := c.store.Update(state.MeetingID, func(current *MeetingState) error {
+		if final && current.Status != meetingStatusFinalFailed {
+			current.RetryCount = 0
+		}
 		current.RetryCount++
 		current.LastError = cause.Error()
-		current.LastFlushAt = time.Now()
+		current.LastFlushAt = now
 		current.Card.Dirty = true
 		if final {
-			current.Status = meetingStatusFinalFailed
+			if meetingFinalRetryExhausted(*current) {
+				current.Status = meetingStatusCompleted
+				current.CompletedAt = now
+				current.PendingEvents = nil
+				current.LastError = meetingFinalRetryStoppedError(current.RetryCount, cause.Error())
+			} else {
+				current.Status = meetingStatusFinalFailed
+			}
 		}
 		return nil
 	})
@@ -380,6 +398,28 @@ func (c *meetingCoordinator) recordFailure(ctx context.Context, state MeetingSta
 		slog.ErrorContext(ctx, "保存会议整理失败状态失败", "错误", err)
 		return
 	}
+	if final && updated.Status == meetingStatusCompleted {
+		slog.ErrorContext(ctx, "最终会议纪要整理失败已停止自动重试", "meeting_id", state.MeetingID, "重试次数", updated.RetryCount, "错误", cause)
+	}
+	c.syncCard(ctx, updated)
+}
+
+func (c *meetingCoordinator) stopFinalRetry(ctx context.Context, state MeetingState) {
+	updated, _, err := c.store.Update(state.MeetingID, func(current *MeetingState) error {
+		current.Status = meetingStatusCompleted
+		if current.CompletedAt.IsZero() {
+			current.CompletedAt = time.Now()
+		}
+		current.PendingEvents = nil
+		current.LastError = meetingFinalRetryStoppedError(current.RetryCount, current.LastError)
+		current.Card.Dirty = true
+		return nil
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "保存最终会议纪要停止重试状态失败", "meeting_id", state.MeetingID, "错误", err)
+		return
+	}
+	slog.ErrorContext(ctx, "最终会议纪要整理失败已停止自动重试", "meeting_id", state.MeetingID, "重试次数", updated.RetryCount, "错误", updated.LastError)
 	c.syncCard(ctx, updated)
 }
 
@@ -592,6 +632,21 @@ func meetingJoinRetryExhausted(state MeetingState, now time.Time) bool {
 	return !started.IsZero() && now.Sub(started) >= defaultMeetingJoinMaxAge
 }
 
+func meetingFinalRetryExhausted(state MeetingState) bool {
+	return state.RetryCount >= defaultMeetingFinalMaxTries
+}
+
+func meetingFinalRetryStoppedError(retries int, cause string) string {
+	cause = strings.TrimSpace(cause)
+	if cause == "" {
+		return fmt.Sprintf("最终会议纪要整理连续失败 %d 次，已停止自动重试", retries)
+	}
+	if strings.Contains(cause, "已停止自动重试") {
+		return cause
+	}
+	return fmt.Sprintf("最终会议纪要整理连续失败 %d 次，已停止自动重试：%s", retries, cause)
+}
+
 func meetingCardView(state MeetingState) feishu.MeetingCardView {
 	view := feishu.MeetingCardView{
 		Topic:         state.Topic,
@@ -611,13 +666,15 @@ func meetingCardView(state MeetingState) feishu.MeetingCardView {
 		view.EndedAt = state.EndedAt.Local().Format("2006-01-02 15:04")
 	}
 	for _, todo := range state.Minutes.Todos {
-		if todo.Confidence == "explicit" {
-			view.Todos = append(view.Todos, feishu.MeetingCardTodo{
-				Content:  todo.Content,
-				Assignee: todo.Assignee,
-				DueAt:    todo.DueAt,
-			})
-		}
+		view.Todos = append(view.Todos, feishu.MeetingCardTodo{
+			ID:             todo.ID,
+			Content:        todo.Content,
+			Assignee:       todo.Assignee,
+			DueAt:          todo.DueAt,
+			Evidence:       todo.Evidence,
+			EvidenceStatus: todo.EvidenceStatus,
+			EvidenceError:  todo.EvidenceError,
+		})
 	}
 	for _, doc := range state.Minutes.SharedDocuments {
 		view.SharedDocuments = append(view.SharedDocuments, feishu.MeetingDocument{Title: doc.Title, URL: doc.URL})
