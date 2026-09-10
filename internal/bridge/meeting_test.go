@@ -306,6 +306,51 @@ func TestMeetingCoordinatorPersistsTodoWithFailedEvidence(t *testing.T) {
 	}
 }
 
+func TestMeetingCoordinatorFeedsFailureIntoNextIncrementalFlush(t *testing.T) {
+	svc := newMeetingTestService(t, t.TempDir())
+	runtime := &fakeRuntime{
+		newSessionID: "acp-meeting",
+		promptResults: []acp.PromptResult{
+			{Text: `{"summary":["确认上线"],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[{"title":"未知文档","url":"https://invalid.example/doc"}]}`},
+			{Text: `{"summary":["确认上线"],"decisions":[],"todos":[],"risks":[],"open_questions":[],"shared_documents":[]}`},
+		},
+	}
+	svc.setRuntime(runtime)
+	store := svc.meetingStore("bot-a")
+	state, err := store.Upsert(MeetingState{
+		BotID: "bot-a", MeetingID: "meeting-1", Topic: "发布会", RecipientOpenID: "ou_owner",
+		Status: meetingStatusActive, PendingEvents: []MeetingEvent{{Key: "transcript:s1", Type: feishu.MeetingActivityTranscript, Text: "小王确认上线"}},
+		SeenKeys: []string{"transcript:s1"}, Card: MeetingCardState{CardID: "card-1", MessageID: "msg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound := &fakeMeetingOutbound{}
+	svc.setOutbound("bot-a", outbound)
+	coordinator := &meetingCoordinator{service: svc, store: store, key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
+	coordinator.flush(context.Background(), state)
+	failed, _ := store.Get("meeting-1")
+	if failed.Status != meetingStatusActive || failed.RetryCount != 0 || failed.LastError == "" || len(failed.PendingEvents) != 1 {
+		t.Fatalf("meeting state after failed incremental flush = %+v, want active state with pending event and no backoff retry", failed)
+	}
+	if coordinator.shouldFlush(failed, failed.LastFlushAt.Add(time.Second)) {
+		t.Fatal("shouldFlush() = true immediately after failed incremental flush")
+	}
+	if !coordinator.shouldFlush(failed, failed.LastFlushAt.Add(defaultMeetingFlushInterval)) {
+		t.Fatal("shouldFlush() = false at normal interval after failed incremental flush")
+	}
+	coordinator.flush(context.Background(), failed)
+	got, _ := store.Get("meeting-1")
+	if got.LastError != "" || got.RetryCount != 0 || len(got.PendingEvents) != 0 || len(got.Minutes.SharedDocuments) != 0 {
+		t.Fatalf("meeting state after corrected incremental flush = %+v, want recovered successful state", got)
+	}
+	calls := runtime.promptCallsSnapshot()
+	if len(calls) != 2 || !strings.Contains(calls[1].Text, `"last_error": "会议纪要 shared_documents[0] 无法回溯到会议事件"`) ||
+		!strings.Contains(calls[1].Text, "上一轮输出未通过 bridge 校验") {
+		t.Fatalf("prompt calls = %+v, want previous validation error fed into next prompt", calls)
+	}
+}
+
 func TestMeetingCoordinatorStopsFinalFlushAfterRetryLimit(t *testing.T) {
 	svc := newMeetingTestService(t, t.TempDir())
 	runtime := &fakeRuntime{
@@ -782,10 +827,10 @@ func TestMeetingRetryAndCardRetryAreIndependent(t *testing.T) {
 	}
 	coordinator := &meetingCoordinator{service: svc, store: store, key: meetingKey{BotID: "bot-a", MeetingID: "meeting-1"}}
 	if coordinator.shouldFlush(state, now.Add(time.Second)) {
-		t.Fatal("shouldFlush() = true before retry delay")
+		t.Fatal("shouldFlush() = true before normal flush interval")
 	}
-	if !coordinator.shouldFlush(state, now.Add(meetingRetryDelay(2))) {
-		t.Fatal("shouldFlush() = false at retry deadline")
+	if !coordinator.shouldFlush(state, now.Add(defaultMeetingFlushInterval)) {
+		t.Fatal("shouldFlush() = false at normal flush interval")
 	}
 	svc.setOutbound("bot-a", &fakeMeetingOutbound{startError: errors.New("card unavailable")})
 	coordinator.syncCard(context.Background(), state)

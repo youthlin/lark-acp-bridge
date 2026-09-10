@@ -151,9 +151,6 @@ func (c *meetingCoordinator) shouldFlush(state MeetingState, now time.Time) bool
 	if len(state.PendingEvents) == 0 {
 		return false
 	}
-	if state.RetryCount > 0 {
-		return c.shouldRetry(state, now)
-	}
 	if meetingPendingTextLength(state.PendingEvents) >= defaultMeetingFlushChars {
 		return true
 	}
@@ -168,11 +165,7 @@ func (c *meetingCoordinator) nextWait(state MeetingState, now time.Time) time.Du
 	if state.Status == meetingStatusJoining {
 		waits = append(waits, durationUntilRetry(state.LastFlushAt, state.RetryCount, now))
 	} else if state.Status != meetingStatusEnding && len(state.PendingEvents) > 0 {
-		if state.RetryCount > 0 {
-			waits = append(waits, durationUntilRetry(state.LastFlushAt, state.RetryCount, now))
-		} else {
-			waits = append(waits, durationUntil(state.LastFlushAt.Add(defaultMeetingFlushInterval), now))
-		}
+		waits = append(waits, durationUntil(state.LastFlushAt.Add(defaultMeetingFlushInterval), now))
 	}
 	if state.Status == meetingStatusEnding {
 		if !c.shouldFinalize(state, now) {
@@ -378,11 +371,11 @@ func (c *meetingCoordinator) recordFailure(ctx context.Context, state MeetingSta
 		if final && current.Status != meetingStatusFinalFailed {
 			current.RetryCount = 0
 		}
-		current.RetryCount++
 		current.LastError = cause.Error()
 		current.LastFlushAt = now
 		current.Card.Dirty = true
 		if final {
+			current.RetryCount++
 			if meetingFinalRetryExhausted(*current) {
 				current.Status = meetingStatusCompleted
 				current.CompletedAt = now
@@ -391,6 +384,8 @@ func (c *meetingCoordinator) recordFailure(ctx context.Context, state MeetingSta
 			} else {
 				current.Status = meetingStatusFinalFailed
 			}
+		} else {
+			current.RetryCount = 0
 		}
 		return nil
 	})

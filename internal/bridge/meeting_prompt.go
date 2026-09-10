@@ -29,6 +29,7 @@ type meetingPromptInput struct {
 	NewTranscript []meetingPromptSpeech `json:"new_transcript,omitempty"`
 	NewChat       []meetingPromptSpeech `json:"new_chat,omitempty"`
 	NewDocuments  []MeetingDocument     `json:"new_documents,omitempty"`
+	LastError     string                `json:"last_error,omitempty"`
 	MeetingEnded  bool                  `json:"meeting_ended"`
 }
 
@@ -46,6 +47,7 @@ func meetingPrompt(state MeetingState, events []MeetingEvent, final bool) string
 	input.Meeting.Participants = meetingParticipantNames(state.Participants)
 	input.Previous = meetingMinutesForPrompt(state.Minutes)
 	input.NewTranscript, input.NewChat, input.NewDocuments = meetingPromptEvents(events)
+	input.LastError = strings.TrimSpace(state.LastError)
 	input.MeetingEnded = final
 	payload, _ := json.MarshalIndent(input, "", "  ")
 	return strings.Join([]string{
@@ -57,6 +59,7 @@ func meetingPrompt(state MeetingState, events []MeetingEvent, final bool) string
 		"recipient 是纪要接收人；若会议明确给他分配行动项，请使用对应姓名作为 assignee。不要仅因其是接收人就创建 TODO。",
 		"保留仍然有效的上一版内容，合并重复项；todos.id 在后续批次保持稳定。",
 		"shared_documents 只记录输入里实际出现的文档。",
+		"如果输入 JSON 里 last_error 非空，说明上一轮输出未通过 bridge 校验；本轮必须修正对应字段，例如无法回溯的 shared_documents 应删除，无法确认的内容应移入 open_questions 或直接不输出。",
 		"当本批新增内容只有会议操作、系统事件或噪声时，保持上一版纪要不变；不要为了说明信息不足而新增 open_questions。",
 		"最终只能输出一个 JSON 对象，不要 Markdown 代码块、解释或额外字段。所有数组字段都必须存在。",
 		"JSON schema: " + `{"summary":["..."],"decisions":["..."],"todos":[{"id":"stable-id","content":"...","assignee":"","due_at":"","status":"open","confidence":"explicit","evidence":"..."}],"risks":["..."],"open_questions":["..."],"shared_documents":[{"title":"...","url":"..."}]}`,

@@ -878,7 +878,11 @@ func (a *Adapter) handleMeetingActivityRaw(ctx context.Context, event *larkevent
 }
 
 func (a *Adapter) handleMeetingActivity(ctx context.Context, event *larkvc.P2BotMeetingActivityV1) (err error) {
-	slog.InfoContext(ctx, "收到飞书会议Activity")
+	var body []byte
+	if event != nil && event.EventReq != nil {
+		body = event.Body
+	}
+	slog.DebugContext(ctx, "收到飞书会议Activity", "body", eventLogBody(body, event))
 	defer recoverEventHandler(ctx, "meeting_activity", &err)
 	activities, err := ParseMeetingActivities(event)
 	if err != nil {
