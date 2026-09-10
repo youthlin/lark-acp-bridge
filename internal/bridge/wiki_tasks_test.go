@@ -306,7 +306,14 @@ func TestWikiLintRunsPromptRecordsSummaryAndKeepsTimer(t *testing.T) {
 	rt.mu.Lock()
 	call := rt.promptCalls[0]
 	rt.mu.Unlock()
-	for _, want := range []string{"请检查并修复", "/workspace/knowledge/lint.md", "**changed:** yes/no"} {
+	for _, want := range []string{
+		"请检查并修复",
+		"/workspace/knowledge/lint.md",
+		"`knowledge/core.md` 是否只保留主题级入口摘要",
+		"`knowledge/index.md` 是否只按文件一行索引",
+		"`knowledge/log.md` 是否只保留当前月活跃日志",
+		"**changed:** yes/no",
+	} {
 		if !strings.Contains(call.Text, want) {
 			t.Fatalf("lint prompt = %q, want %q", call.Text, want)
 		}
@@ -517,6 +524,20 @@ func TestWikiUpgradeUpdatesExistingWorkspaceWithoutACPSession(t *testing.T) {
 	if err := os.WriteFile(knowledgeAgents, []byte("# Existing Knowledge Rules\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(knowledge/AGENTS.md) error = %v", err)
 	}
+	for _, name := range []string{
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		path := filepath.Join(workspace, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		text := strings.ReplaceAll(string(data), workspaceWikiPolicyMarker, "removed-policy-marker")
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     "default",
@@ -563,9 +584,6 @@ func TestWikiUpgradeReportsAlreadyCurrent(t *testing.T) {
 	if _, err := ensureWorkspace(workspace, "default"); err != nil {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
-	if _, err := upgradeWorkspaceWikiPolicy(workspace); err != nil {
-		t.Fatalf("upgradeWorkspaceWikiPolicy() error = %v", err)
-	}
 
 	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
 		BotID:     "default",
@@ -593,6 +611,19 @@ func TestWikiUpgradeReportsBusyDuringWorkspaceTask(t *testing.T) {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
 	markWorkspaceBootstrapped(t, workspace)
+	policyFiles := []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	}
+	before := make(map[string]string, len(policyFiles))
+	for _, file := range policyFiles {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		before[file] = string(data)
+	}
 	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
 	otherSession := Session{Key: otherKey, AgentName: "traex", ACPSessionID: "acp-other", Cwd: t.TempDir(), Workspace: workspace}
 	_, finish := svc.startTask(context.Background(), otherSession, mustConfigAgent(t, cfg, "traex"), taskKindUser)
@@ -611,17 +642,13 @@ func TestWikiUpgradeReportsBusyDuringWorkspaceTask(t *testing.T) {
 	if !strings.Contains(reply, "当前会话正在忙碌") {
 		t.Fatalf("reply = %q, want busy message", reply)
 	}
-	for _, file := range []string{
-		filepath.Join("knowledge", "AGENTS.md"),
-		filepath.Join("knowledge", "lint.md"),
-		filepath.Join("skills", "wiki", "SKILL.md"),
-	} {
+	for _, file := range policyFiles {
 		data, err := os.ReadFile(filepath.Join(workspace, file))
 		if err != nil {
 			t.Fatalf("ReadFile(%s) error = %v", file, err)
 		}
-		if strings.Contains(string(data), workspaceWikiPolicyMarker) {
-			t.Fatalf("%s contains policy marker despite busy upgrade:\n%s", file, data)
+		if got := string(data); got != before[file] {
+			t.Fatalf("%s changed despite busy upgrade:\n--- before ---\n%s\n--- after ---\n%s", file, before[file], got)
 		}
 	}
 }

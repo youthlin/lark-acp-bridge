@@ -135,7 +135,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 三层含义：
 
 - L0 根目录记忆：`SOUL.md`、`MEMORY.md`、`AGENTS.md`、`TOOLS.md`，记录 bot 身份、用户偏好、工作规则和工具环境。
-- L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是知识入口，`index.md` 是全量索引，`log.md` 是追加式变更日志。
+- L1 `knowledge/`：记录领域知识、项目经验、问题解决方案；`core.md` 是主题级入口摘要和引用清单，`index.md` 是一文件一行的全量索引，`log.md` 只保留当前月活跃日志，历史日志按月归档。
 - L2 `skills/`：记录稳定、可复用的多步骤流程；每个技能使用 `<skill-name>/SKILL.md`。内置 `acp-trace` 技能用于按 `sid` 读取本地 ACP JSONL trace，辅助跨会话查看执行轨迹。
 
 新建 workspace 的 `TOOLS.md` 会包含飞书 reaction 工具说明。agent 可在合适时用每轮 `Message Metadata` 的 `message_id` 给原消息添加轻量 reaction 表达态度；这是可选表达，不会作为每轮普通消息的额外 prompt 片段重复注入。
@@ -153,7 +153,7 @@ $BOT_WORKSPACE/skills/wiki/SKILL.md
 
 用户回答后，由 ACP agent 使用自身可用的本地文件工具写入 L0/L1/L2 相关文件，然后删除 `Bootstrap.md`。`Bootstrap.md` 不存在后，后续 prompt 自然只会注入根目录记忆、`knowledge/` 入口、wiki skill 和记忆策略。若已经手动写好了文件，也可以在本地直接删除 `Bootstrap.md`。
 
-每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。命中 `skills/core.md` 中的技能名、说明或 trigger 时，agent 应先读取对应的 `skills/<skill-name>/SKILL.md` 再执行。
+每条普通 prompt 还会注入 workspace 记忆策略：用户要求“记住”、沉淀经验或总结可复用流程时，ACP agent 应先读取相关 workspace 文件，再用可用的本地文件工具合并写回。L1 写入时，`knowledge/core.md` 只保留主题级入口摘要，同一主题的新经验应合并进对应主题文件；新增、删除或重命名知识/技能文件后必须同步 `knowledge/index.md`，并在 `knowledge/log.md` 末尾追加 `[YYYY-MM-DD] 操作 文件 摘要`。命中 `skills/core.md` 中的技能名、说明或 trigger 时，agent 应先读取对应的 `skills/<skill-name>/SKILL.md` 再执行。bridge 会在 workspace ensure 路径自动补齐内置技能并升级托管 wiki policy，`/wiki upgrade` 主要用于手动修复或重跑升级。
 
 自动知识沉淀默认开启。每次 bot 的普通消息完整结束并把 `turn_result` 或 `error` 写入本地 trace 后，bridge 会更新 workspace 级 Wiki coordinator；默认静默 5 分钟后，由按 agent 复用的独立 `wiki-companion` ACP session 读取冻结的 trace `seq` 区间，并按 `skills/wiki/SKILL.md` 更新 L0/L1/L2 文件。原用户 ACP session 不会收到 wiki prompt，新消息和 `/new` 也不会取消或搬运 companion job。任务成功（包括输出 `NoReply`）后才推进 `.local/wiki/state.json` 的消费游标，失败不推进并有限重试；同一 workspace 同时只执行一个知识写任务。升级后首次新轮次以前的旧 trace 自动作为基线，不会突然回灌历史。
 

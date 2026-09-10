@@ -35,6 +35,19 @@ func TestEnsureWorkspaceCreatesBootstrapOnlyForNewWorkspace(t *testing.T) {
 	if len(status.UpgradedFiles) != 0 {
 		t.Fatalf("upgraded files = %+v, want none for current workspace", status.UpgradedFiles)
 	}
+	for _, file := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		if strings.Count(string(data), workspaceWikiPolicyMarker) != 1 {
+			t.Fatalf("%s marker count = %d, want one in:\n%s", file, strings.Count(string(data), workspaceWikiPolicyMarker), data)
+		}
+	}
 }
 
 func TestEnsureWorkspaceCreatesACPTraceSkillForNewWorkspace(t *testing.T) {
@@ -176,9 +189,17 @@ func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("ensureWorkspace() error = %v", err)
 	}
 	markWorkspaceBootstrapped(t, workspace)
-	knowledgeAgents := filepath.Join(workspace, "knowledge", "AGENTS.md")
-	if err := os.WriteFile(knowledgeAgents, []byte("# Custom Knowledge Rules\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(knowledge/AGENTS.md) error = %v", err)
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: filepath.Join("knowledge", "AGENTS.md"), content: "# Custom Knowledge Rules\n"},
+		{name: filepath.Join("knowledge", "lint.md"), content: "# Custom Lint Rules\n"},
+		{name: filepath.Join("skills", "wiki", "SKILL.md"), content: "# Custom Wiki Skill\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(workspace, file.name), []byte(file.content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
 	}
 
 	status, err := upgradeWorkspaceWikiPolicy(workspace)
@@ -204,8 +225,27 @@ func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
 		if strings.Count(text, workspaceWikiPolicyMarker) != 1 {
 			t.Fatalf("%s marker count = %d, want one in:\n%s", file, strings.Count(text, workspaceWikiPolicyMarker), text)
 		}
-		if file == filepath.Join("knowledge", "AGENTS.md") && !strings.Contains(text, "# Custom Knowledge Rules") {
-			t.Fatalf("knowledge/AGENTS.md lost existing content:\n%s", text)
+		if strings.Contains(text, workspaceWikiPolicyMarkerV1) {
+			t.Fatalf("%s still contains v1 policy marker:\n%s", file, text)
+		}
+		switch file {
+		case filepath.Join("knowledge", "AGENTS.md"):
+			if !strings.Contains(text, "# Custom Knowledge Rules") {
+				t.Fatalf("knowledge/AGENTS.md lost existing content:\n%s", text)
+			}
+		case filepath.Join("knowledge", "lint.md"):
+			if !strings.Contains(text, "# Custom Lint Rules") {
+				t.Fatalf("knowledge/lint.md lost existing content:\n%s", text)
+			}
+		case filepath.Join("skills", "wiki", "SKILL.md"):
+			if !strings.Contains(text, "# Custom Wiki Skill") {
+				t.Fatalf("skills/wiki/SKILL.md lost existing content:\n%s", text)
+			}
+		}
+		for _, want := range []string{"knowledge/core.md", "主题级入口摘要", "knowledge/index.md", "knowledge/log.md"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s = %q, want v2 policy text %q", file, text, want)
+			}
 		}
 	}
 	logData, err := os.ReadFile(filepath.Join(workspace, "knowledge", "log.md"))
@@ -222,6 +262,111 @@ func TestUpgradeWorkspaceWikiPolicyAppendsRulesAndIsIdempotent(t *testing.T) {
 	}
 	if len(status.UpdatedFiles) != 0 {
 		t.Fatalf("second updated files = %+v, want none", status.UpdatedFiles)
+	}
+}
+
+func TestUpgradeWorkspaceWikiPolicyReplacesV1Policy(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	for _, file := range []struct {
+		name   string
+		legacy string
+	}{
+		{name: filepath.Join("knowledge", "AGENTS.md"), legacy: workspaceKnowledgePolicyBlockV1()},
+		{name: filepath.Join("knowledge", "lint.md"), legacy: workspaceKnowledgeLintPolicyBlockV1()},
+		{name: filepath.Join("skills", "wiki", "SKILL.md"), legacy: workspaceWikiSkillPolicyBlockV1()},
+	} {
+		path := filepath.Join(workspace, file.name)
+		if err := os.WriteFile(path, []byte("# Custom\n\n"+file.legacy+"\n\n## After\n\nkeep me\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
+	}
+
+	status, err := upgradeWorkspaceWikiPolicy(workspace)
+	if err != nil {
+		t.Fatalf("upgradeWorkspaceWikiPolicy() error = %v", err)
+	}
+	if len(status.UpdatedFiles) != 3 {
+		t.Fatalf("updated files = %+v, want three v1 policy replacements", status.UpdatedFiles)
+	}
+	for _, file := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		text := string(data)
+		if strings.Contains(text, workspaceWikiPolicyMarkerV1) {
+			t.Fatalf("%s still contains v1 policy:\n%s", file, text)
+		}
+		if strings.Count(text, workspaceWikiPolicyMarker) != 1 {
+			t.Fatalf("%s v2 marker count = %d, want one in:\n%s", file, strings.Count(text, workspaceWikiPolicyMarker), text)
+		}
+		if !strings.Contains(text, "# Custom") || !strings.Contains(text, "## After") || !strings.Contains(text, "keep me") {
+			t.Fatalf("%s lost surrounding custom content:\n%s", file, text)
+		}
+		if !strings.Contains(text, "主题级入口摘要") || !strings.Contains(text, "knowledge/log-archive-YYYY-MM.md") {
+			t.Fatalf("%s = %q, want v2 aggregation policy", file, text)
+		}
+	}
+}
+
+func TestEnsureWorkspaceAutoUpgradesV1WikiPolicy(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if _, err := ensureWorkspace(workspace, "bot-a"); err != nil {
+		t.Fatalf("ensureWorkspace() error = %v", err)
+	}
+	markWorkspaceBootstrapped(t, workspace)
+	for _, file := range []struct {
+		name   string
+		legacy string
+	}{
+		{name: filepath.Join("knowledge", "AGENTS.md"), legacy: workspaceKnowledgePolicyBlockV1()},
+		{name: filepath.Join("knowledge", "lint.md"), legacy: workspaceKnowledgeLintPolicyBlockV1()},
+		{name: filepath.Join("skills", "wiki", "SKILL.md"), legacy: workspaceWikiSkillPolicyBlockV1()},
+	} {
+		path := filepath.Join(workspace, file.name)
+		if err := os.WriteFile(path, []byte("# Custom\n\n"+file.legacy+"\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", file.name, err)
+		}
+	}
+
+	status, err := ensureWorkspace(workspace, "bot-a")
+	if err != nil {
+		t.Fatalf("ensureWorkspace(existing) error = %v", err)
+	}
+	for _, want := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		if !slicesContains(status.UpgradedFiles, want) {
+			t.Fatalf("upgraded files = %+v, want %s", status.UpgradedFiles, want)
+		}
+		data, err := os.ReadFile(filepath.Join(workspace, want))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", want, err)
+		}
+		text := string(data)
+		if strings.Contains(text, workspaceWikiPolicyMarkerV1) {
+			t.Fatalf("%s still contains v1 policy after ensureWorkspace:\n%s", want, text)
+		}
+		if strings.Count(text, workspaceWikiPolicyMarker) != 1 {
+			t.Fatalf("%s v2 marker count = %d, want one in:\n%s", want, strings.Count(text, workspaceWikiPolicyMarker), text)
+		}
+	}
+
+	status, err = ensureWorkspace(workspace, "bot-a")
+	if err != nil {
+		t.Fatalf("second ensureWorkspace(existing) error = %v", err)
+	}
+	if len(status.UpgradedFiles) != 0 {
+		t.Fatalf("second upgraded files = %+v, want none", status.UpgradedFiles)
 	}
 }
 
@@ -260,6 +405,19 @@ func TestEnsureWorkspaceUpgradesExistingWorkspaceWithACPTraceSkill(t *testing.T)
 	} {
 		if !slicesContains(status.UpgradedFiles, want) {
 			t.Fatalf("upgraded files = %+v, want %s", status.UpgradedFiles, want)
+		}
+	}
+	for _, file := range []string{
+		filepath.Join("knowledge", "AGENTS.md"),
+		filepath.Join("knowledge", "lint.md"),
+		filepath.Join("skills", "wiki", "SKILL.md"),
+	} {
+		data, err := os.ReadFile(filepath.Join(workspace, file))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		if strings.Count(string(data), workspaceWikiPolicyMarker) != 1 {
+			t.Fatalf("%s marker count = %d, want one in:\n%s", file, strings.Count(string(data), workspaceWikiPolicyMarker), data)
 		}
 	}
 	skillsAgents, err := os.ReadFile(filepath.Join(workspace, "skills", "AGENTS.md"))

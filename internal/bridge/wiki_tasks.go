@@ -288,7 +288,7 @@ func wikiLintPrompt(workspace string) string {
 		"",
 		"## 操作规范",
 		"先阅读 `" + workspace + "/skills/wiki/SKILL.md` 和 `" + workspace + "/knowledge/lint.md`。",
-		"检查 `knowledge/index.md` 列出的文件是否存在、实际 knowledge/skills 文件是否都被索引、`knowledge/core.md` 引用清单是否同步、`knowledge/log.md` 是否记录新增/删除/重命名、frontmatter 是否齐全，以及是否存在明显重复或冲突。",
+		"检查 `knowledge/index.md` 列出的文件是否存在、实际 knowledge/skills 文件是否都被索引、`knowledge/core.md` 是否只保留主题级入口摘要且引用清单同步、`knowledge/index.md` 是否只按文件一行索引、`knowledge/log.md` 是否只保留当前月活跃日志并记录新增/删除/重命名、frontmatter 是否齐全，以及是否存在明显重复或冲突。",
 		"如发现可直接修复的问题，请修改文件并同步索引和日志；如仅发现需要用户判断的问题，请不要臆断，列为待确认。",
 		"",
 		"## 输出格式",
