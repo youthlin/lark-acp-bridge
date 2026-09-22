@@ -43,6 +43,8 @@ type runningTask struct {
 	completedOnce       sync.Once
 	session             Session
 	agent               config.AgentConfig
+	traceRecorder       *traceRecorder
+	steeringReady       bool
 	drainPendingAtAuto  bool
 	queuePendingAtAuto  bool
 	onCancel            func(context.Context, string)
@@ -60,6 +62,7 @@ type runningTaskOptions struct {
 	rejectPermissions    bool
 	blockWorkspaceTasks  bool
 	skipPromptQueueDrain bool
+	traceTask            *runningTask
 	replacementWait      replacedTaskWaitObserver
 	replacementTimeout   time.Duration
 }
@@ -260,6 +263,38 @@ func (s *Service) updateRunningTaskRuntime(key SessionKey, task *runningTask, ru
 	}
 	task.runtime = runtime
 	task.session = session
+}
+
+func (s *Service) markRunningTaskSteeringReady(key SessionKey, task *runningTask, recorder *traceRecorder) {
+	if task == nil {
+		return
+	}
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	if s.tasks[key] != task {
+		return
+	}
+	task.traceRecorder = recorder
+	task.steeringReady = true
+}
+
+func (s *Service) runningUserTaskSnapshot(key SessionKey) *runningTask {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	task := s.tasks[key]
+	if task == nil || task.kind != taskKindUser {
+		return nil
+	}
+	return &runningTask{
+		kind:          task.kind,
+		runtime:       task.runtime,
+		session:       task.session,
+		agent:         task.agent,
+		traceRecorder: task.traceRecorder,
+		steeringReady: task.steeringReady,
+	}
 }
 
 func (task *runningTask) closeDone() {

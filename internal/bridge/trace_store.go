@@ -27,6 +27,8 @@ var traceFileMaxBytes int64 = 10 * 1024 * 1024
 
 var traceFileSafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+var errTraceTurnAlreadyCompleted = errors.New("trace turn already completed")
+
 const traceTimestampLayout = "2006-01-02T15:04:05.000000000-07:00"
 
 type traceTimestamp time.Time
@@ -442,6 +444,9 @@ type traceRecorder struct {
 	store             *traceStore
 	session           Session
 	messageID         string
+	recordMu          sync.Mutex
+	recordCond        *sync.Cond
+	pendingSteering   int
 	assistantMu       sync.Mutex
 	assistant         strings.Builder
 	finalAssistantSet bool
@@ -485,6 +490,7 @@ func newTraceRecorderWithMessageID(store *traceStore, session Session, prompt st
 		messageID: strings.TrimSpace(messageID),
 		tools:     make(map[string]*traceToolAggregate),
 	}
+	recorder.recordCond = sync.NewCond(&recorder.recordMu)
 	recorder.append(traceRecord{Type: "user", Content: prompt})
 	return recorder
 }
@@ -597,6 +603,8 @@ func (r *traceRecorder) OnUpdate(update acp.PromptUpdate) {
 	if r == nil {
 		return
 	}
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
 	u := update.Update
 	kind := promptUpdateKind(update)
 	if chunk, ok := promptUpdateChunk(update); ok {
@@ -660,6 +668,8 @@ func (r *traceRecorder) OnLifecycle(event acp.PromptLifecycleEvent) {
 	if r == nil {
 		return
 	}
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
 	stage := strings.TrimSpace(event.Stage)
 	if stage == "" {
 		return
@@ -692,9 +702,59 @@ func (r *traceRecorder) OnLifecycle(event acp.PromptLifecycleEvent) {
 	r.append(record)
 }
 
+func (r *traceRecorder) RunSteering(content string, steer func() (acp.SteeringResult, error)) (acp.SteeringResult, error) {
+	if r == nil {
+		return steer()
+	}
+	if strings.TrimSpace(content) == "" {
+		return acp.SteeringResult{}, fmt.Errorf("ACP steering 输入为空")
+	}
+	r.recordMu.Lock()
+	if r.terminalSeq > 0 {
+		r.recordMu.Unlock()
+		return acp.SteeringResult{}, errTraceTurnAlreadyCompleted
+	}
+	r.pendingSteering++
+	r.recordMu.Unlock()
+
+	result, err := steer()
+
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
+	r.pendingSteering--
+	if r.recordCond != nil {
+		r.recordCond.Broadcast()
+	}
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(result.Outcome) != acp.SteeringOutcomeInjected {
+		return result, nil
+	}
+	if r.terminalSeq > 0 {
+		return result, errTraceTurnAlreadyCompleted
+	}
+	r.flushProcessUpdates()
+	r.flushAssistant()
+	r.append(traceRecord{
+		Type:    "user",
+		Kind:    "steering",
+		Content: content,
+	})
+	return result, nil
+}
+
 func (r *traceRecorder) Complete(result acp.PromptResult, err error) uint64 {
 	if r == nil {
 		return 0
+	}
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
+	for r.pendingSteering > 0 {
+		if r.recordCond == nil {
+			break
+		}
+		r.recordCond.Wait()
 	}
 	r.flushProcessUpdates()
 	r.flushTools()
@@ -716,6 +776,8 @@ func (r *traceRecorder) Interrupted(reason string) uint64 {
 	if r == nil {
 		return 0
 	}
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
 	r.flushProcessUpdates()
 	r.flushTools()
 	r.flushAssistant()

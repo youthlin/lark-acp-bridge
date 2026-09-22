@@ -34,6 +34,7 @@ type acpRuntime interface {
 	NewSessionWithRuntimeKey(ctx context.Context, runtime runtimeKey, key SessionKey, agentName string, agent config.AgentConfig, cwd string, workspace string) (acpSessionCandidate, error)
 	Prompt(ctx context.Context, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
 	PromptWithRuntimeKey(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig, text string, opts acp.PromptOptions) (acp.PromptResult, error)
+	Steer(ctx context.Context, session Session, agent config.AgentConfig, text string) (acp.SteeringResult, error)
 	CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error
 	SetConfigOption(ctx context.Context, session Session, agent config.AgentConfig, configID string, value any) ([]acp.SessionConfigOption, error)
 	SetMode(ctx context.Context, session Session, agent config.AgentConfig, modeID string) error
@@ -464,6 +465,21 @@ func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKe
 		r.detachBrokenRuntimeClient(key, client)
 		return result, err
 	}
+	if err == nil || !isBrokenACPClientPipeError(err) {
+		return result, err
+	}
+	r.detachBrokenRuntimeClient(key, client)
+	return result, fmt.Errorf("%w: %v", errACPSessionUnavailable, err)
+}
+
+func (r *runtimeManager) Steer(ctx context.Context, session Session, agent config.AgentConfig, text string) (acp.SteeringResult, error) {
+	key := currentRuntimeKey(session.Key)
+	client, release, err := r.clientForRuntimeSession(ctx, key, session, agent)
+	if err != nil {
+		return acp.SteeringResult{}, err
+	}
+	defer release()
+	result, err := client.Steer(ctx, session.ACPSessionID, text)
 	if err == nil || !isBrokenACPClientPipeError(err) {
 		return result, err
 	}

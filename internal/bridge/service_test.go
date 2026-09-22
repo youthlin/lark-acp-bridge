@@ -573,6 +573,10 @@ type fakeRuntime struct {
 	promptResult           acp.PromptResult
 	promptResults          []acp.PromptResult
 	promptPanic            bool
+	steerSupported         bool
+	steerResult            acp.SteeringResult
+	steerError             error
+	steerCalls             []fakeSteerCall
 	configOptions          []acp.SessionConfigOption
 	configCalls            []fakeConfigCall
 	modeCalls              []fakeModeCall
@@ -611,6 +615,13 @@ type fakePromptCall struct {
 	HasUpdateHandler     bool
 	HasPermissionHandler bool
 	Seq                  int
+}
+
+type fakeSteerCall struct {
+	Session Session
+	Text    string
+	Attrs   map[string]string
+	Seq     int
 }
 
 type fakeCancelCall struct {
@@ -814,6 +825,31 @@ func (f *fakeRuntime) prompt(ctx context.Context, key runtimeKey, session Sessio
 	return result, nil
 }
 
+func (f *fakeRuntime) Steer(ctx context.Context, session Session, agent config.AgentConfig, text string) (acp.SteeringResult, error) {
+	session.Key = normalizeSessionKey(session.Key)
+	f.mu.Lock()
+	f.steerCalls = append(f.steerCalls, fakeSteerCall{
+		Session: session,
+		Text:    text,
+		Attrs:   slogAttrsMap(logging.CtxAttrs(ctx)),
+		Seq:     f.nextCallSeqLocked(),
+	})
+	result := f.steerResult
+	err := f.steerError
+	supported := f.steerSupported
+	f.mu.Unlock()
+	if !supported {
+		return acp.SteeringResult{}, fmt.Errorf("ACP agent 未声明 steering capability")
+	}
+	if err != nil {
+		return acp.SteeringResult{}, err
+	}
+	if result.Outcome == "" {
+		result.Outcome = "injected"
+	}
+	return result, nil
+}
+
 func (f *fakeRuntime) CancelSession(ctx context.Context, key runtimeKey, session Session, agent config.AgentConfig) error {
 	key = normalizeRuntimeKey(key)
 	session.Key = normalizeSessionKey(session.Key)
@@ -958,6 +994,12 @@ func (f *fakeRuntime) promptCallsSnapshot() []fakePromptCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]fakePromptCall(nil), f.promptCalls...)
+}
+
+func (f *fakeRuntime) steerCallsSnapshot() []fakeSteerCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeSteerCall(nil), f.steerCalls...)
 }
 
 func (f *fakeRuntime) wikiRuntimeCallCount() int {

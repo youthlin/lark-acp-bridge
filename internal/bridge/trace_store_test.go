@@ -239,6 +239,59 @@ func TestTraceRecorderWritesPromptLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestTraceRecorderSteeringBeforeTurnResult(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := newTraceStore(workspace, config.TraceConfig{Enabled: true, RetentionDays: 7})
+	recorder := newTraceRecorderWithMessageID(store, session, "原始请求", "om_prompt_1")
+	steerEntered := make(chan struct{})
+	allowSteerReturn := make(chan struct{})
+	completeDone := make(chan struct{})
+	go func() {
+		_, err := recorder.RunSteering("补充请求", func() (acp.SteeringResult, error) {
+			close(steerEntered)
+			<-allowSteerReturn
+			return acp.SteeringResult{Outcome: acp.SteeringOutcomeInjected}, nil
+		})
+		if err != nil {
+			t.Errorf("RunSteering() error = %v", err)
+		}
+	}()
+	<-steerEntered
+	go func() {
+		recorder.Complete(acp.PromptResult{Text: "完成", StopReason: "end_turn"}, nil)
+		close(completeDone)
+	}()
+	select {
+	case <-completeDone:
+		t.Fatal("Complete returned before pending steering finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowSteerReturn)
+	select {
+	case <-completeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Complete did not finish after steering returned")
+	}
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,user,assistant,turn_result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	if records[1]["kind"] != "steering" || records[1]["content"] != "补充请求" {
+		t.Fatalf("steering record = %+v, want steering user content", records[1])
+	}
+	if records[3]["stop_reason"] != "end_turn" {
+		t.Fatalf("turn result = %+v, want final record after steering", records[3])
+	}
+}
+
 func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{

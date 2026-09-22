@@ -259,6 +259,7 @@ type InitializeResult struct {
 	AgentCapabilities AgentCapabilities  `json:"agentCapabilities"`
 	AgentInfo         ImplementationInfo `json:"agentInfo"`
 	AuthMethods       []AuthMethod       `json:"authMethods,omitempty"`
+	Meta              map[string]any     `json:"_meta,omitempty"`
 }
 
 type AgentCapabilities struct {

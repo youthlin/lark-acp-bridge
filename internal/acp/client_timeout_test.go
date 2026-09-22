@@ -20,6 +20,7 @@ func TestDefaultRPCTimeoutAppliesToKnownMethods(t *testing.T) {
 		"session/list",
 		"session/set_config_option",
 		"session/set_mode",
+		"_session/steering",
 	} {
 		if got := defaultRPCTimeout(method); got <= 0 {
 			t.Errorf("defaultRPCTimeout(%q) = %s, want > 0", method, got)

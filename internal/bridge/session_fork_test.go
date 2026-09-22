@@ -584,6 +584,45 @@ func TestReadForkTraceSnapshotUsesLastCompleteTurnAndSanitizes(t *testing.T) {
 	}
 }
 
+func TestReadForkTraceSnapshotMergesSteeringUserRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.jsonl")
+	records := []traceRecord{
+		{Seq: 1, Type: "user", MessageID: "m1", Content: "先实现主流程"},
+		{Seq: 2, Type: "assistant", MessageID: "m1", Content: "处理中"},
+		{Seq: 3, Type: "user", Kind: "steering", MessageID: "m1", Content: "补充：加测试"},
+		{Seq: 4, Type: "assistant", MessageID: "m1", IsFinal: true, Content: "完成"},
+		{Seq: 5, Type: "turn_result", MessageID: "m1"},
+	}
+	var data []byte
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, append(line, '\n')...)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := readForkTraceSnapshot(path, 5)
+	if err != nil {
+		t.Fatalf("readForkTraceSnapshot() error = %v", err)
+	}
+	if snapshot.LastUserText != "先实现主流程\n\n补充：加测试" {
+		t.Fatalf("LastUserText = %q, want merged user records", snapshot.LastUserText)
+	}
+	var userRecords []traceRecord
+	for _, record := range snapshot.Records {
+		if record.Type == "user" {
+			userRecords = append(userRecords, record)
+		}
+	}
+	if len(userRecords) != 2 || userRecords[1].Kind != "steering" {
+		t.Fatalf("user records = %+v, want original and steering records", userRecords)
+	}
+}
+
 func TestForkOperationStoreIsIdempotentAndRecoversInterrupted(t *testing.T) {
 	workspace := t.TempDir()
 	store := newForkOperationStore(workspace)

@@ -143,6 +143,88 @@ func TestClientInitializeAllowsAndStoresAuthMethods(t *testing.T) {
 	}
 }
 
+func TestClientInitializeStoresTopLevelMetaForSteering(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		server.writeResponse(t, req.ID, map[string]any{
+			"protocolVersion":   1,
+			"agentCapabilities": map[string]any{},
+			"agentInfo":         map[string]any{"name": "test-agent"},
+			"_meta": map[string]any{
+				"steering": map[string]any{"supported": true},
+			},
+		})
+	}()
+
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	<-done
+	if !client.SupportsSteering() {
+		t.Fatalf("SupportsSteering() = false, want true")
+	}
+}
+
+func TestClientSteerUsesSessionSteeringMethod(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{
+		ProtocolVersion: 1,
+		Meta: map[string]any{
+			"steering": map[string]any{"supported": true},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := server.readRequest(t)
+		if req.Method != "_session/steering" {
+			t.Errorf("method = %q, want _session/steering", req.Method)
+		}
+		var params struct {
+			SessionID string         `json:"sessionId"`
+			Prompt    []ContentBlock `json:"prompt"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Errorf("Unmarshal params error = %v", err)
+			return
+		}
+		if params.SessionID != "session-1" {
+			t.Errorf("sessionId = %q, want session-1", params.SessionID)
+		}
+		if len(params.Prompt) != 1 || params.Prompt[0].Type != "text" || params.Prompt[0].Text != "补充信息" {
+			t.Errorf("prompt = %+v, want one text block", params.Prompt)
+		}
+		server.writeResponse(t, req.ID, map[string]any{"outcome": "injected"})
+	}()
+
+	result, err := client.Steer(context.Background(), "session-1", "补充信息")
+	if err != nil {
+		t.Fatalf("Steer() error = %v", err)
+	}
+	if result.Outcome != "injected" {
+		t.Fatalf("Steer() = %+v, want injected", result)
+	}
+	<-done
+}
+
+func TestClientSteerRejectsUndeclaredCapability(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{ProtocolVersion: 1}
+
+	_, err := client.Steer(context.Background(), "session-1", "补充信息")
+	if err == nil || !strings.Contains(err.Error(), "steering capability") {
+		t.Fatalf("Steer() error = %v, want capability error", err)
+	}
+}
+
 func TestClientAuthenticateUsesDeclaredMethodID(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()

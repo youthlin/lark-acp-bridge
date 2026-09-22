@@ -1172,6 +1172,308 @@ func TestHandleFeishuMessageCancelsInFlightPromptForNewMessage(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageSteersRunningPromptForNewMessage(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID:   "acp-session-1",
+		promptReply:    "ACP 回复",
+		steerSupported: true,
+		blockPrompt:    make(chan struct{}),
+		blockPromptAt:  1,
+	}
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_second",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "补充：改成先检查测试",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second) error = %v", err)
+	}
+	if reply != "已补充到当前任务。" {
+		t.Fatalf("reply = %q, want steering confirmation", reply)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want steering without cancel", got)
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want only original prompt", got)
+	}
+	steerCalls := rt.steerCallsSnapshot()
+	if len(steerCalls) != 1 {
+		t.Fatalf("steer calls = %+v, want one", steerCalls)
+	}
+	if steerCalls[0].Session.ACPSessionID != "acp-session-1" || !strings.Contains(steerCalls[0].Text, "补充：改成先检查测试") {
+		t.Fatalf("steer call = %+v, want current session and supplemental text", steerCalls[0])
+	}
+	select {
+	case got := <-firstDone:
+		t.Fatalf("first prompt finished before unblock: %+v", got)
+	default:
+	}
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "ACP 回复" {
+			t.Fatalf("first reply = %q, want ACP reply after unblock", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt did not finish after unblock")
+	}
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,user,assistant,turn_result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	for i, record := range records {
+		if record["message_id"] != "om_first" {
+			t.Fatalf("record[%d] message_id = %v, want original turn message id; record = %+v", i, record["message_id"], record)
+		}
+	}
+	if records[1]["kind"] != "steering" || !strings.Contains(records[1]["content"].(string), "补充：改成先检查测试") {
+		t.Fatalf("steering trace = %+v, want supplemental user record", records[1])
+	}
+	snapshot, err := readForkTraceSnapshot(filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"), uint64(len(records)))
+	if err != nil {
+		t.Fatalf("readForkTraceSnapshot() error = %v", err)
+	}
+	if !strings.Contains(snapshot.LastUserText, "先做这个长任务") || !strings.Contains(snapshot.LastUserText, "补充：改成先检查测试") {
+		t.Fatalf("LastUserText = %q, want original and steering user text", snapshot.LastUserText)
+	}
+}
+
+func TestTrySteerRunningPromptSkipsTaskBeforeSteeringReady(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		steerSupported: true,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	agent := mustConfigAgent(t, config.Default(), "traex")
+	svc.taskMu.Lock()
+	svc.tasks[key] = &runningTask{
+		kind:          taskKindUser,
+		runtime:       currentRuntimeKey(key),
+		session:       session,
+		agent:         agent,
+		steeringReady: false,
+	}
+	svc.taskMu.Unlock()
+
+	handled, reply, err := svc.trySteerRunningPrompt(context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_second",
+		ChatID:           "oc_chat",
+		ChatType:         "topic_group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		Mentions:         testBotMentions(),
+		Text:             "补充：这个窗口不应 steering",
+	}, "补充：这个窗口不应 steering")
+	if err != nil {
+		t.Fatalf("trySteerRunningPrompt() error = %v", err)
+	}
+	if handled || reply != "" {
+		t.Fatalf("handled=%v reply=%q, want fallback before steering ready", handled, reply)
+	}
+	if got := rt.steerCallsSnapshot(); len(got) != 0 {
+		t.Fatalf("steer calls = %+v, want none before steering ready", got)
+	}
+}
+
+func TestTrySteerRunningPromptAllowsReadyTaskWithoutTraceRecorder(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		steerSupported: true,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	agent := mustConfigAgent(t, config.Default(), "traex")
+	svc.taskMu.Lock()
+	svc.tasks[key] = &runningTask{
+		kind:          taskKindUser,
+		runtime:       currentRuntimeKey(key),
+		session:       session,
+		agent:         agent,
+		steeringReady: true,
+	}
+	svc.taskMu.Unlock()
+
+	handled, reply, err := svc.trySteerRunningPrompt(context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_second",
+		ChatID:           "oc_chat",
+		ChatType:         "topic_group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		Mentions:         testBotMentions(),
+		Text:             "补充：trace disabled 也可 steering",
+	}, "补充：trace disabled 也可 steering")
+	if err != nil {
+		t.Fatalf("trySteerRunningPrompt() error = %v", err)
+	}
+	if !handled || reply != "已补充到当前任务。" {
+		t.Fatalf("handled=%v reply=%q, want steering confirmation", handled, reply)
+	}
+	steerCalls := rt.steerCallsSnapshot()
+	if len(steerCalls) != 1 || !strings.Contains(steerCalls[0].Text, "trace disabled 也可 steering") {
+		t.Fatalf("steer calls = %+v, want one supplemental call", steerCalls)
+	}
+}
+
+func TestHandleFeishuMessageFallsBackWhenSteeringOutcomeNotInjected(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID:   "acp-session-1",
+		promptReply:    "新任务回复",
+		steerSupported: true,
+		steerResult:    acp.SteeringResult{Outcome: "not_submitted"},
+		blockPrompt:    make(chan struct{}),
+		blockPromptAt:  1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	secondDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_second",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "改成做这个",
+		})
+		secondDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.cancelCallCount() >= 1 })
+	close(rt.blockPrompt)
+	select {
+	case got := <-secondDone:
+		if got.err != nil {
+			t.Fatalf("second HandleFeishuMessage() error = %v", got.err)
+		}
+		if got.reply != "新任务回复" {
+			t.Fatalf("second reply = %q, want fallback prompt reply", got.reply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second prompt did not finish")
+	}
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt was not cancelled")
+	}
+	if len(rt.steerCallsSnapshot()) != 1 || rt.cancelCallCount() != 1 || rt.promptCallCount() != 2 {
+		t.Fatalf("steer=%+v cancel=%d prompts=%+v, want steer then fallback cancel and prompt", rt.steerCallsSnapshot(), rt.cancelCallCount(), rt.promptCallsSnapshot())
+	}
+}
+
 func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{

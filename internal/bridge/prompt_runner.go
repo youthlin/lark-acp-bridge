@@ -438,8 +438,9 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 		opts.replacementWait = stream
 		return s.runUserPromptWithStreamOptionsDetailed(ctx, msg, session, agent, text, opts, stream, delayed)
 	}
-	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
+	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context, task *runningTask) (promptRuntimeResult, error) {
 		recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
+		s.markRunningTaskSteeringReady(session.Key, task, recorder)
 		result, err := s.runtime.Prompt(taskCtx, session, agent, text, tracePromptOptions(recorder, acp.PromptOptions{}))
 		if recorder != nil {
 			recorder.Complete(result, err)
@@ -450,7 +451,8 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 }
 
 func (s *Service) runUserPromptWithStreamOptionsDetailed(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions, stream *promptCardStream, delayed bool) promptRuntimeResult {
-	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context) (promptRuntimeResult, error) {
+	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context, task *runningTask) (promptRuntimeResult, error) {
+		opts.traceTask = task
 		run := s.promptRuntimeWithProgressRawStatusPrefixAndStream(taskCtx, msg, session, agent, text, stream, delayed, opts)
 		return run, run.err
 	})
@@ -546,6 +548,9 @@ func (s *Service) runPromptWithStreamOptions(ctx context.Context, msg feishu.Mes
 		stream = newPromptCardStream(ctx, msg, session, s.chatConfigForMessage(msg), s.streamCardStarterForMessage(msg))
 	}
 	recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
+	if opts.traceTask != nil {
+		s.markRunningTaskSteeringReady(session.Key, opts.traceTask, recorder)
+	}
 	chunks := newPromptChunkAccumulator(stream)
 	stopStatusRefresh := stream.startStatusRefresh(ctx)
 	result, err := s.runtime.Prompt(ctx, session, agent, text, tracePromptOptions(recorder, s.promptStreamOptionsWithTaskOptions(msg, stream, chunks, opts)))

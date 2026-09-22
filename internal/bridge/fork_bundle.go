@@ -99,7 +99,7 @@ func readForkTraceSnapshot(path string, snapshotSeq uint64) (forkTraceSnapshot, 
 		}
 		records = append(records, record)
 		if record.Type == "user" {
-			users[record.MessageID] = record.Content
+			users[record.MessageID] = appendForkUserContent(users[record.MessageID], record.Content)
 		}
 		if record.Type == "turn_result" && users[record.MessageID] != "" {
 			completed[record.MessageID] = true
@@ -130,6 +130,19 @@ func readForkTraceSnapshot(path string, snapshotSeq uint64) (forkTraceSnapshot, 
 		snapshot.Records = append(snapshot.Records, sanitizeForkTraceRecord(record))
 	}
 	return snapshot, nil
+}
+
+func appendForkUserContent(existing string, next string) string {
+	existing = strings.TrimSpace(existing)
+	next = strings.TrimSpace(next)
+	switch {
+	case existing == "":
+		return next
+	case next == "":
+		return existing
+	default:
+		return existing + "\n\n" + next
+	}
 }
 
 func forkTraceRecordIsBackground(record traceRecord) bool {

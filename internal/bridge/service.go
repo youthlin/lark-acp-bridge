@@ -443,5 +443,62 @@ func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingProm
 	if s.shouldQueueAtAutoMessage(incoming.msg) {
 		return s.handleAtAutoPromptMessage(ctx, incoming, promptText)
 	}
+	if handled, reply, err := s.trySteerRunningPrompt(ctx, incoming.msg, promptText); err != nil || handled {
+		return reply, err
+	}
 	return s.prompt(ctx, incoming.msg, promptText)
+}
+
+func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message, userText string) (bool, string, error) {
+	session, ok := s.findSession(msg)
+	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
+		return false, "", nil
+	}
+	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
+		return false, "", nil
+	}
+	task := s.runningUserTaskSnapshot(session.Key)
+	if task == nil || !task.steeringReady || !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+		return false, "", nil
+	}
+	text := promptTextWithReplyContext(msg, userText)
+	sanitized, err := s.sanitizePromptSecretsForModel(msg, session, text, userText)
+	if err != nil {
+		return false, "", err
+	}
+	if strings.TrimSpace(sanitized.Text) == "" {
+		return false, "", nil
+	}
+	task = s.runningUserTaskSnapshot(session.Key)
+	if task == nil || !task.steeringReady || !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+		return false, "", nil
+	}
+	steer := func() (acp.SteeringResult, error) {
+		return s.runtime.Steer(ctx, task.session, task.agent, sanitized.Text)
+	}
+	var result acp.SteeringResult
+	if task.traceRecorder != nil {
+		result, err = task.traceRecorder.RunSteering(sanitized.Text, steer)
+	} else {
+		result, err = steer()
+	}
+	if err != nil {
+		slog.InfoContext(ctx, "ACP steering 失败，回退为打断并发送新任务",
+			"session", session.ACPSessionID,
+			"错误", err,
+		)
+		return false, "", nil
+	}
+	if strings.TrimSpace(result.Outcome) != acp.SteeringOutcomeInjected {
+		slog.InfoContext(ctx, "ACP steering 未注入，回退为打断并发送新任务",
+			"session", session.ACPSessionID,
+			"outcome", result.Outcome,
+		)
+		return false, "", nil
+	}
+	slog.InfoContext(ctx, "已将用户消息补充到运行中 ACP 任务",
+		"session", session.ACPSessionID,
+		"outcome", result.Outcome,
+	)
+	return true, "已补充到当前任务。", nil
 }

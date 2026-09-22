@@ -30,7 +30,7 @@ func defaultRPCTimeout(method string) time.Duration {
 	case "session/new", "session/load", "session/resume":
 		return defaultSessionStartTimeout
 	case "session/close", "session/delete", "session/list",
-		"session/set_config_option", "session/set_mode":
+		"session/set_config_option", "session/set_mode", "_session/steering":
 		return defaultSessionOpTimeout
 	default:
 		return 0
