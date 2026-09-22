@@ -1198,6 +1198,8 @@ func TestHandleFeishuMessageSteersRunningPromptForNewMessage(t *testing.T) {
 	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
 	svc := newTestService(cfg, store)
 	svc.setRuntime(rt)
+	client := newFakeSentMessageClient("")
+	svc.setOutbound("bot-a", client)
 
 	firstDone := make(chan struct {
 		reply string
@@ -1232,8 +1234,14 @@ func TestHandleFeishuMessageSteersRunningPromptForNewMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleFeishuMessage(second) error = %v", err)
 	}
-	if reply != "已补充到当前任务。" {
-		t.Fatalf("reply = %q, want steering confirmation", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want threaded steering confirmation sent directly", reply)
+	}
+	if sent := client.sentSnapshot(); len(sent) != 1 || sent[0] != steeringSupplementAckText {
+		t.Fatalf("sent = %+v, want steering ack", sent)
+	}
+	if got := client.messagesSnapshot(); len(got) != 1 || got[0].MessageID != "om_second" || !got[0].ForceReplyInThread {
+		t.Fatalf("sent messages = %+v, want forced topic reply to supplemental message", got)
 	}
 	if got := rt.cancelCallCount(); got != 0 {
 		t.Fatalf("cancel calls = %d, want steering without cancel", got)
@@ -1377,7 +1385,7 @@ func TestTrySteerRunningPromptAllowsReadyTaskWithoutTraceRecorder(t *testing.T) 
 	if err != nil {
 		t.Fatalf("trySteerRunningPrompt() error = %v", err)
 	}
-	if !handled || reply != "已补充到当前任务。" {
+	if !handled || reply != steeringSupplementAckText {
 		t.Fatalf("handled=%v reply=%q, want steering confirmation", handled, reply)
 	}
 	steerCalls := rt.steerCallsSnapshot()

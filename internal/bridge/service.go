@@ -258,6 +258,8 @@ const maxSessionHistoryPerChat = 10
 
 const mentionOnlyPromptText = "（用户提及你，但本次无消息内容，请按历史消息，引用上下文回复）"
 
+const steeringSupplementAckText = "收到补充消息"
+
 type incomingPromptMessage struct {
 	msg           feishu.Message
 	rawText       string // 原始消息
@@ -500,5 +502,16 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		"session", session.ACPSessionID,
 		"outcome", result.Outcome,
 	)
-	return true, "已补充到当前任务。", nil
+	reply := msg
+	reply.ForceReplyInThread = true
+	if ok, sendErr := s.sendIntermediateReply(ctx, reply, steeringSupplementAckText); sendErr != nil {
+		slog.WarnContext(ctx, "发送 ACP steering 补充确认失败",
+			"session", session.ACPSessionID,
+			"错误", sendErr,
+		)
+		return true, steeringSupplementAckText, nil
+	} else if ok {
+		return true, "", nil
+	}
+	return true, steeringSupplementAckText, nil
 }
