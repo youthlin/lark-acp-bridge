@@ -9,24 +9,41 @@ import (
 )
 
 func promptTextWithReplyContext(msg feishu.Message, text string) string {
+	return promptTextWithReplyContextInternal(msg, text, false)
+}
+
+func promptWrappedTextWithReplyContext(msg feishu.Message, text string) string {
+	return promptTextWithReplyContextInternal(msg, text, true)
+}
+
+func promptTextWithReplyContextInternal(msg feishu.Message, text string, textAlreadyWrapped bool) string {
 	replyText := ""
 	if msg.Reply != nil {
 		replyText = strings.TrimSpace(msg.Reply.PromptText())
 	}
 	if replyText == "" {
-		return text
+		return strings.TrimSpace(text)
 	}
-	sections := []string{
+	prefixes := []string{
 		replyMetadataPrompt(msg.Reply),
-		"## Replied Message Context",
-		replyText,
-		"",
-		"请结合上面的被回复消息理解下面的用户消息。",
-		"",
-		"## User Message",
-		strings.TrimSpace(text),
+		strings.Join([]string{
+			"## Replied Message Context",
+			replyText,
+			"",
+			"请结合上面的被回复消息理解下面的用户消息。",
+		}, "\n"),
 	}
-	return strings.Join(nonEmptySections(sections), "\n")
+	if textAlreadyWrapped {
+		return promptWithWrappedUserMessage(prefixes, strings.TrimSpace(text))
+	}
+	return promptWithUserMessage(prefixes, strings.TrimSpace(text))
+}
+
+func hasReplyContext(msg feishu.Message) bool {
+	if msg.Reply == nil {
+		return false
+	}
+	return strings.TrimSpace(msg.Reply.PromptText()) != ""
 }
 
 func messageMetadataPrompt(msg feishu.Message) string {
@@ -144,6 +161,14 @@ func (s *Service) promptTextWithWorkspaceContextForSession(session Session, msg 
 }
 
 func (s *Service) promptTextWithWorkspaceContextForSessionRevision(session Session, msg feishu.Message, text string) (string, uint64) {
+	return s.promptTextWithWorkspaceContextForSessionRevisionInternal(session, msg, text, false)
+}
+
+func (s *Service) promptWrappedTextWithWorkspaceContextForSessionRevision(session Session, msg feishu.Message, text string) (string, uint64) {
+	return s.promptTextWithWorkspaceContextForSessionRevisionInternal(session, msg, text, true)
+}
+
+func (s *Service) promptTextWithWorkspaceContextForSessionRevisionInternal(session Session, msg feishu.Message, text string, textAlreadyWrapped bool) (string, uint64) {
 	workspace := sessionWorkspace(session, msg)
 	includeWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, workspace)
 	chatRules := ""
@@ -153,15 +178,19 @@ func (s *Service) promptTextWithWorkspaceContextForSessionRevision(session Sessi
 		chatRules = chat.Rules
 		chatRulesRevision = chat.RulesRevision
 	}
-	prompt := promptTextWithWorkspaceContextOptions(workspace, msg, text, workspacePromptOptions{
+	prompt := promptTextWithWorkspaceContextOptionsInternal(workspace, msg, text, workspacePromptOptions{
 		IncludeWorkspaceContext: includeWorkspaceContext,
 		IncludeMemoryPolicy:     includeWorkspaceContext,
 		ChatRules:               chatRules,
-	})
+	}, textAlreadyWrapped)
 	return prompt, chatRulesRevision
 }
 
 func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message, text string, opts workspacePromptOptions) string {
+	return promptTextWithWorkspaceContextOptionsInternal(workspace, msg, text, opts, false)
+}
+
+func promptTextWithWorkspaceContextOptionsInternal(workspace string, msg feishu.Message, text string, opts workspacePromptOptions, textAlreadyWrapped bool) string {
 	workspace = strings.TrimSpace(workspace)
 	var workspaceContext string
 	if opts.IncludeWorkspaceContext {
@@ -171,12 +200,12 @@ func promptTextWithWorkspaceContextOptions(workspace string, msg feishu.Message,
 	if opts.IncludeMemoryPolicy {
 		memoryPolicy = workspaceMemoryPolicyPrompt(workspace)
 	}
-	return promptWithUserMessage([]string{
+	return promptWithUserMessageInternal([]string{
 		workspaceContext,
 		memoryPolicy,
 		chatRulesPrompt(opts.ChatRules),
 		messageMetadataPrompt(msg),
-	}, text)
+	}, text, textAlreadyWrapped)
 }
 
 func shouldIncludeWorkspaceContextPrompt(session Session, workspace string) bool {
@@ -212,6 +241,14 @@ func formatNewSessionReply(session Session, source string) string {
 }
 
 func promptWithUserMessage(prefixes []string, text string) string {
+	return promptWithUserMessageInternal(prefixes, text, false)
+}
+
+func promptWithWrappedUserMessage(prefixes []string, text string) string {
+	return promptWithUserMessageInternal(prefixes, text, true)
+}
+
+func promptWithUserMessageInternal(prefixes []string, text string, textAlreadyWrapped bool) string {
 	sections := make([]string, 0, len(prefixes)+2)
 	for _, prefix := range prefixes {
 		if strings.TrimSpace(prefix) != "" {
@@ -220,6 +257,12 @@ func promptWithUserMessage(prefixes []string, text string) string {
 	}
 	if len(sections) == 0 {
 		return text
+	}
+	if textAlreadyWrapped {
+		if strings.TrimSpace(text) != "" {
+			sections = append(sections, strings.TrimSpace(text))
+		}
+		return strings.Join(sections, "\n\n")
 	}
 	sections = append(sections, "## User Message", text)
 	return strings.Join(sections, "\n\n")

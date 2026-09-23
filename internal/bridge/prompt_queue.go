@@ -12,12 +12,13 @@ import (
 )
 
 type queuedPrompt struct {
-	msg        feishu.Message
-	session    Session
-	agent      config.AgentConfig
-	text       string
-	userText   string
-	replyIndex int
+	msg         feishu.Message
+	session     Session
+	agent       config.AgentConfig
+	text        string
+	textWrapped bool
+	userText    string
+	replyIndex  int
 }
 
 type promptQueue struct {
@@ -31,7 +32,7 @@ func (s *Service) handleQueueCommand(ctx context.Context, text string, msg feish
 	if userText == "" {
 		return queueCommandUsage()
 	}
-	prepared, err := s.preparePrompt(ctx, msg, userText)
+	prepared, err := s.preparePrompt(ctx, msg, userText, false)
 	if err != nil {
 		return "暂存队列任务失败：" + err.Error()
 	}
@@ -41,11 +42,12 @@ func (s *Service) handleQueueCommand(ctx context.Context, text string, msg feish
 	session := prepared.session
 	session.Key = normalizeSessionKey(session.Key)
 	index := s.enqueuePrompt(queuedPrompt{
-		msg:      msg,
-		session:  session,
-		agent:    prepared.agent,
-		text:     prepared.text,
-		userText: prepared.titleText,
+		msg:         msg,
+		session:     session,
+		agent:       prepared.agent,
+		text:        prepared.text,
+		textWrapped: prepared.textWrapped,
+		userText:    prepared.titleText,
 	})
 	if !s.sessionHasRunningUserTask(session.Key) {
 		s.drainPromptQueueAsync(context.WithoutCancel(ctx), session.Key)
@@ -228,7 +230,7 @@ func (s *Service) refreshQueuedPromptSessionState(item queuedPrompt) queuedPromp
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {
 	item = s.refreshQueuedPromptSessionState(item)
 	out := s.executePromptWithRecovery(ctx, item.session, func(runCtx context.Context, runSession Session) promptRunOutcome {
-		return s.runUserPromptWithWorkspaceContext(runCtx, item.msg, runSession, item.agent, item.text, queuedPromptTaskOptions())
+		return s.runUserPromptWithWorkspaceContext(runCtx, item.msg, runSession, item.agent, item.text, item.textWrapped, queuedPromptTaskOptions())
 	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
 		return s.refreshACPSession(refreshCtx, item.msg, refreshSession, item.agent)
 	})

@@ -45,7 +45,9 @@ func (s *Service) handleSIDCommand(ctx context.Context, text string, msg feishu.
 		slog.ErrorContext(ctx, "隐藏指定 ACP session prompt 中的敏感输入失败", "session", session.ACPSessionID, "错误", err)
 		return "处理敏感输入失败：" + err.Error()
 	}
-	reply, err := s.promptSession(ctx, msg, session, agent, sanitized.Text, sanitized.TitleText, promptSessionOptions{})
+	reply, err := s.promptSession(ctx, msg, session, agent, sanitized.Text, sanitized.TitleText, promptSessionOptions{
+		TextWrapped: hasReplyContext(msg),
+	})
 	if err != nil {
 		slog.ErrorContext(ctx, "执行指定 ACP session prompt 失败", "session", session.ACPSessionID, "错误", err)
 		return "执行指定 ACP session 失败：" + err.Error()

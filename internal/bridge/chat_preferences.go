@@ -214,24 +214,24 @@ func (s *Service) cachePendingAtText(msg feishu.Message) {
 	s.pendingAtTexts[key] = pending
 }
 
-func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText string) string {
+func (s *Service) promptTextWithPendingAtTexts(msg feishu.Message, promptText string) (string, bool) {
 	if !messageIsGroupChat(msg) || !s.chatRequiresMention(msg) || !messageMentionsBot(msg) {
-		return promptText
+		return promptText, false
 	}
 	key := normalizeSessionKey(sessionKeyFromMessage(msg))
 	if !key.Valid() {
-		return promptText
+		return promptText, false
 	}
 	s.taskMu.Lock()
 	pending := append([]pendingAtMessage(nil), s.pendingAtTexts[key]...)
 	delete(s.pendingAtTexts, key)
 	s.taskMu.Unlock()
 	if len(pending) == 0 {
-		return promptText
+		return promptText, false
 	}
 	return promptWithUserMessage([]string{
 		formatPendingAtHistory(pending),
-	}, formatCurrentAtUserMessage(msg, promptText))
+	}, formatCurrentAtUserMessage(msg, promptText)), true
 }
 
 func (s *Service) pendingAtMessageFromMessage(msg feishu.Message) pendingAtMessage {

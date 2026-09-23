@@ -266,6 +266,7 @@ type incomingPromptMessage struct {
 	rawTextRedact string // 原始消息-隐藏敏感信息-用于日志
 	text          string // 去除 at bot 的部分, 用于判断斜杠命令
 	promptText    string // 本消息如果要发给模型就用这个字段, 含文本、图片下载后的本地路径等
+	titleText     string // 去除当前 bot at 后的文本, 用于自动会话标题
 }
 
 // HandleFeishuMessage 消息处理
@@ -340,9 +341,10 @@ func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMes
 	rawText := strings.TrimSpace(msg.Text)
 	text := strings.TrimSpace(msg.Text)
 	text = stripCurrentBotMentionNames(text, msg)
+	promptMsg := msg
 	msg.Text = text
-	promptText := strings.TrimSpace(msg.PromptText())
-	if promptText == "" && messageMentionsBot(msg) {
+	promptText := strings.TrimSpace(promptMsg.PromptText())
+	if strings.TrimSpace(promptTextAfterStrippingCurrentBotMention(promptMsg)) == "" && messageMentionsBot(msg) {
 		promptText = mentionOnlyPromptText
 	}
 	return incomingPromptMessage{
@@ -351,7 +353,13 @@ func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMes
 		rawTextRedact: redactSensitiveValuesForDisplay(rawText),
 		text:          text,
 		promptText:    promptText,
+		titleText:     strings.TrimSpace(msg.PromptText()),
 	}
+}
+
+func promptTextAfterStrippingCurrentBotMention(msg feishu.Message) string {
+	msg.Text = stripCurrentBotMentionNames(msg.Text, msg)
+	return strings.TrimSpace(msg.PromptText())
 }
 
 func (s *Service) shouldSkipIncomingMessage(ctx context.Context, incoming incomingPromptMessage) bool {
@@ -441,17 +449,21 @@ func firstSlashCommandName(text string) string {
 }
 
 func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingPromptMessage) (string, error) {
-	promptText := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
+	promptText, textWrapped := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
 	if s.shouldQueueAtAutoMessage(incoming.msg) {
-		return s.handleAtAutoPromptMessage(ctx, incoming, promptText)
+		return s.handleAtAutoPromptMessage(ctx, incoming, promptText, textWrapped)
 	}
-	if handled, reply, err := s.trySteerRunningPrompt(ctx, incoming.msg, promptText); err != nil || handled {
+	if handled, reply, err := s.trySteerRunningPrompt(ctx, incoming.msg, promptText, textWrapped); err != nil || handled {
 		return reply, err
 	}
-	return s.prompt(ctx, incoming.msg, promptText)
+	return s.promptWithOptions(ctx, incoming.msg, promptText, promptSessionOptions{
+		TitleText:    incoming.titleText,
+		TitleTextSet: true,
+		TextWrapped:  textWrapped,
+	})
 }
 
-func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message, userText string) (bool, string, error) {
+func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message, userText string, textWrapped bool) (bool, string, error) {
 	session, ok := s.findSession(msg)
 	if !ok || strings.TrimSpace(session.ACPSessionID) == "" {
 		return false, "", nil
@@ -464,6 +476,9 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		return false, "", nil
 	}
 	text := promptTextWithReplyContext(msg, userText)
+	if textWrapped {
+		text = promptWrappedTextWithReplyContext(msg, userText)
+	}
 	sanitized, err := s.sanitizePromptSecretsForModel(msg, session, text, userText)
 	if err != nil {
 		return false, "", err

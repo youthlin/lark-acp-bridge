@@ -20,7 +20,7 @@ type atAutoCompanionKey struct {
 	AgentName string     `json:"agent_name"`
 }
 
-func (s *Service) handleAtAutoPromptMessage(ctx context.Context, incoming incomingPromptMessage, promptText string) (string, error) {
+func (s *Service) handleAtAutoPromptMessage(ctx context.Context, incoming incomingPromptMessage, promptText string, textWrapped bool) (string, error) {
 	if s.queueAtAutoMessageIfBusy(incoming.msg) {
 		return "", nil
 	}
@@ -53,6 +53,9 @@ func (s *Service) handleAtAutoPromptMessage(ctx context.Context, incoming incomi
 	return s.promptWithOptions(ctx, incoming.msg, promptText, promptSessionOptions{
 		SkipPendingAtAutoDrain: true,
 		EnableAtAutoQueue:      true,
+		TitleText:              incoming.titleText,
+		TitleTextSet:           true,
+		TextWrapped:            textWrapped,
 	})
 }
 

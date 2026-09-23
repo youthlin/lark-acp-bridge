@@ -19,14 +19,18 @@ type promptSessionOptions struct {
 	SkipPostPromptWork     bool
 	SkipPendingAtAutoDrain bool
 	EnableAtAutoQueue      bool
+	TitleText              string
+	TitleTextSet           bool
+	TextWrapped            bool
 }
 
 type preparedPrompt struct {
-	session   Session
-	agent     config.AgentConfig
-	text      string
-	titleText string
-	errText   string
+	session     Session
+	agent       config.AgentConfig
+	text        string
+	textWrapped bool
+	titleText   string
+	errText     string
 }
 
 type promptStreamRun struct {
@@ -105,8 +109,14 @@ func (s *Service) executePromptWithRecovery(ctx context.Context, session Session
 	return out
 }
 
-func (s *Service) runUserPromptWithWorkspaceContext(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, opts runningTaskOptions) promptRunOutcome {
-	promptText, chatRulesRevision := s.promptTextWithWorkspaceContextForSessionRevision(session, msg, text)
+func (s *Service) runUserPromptWithWorkspaceContext(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, textWrapped bool, opts runningTaskOptions) promptRunOutcome {
+	var promptText string
+	var chatRulesRevision uint64
+	if textWrapped {
+		promptText, chatRulesRevision = s.promptWrappedTextWithWorkspaceContextForSessionRevision(session, msg, text)
+	} else {
+		promptText, chatRulesRevision = s.promptTextWithWorkspaceContextForSessionRevision(session, msg, text)
+	}
 	includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
 	run := s.runUserPromptWithOptionsDetailed(ctx, msg, session, agent, promptText, opts)
 	if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
@@ -206,47 +216,53 @@ func (s *Service) prompt(ctx context.Context, msg feishu.Message, text string) (
 }
 
 func (s *Service) promptWithOptions(ctx context.Context, msg feishu.Message, text string, opts promptSessionOptions) (string, error) {
-	prepared, err := s.preparePrompt(ctx, msg, text)
+	prepared, err := s.preparePrompt(ctx, msg, text, opts.TextWrapped)
 	if err != nil {
 		return "", err
 	}
 	if prepared.errText != "" {
 		return prepared.errText, nil
 	}
+	if opts.TitleTextSet {
+		prepared.titleText = redactSensitiveValuesForDisplay(opts.TitleText)
+	}
+	opts.TextWrapped = prepared.textWrapped
 	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, prepared.titleText, opts)
 }
 
-func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string) (preparedPrompt, error) {
+func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userText string, textWrapped bool) (preparedPrompt, error) {
+	text := promptTextWithReplyContext(msg, userText)
+	if textWrapped {
+		text = promptWrappedTextWithReplyContext(msg, userText)
+	}
+	textWrapped = textWrapped || hasReplyContext(msg)
 	session, ok := s.findSession(msg)
 	if !ok {
 		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := promptTextWithReplyContext(msg, userText)
 		sanitized, err := s.sanitizePromptSecretsForModel(msg, created, text, userText)
 		if err != nil {
 			return preparedPrompt{}, err
 		}
-		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
+		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, textWrapped: textWrapped, titleText: sanitized.TitleText}, nil
 	}
 	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
 		created, agent, _, errText := s.createSession(ctx, []string{"/new"}, msg)
 		if errText != "" {
 			return preparedPrompt{errText: errText}, nil
 		}
-		text := promptTextWithReplyContext(msg, userText)
 		sanitized, err := s.sanitizePromptSecretsForModel(msg, created, text, userText)
 		if err != nil {
 			return preparedPrompt{}, err
 		}
-		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
+		return preparedPrompt{session: created, agent: agent, text: sanitized.Text, textWrapped: textWrapped, titleText: sanitized.TitleText}, nil
 	}
 	agent, ok := s.registry.Get(session.AgentName)
 	if !ok {
 		return preparedPrompt{}, fmt.Errorf("未找到 agent 配置: %s", session.AgentName)
 	}
-	text := promptTextWithReplyContext(msg, userText)
 	if strings.TrimSpace(session.ACPSessionID) == "" {
 		created, _, _, errText := s.createSession(ctx, []string{"/new", session.Cwd}, msg)
 		if errText != "" {
@@ -258,7 +274,7 @@ func (s *Service) preparePrompt(ctx context.Context, msg feishu.Message, userTex
 	if err != nil {
 		return preparedPrompt{}, err
 	}
-	return preparedPrompt{session: session, agent: agent, text: sanitized.Text, titleText: sanitized.TitleText}, nil
+	return preparedPrompt{session: session, agent: agent, text: sanitized.Text, textWrapped: textWrapped, titleText: sanitized.TitleText}, nil
 }
 
 func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session Session, agent config.AgentConfig, text string, userText string, opts promptSessionOptions) (string, error) {
@@ -271,7 +287,7 @@ func (s *Service) promptSession(ctx context.Context, msg feishu.Message, session
 			runOpts = atAutoUserPromptTaskOptions()
 		}
 		runOpts.triggerWiki = !opts.SkipPostPromptWork
-		return s.runUserPromptWithWorkspaceContext(runCtx, msg, runSession, agent, text, runOpts)
+		return s.runUserPromptWithWorkspaceContext(runCtx, msg, runSession, agent, text, opts.TextWrapped, runOpts)
 	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
 		return s.refreshACPSession(refreshCtx, msg, refreshSession, agent)
 	})

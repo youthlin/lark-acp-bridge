@@ -1332,7 +1332,7 @@ func TestTrySteerRunningPromptSkipsTaskBeforeSteeringReady(t *testing.T) {
 		ThreadID:         "omt_thread",
 		Mentions:         testBotMentions(),
 		Text:             "补充：这个窗口不应 steering",
-	}, "补充：这个窗口不应 steering")
+	}, "补充：这个窗口不应 steering", false)
 	if err != nil {
 		t.Fatalf("trySteerRunningPrompt() error = %v", err)
 	}
@@ -1381,7 +1381,7 @@ func TestTrySteerRunningPromptAllowsReadyTaskWithoutTraceRecorder(t *testing.T) 
 		ThreadID:         "omt_thread",
 		Mentions:         testBotMentions(),
 		Text:             "补充：trace disabled 也可 steering",
-	}, "补充：trace disabled 也可 steering")
+	}, "补充：trace disabled 也可 steering", false)
 	if err != nil {
 		t.Fatalf("trySteerRunningPrompt() error = %v", err)
 	}
