@@ -198,6 +198,15 @@ workspace 根目录只放适合长期维护和 git 管理的 L0/L1/L2 文件；�
 
 默认配置内置 `traex` agent。`agent_list` 是有序数组；全新 chat 没有保存 `/agent` 配置和历史 session 时，默认使用列表第一个可用 agent。可以在飞书侧用 `/agent <name>` 切换当前聊天默认 agent。启动服务前会校验每个 `agent_list[].command` 是否可执行：普通命令通过 `PATH` 查找，带 `/` 或 `\` 的路径命令会检查文件存在且有执行权限。命令不存在时会打印 stderr 并跳过该 agent；其他配置错误仍会直接退出，避免到用户发送 `/new` 时才发现 ACP server 配置不可用。
 
+状态栏里的模型排队位置依赖 TraeX 专属的 ACP 扩展 `_meta.trae.queueStatus`，其他 ACP server 不一定支持。TraeX 默认不会把这个扩展发给 headless/ACP 客户端；如需在 bridge 流式卡片状态栏展示 `排队中 657` 这类信息，需要在 `$TRAE_HOME/traecli.toml` 开启：
+
+```toml
+[features]
+headless_queue_status = true
+```
+
+也可以在启动 `traecli acp serve` 时临时加 `-c features.headless_queue_status=true`。
+
 ## 开发
 
 ```bash

@@ -26,6 +26,7 @@ type promptStatusBar struct {
 	state       promptStatusState
 	stopReason  string
 	prefix      string
+	queueStatus string
 	startedAt   time.Time
 	endedAt     time.Time
 	input       int64
@@ -57,6 +58,14 @@ func (s *promptStatusBar) applyPromptResult(result acp.PromptResult) {
 	}
 }
 
+func (s *promptStatusBar) applyQueueStatus(status promptQueueStatus) {
+	if status.Active {
+		s.queueStatus = status.Label
+		return
+	}
+	s.queueStatus = ""
+}
+
 func (s promptStatusBar) text() string {
 	return s.textAt(time.Now())
 }
@@ -67,6 +76,11 @@ func (s promptStatusBar) textAt(now time.Time) string {
 		label = prefix + " " + label
 	}
 	parts := []string{label}
+	if s.state == promptStatusRunning {
+		if queueStatus := strings.TrimSpace(s.queueStatus); queueStatus != "" {
+			parts = append(parts, queueStatus)
+		}
+	}
 	if tokenUsage := formatPromptTokenUsage(s.input, s.cachedInput, s.output); tokenUsage != "" {
 		parts = append(parts, tokenUsage)
 	}
@@ -210,6 +224,108 @@ func formatPromptTokenUsage(input, cachedInput, output int64) string {
 		items = append(items, formatTokenCount(output))
 	}
 	return strings.Join(items, ", ")
+}
+
+type promptQueueStatus struct {
+	Active bool
+	Label  string
+}
+
+func promptQueueStatusFromMeta(meta map[string]any) (promptQueueStatus, bool) {
+	if meta == nil {
+		return promptQueueStatus{}, false
+	}
+	trae, ok := meta["trae"].(map[string]any)
+	if !ok {
+		return promptQueueStatus{}, false
+	}
+	queueStatus, ok := trae["queueStatus"].(map[string]any)
+	if !ok {
+		return promptQueueStatus{}, false
+	}
+	state := strings.ToLower(strings.TrimSpace(anyString(queueStatus["state"])))
+	position, hasPosition := anyInt64(queueStatus["position"])
+	if state == "" && !hasPosition {
+		return promptQueueStatus{}, false
+	}
+	switch state {
+	case "ready":
+		return promptQueueStatus{}, true
+	case "queued", "waiting", "":
+		return promptQueueStatus{Active: true, Label: formatQueueStatusLabel(position, hasPosition)}, true
+	default:
+		if hasPosition {
+			return promptQueueStatus{Active: true, Label: formatQueueStatusLabel(position, true)}, true
+		}
+		return promptQueueStatus{}, false
+	}
+}
+
+func formatQueueStatusLabel(position int64, hasPosition bool) string {
+	if hasPosition && position > 0 {
+		return "排队中 " + strconv.FormatInt(position, 10)
+	}
+	return "排队中"
+}
+
+func anyString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		return ""
+	}
+}
+
+func anyInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint:
+		if uint64(v) > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint64:
+		if v > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case float64:
+		if v < 0 || v > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case float32:
+		if v < 0 || float64(v) > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := v.Float64(); err == nil && f >= 0 && f <= math.MaxInt64 {
+			return int64(f), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
 }
 
 func formatPromptResultDetail(result acp.PromptResult) string {

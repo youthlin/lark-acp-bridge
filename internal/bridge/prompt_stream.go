@@ -322,15 +322,32 @@ func (s *promptCardStream) updatePromptStatusFromUpdate(update acp.PromptUpdate)
 	if !s.showStatusBar {
 		return
 	}
-	if promptUpdateKind(update) != "usage_update" {
-		return
-	}
+	var context acp.ContextWindowUsage
+	var queue promptQueueStatus
+	kind := promptUpdateKind(update)
 	u := update.Update
-	if u.Used <= 0 && u.Size <= 0 {
+	switch kind {
+	case "usage_update":
+		if u.Used <= 0 && u.Size <= 0 {
+			return
+		}
+		context = acp.ContextWindowUsage{Used: u.Used, Size: u.Size}
+	case "session_info_update":
+		var ok bool
+		queue, ok = promptQueueStatusFromMeta(u.Meta)
+		if !ok {
+			return
+		}
+	default:
 		return
 	}
 	s.mu.Lock()
-	s.status.Context = acp.ContextWindowUsage{Used: u.Used, Size: u.Size}
+	if context.Used > 0 || context.Size > 0 {
+		s.status.Context = context
+	}
+	if kind == "session_info_update" {
+		s.status.applyQueueStatus(queue)
+	}
 	statusText := s.status.text()
 	delayed := s.delayed
 	s.mu.Unlock()

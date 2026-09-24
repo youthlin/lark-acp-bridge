@@ -934,6 +934,96 @@ func TestHandleFeishuMessageUpdatesStreamCardStatusBar(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageShowsQueueStatusInStreamCardStatusBar(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptResult: acp.PromptResult{
+			Text:       "完成。",
+			StopReason: "end_turn",
+		},
+		promptUpdates: []acp.PromptUpdate{
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "session_info_update",
+					Meta: map[string]any{
+						"trae": map[string]any{
+							"queueStatus": map[string]any{
+								"state":    "waiting",
+								"position": float64(657),
+								"message":  "Too many requests right now.",
+							},
+						},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "session_info_update",
+					Meta: map[string]any{
+						"trae": map[string]any{
+							"queueStatus": map[string]any{"state": "ready"},
+						},
+					},
+				},
+			},
+			{
+				SessionID: "acp-session-1",
+				Update: acp.SessionUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       &acp.ContentBlock{Type: "text", Text: "完成。"},
+				},
+			},
+		},
+	}
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	var cards []*fakeStreamCard
+	client := newFakeSentMessageClient("")
+	client.streamStarter = func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
+		card := &fakeStreamCard{}
+		cards = append(cards, card)
+		return card, nil
+	}
+	svc.setOutbound("bot-a", client)
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_msg",
+		ChatID:    "oc_private",
+		ChatType:  "p2p",
+		Text:      "run",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(prompt) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want streamed reply", reply)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %+v, want one stream card", cards)
+	}
+	got := cards[0].statusUpdatesSnapshot()
+	if len(got) < 3 {
+		t.Fatalf("statusUpdates = %+v, want queue, ready, final updates", got)
+	}
+	if !strings.Contains(got[0], "排队中 657") {
+		t.Fatalf("first status update = %q, want queue position", got[0])
+	}
+	if strings.Contains(got[1], "排队中") {
+		t.Fatalf("ready status update = %q, should clear queue status", got[1])
+	}
+	if strings.Contains(got[len(got)-1], "排队中") {
+		t.Fatalf("final status update = %q, should not keep queue status", got[len(got)-1])
+	}
+}
+
 func TestHandleFeishuMessageRecordsTokenUsageAndReports(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewSessionStore(filepath.Join(workspace, "sessions.json"))

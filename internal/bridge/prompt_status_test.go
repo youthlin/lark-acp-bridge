@@ -86,6 +86,82 @@ func TestPromptStatusBarUsesMetaOnlyAsFallback(t *testing.T) {
 	}
 }
 
+func TestPromptStatusBarShowsQueueStatusWhileRunning(t *testing.T) {
+	startedAt := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	status := promptStatusBar{state: promptStatusRunning, startedAt: startedAt}
+	status.applyQueueStatus(promptQueueStatus{Active: true, Label: "排队中 657"})
+
+	got := status.textAt(startedAt.Add(80 * time.Second))
+	want := "⏳ 1m20s | 排队中 657"
+	if got != want {
+		t.Fatalf("status text = %q, want %q", got, want)
+	}
+}
+
+func TestPromptQueueStatusFromMeta(t *testing.T) {
+	tests := []struct {
+		name       string
+		meta       map[string]any
+		wantOK     bool
+		wantActive bool
+		wantLabel  string
+	}{
+		{
+			name: "waiting with position",
+			meta: map[string]any{
+				"trae": map[string]any{
+					"queueStatus": map[string]any{
+						"state":    "waiting",
+						"position": float64(657),
+						"message":  "Too many requests right now.",
+					},
+				},
+			},
+			wantOK:     true,
+			wantActive: true,
+			wantLabel:  "排队中 657",
+		},
+		{
+			name: "queued without position",
+			meta: map[string]any{
+				"trae": map[string]any{
+					"queueStatus": map[string]any{"state": "queued"},
+				},
+			},
+			wantOK:     true,
+			wantActive: true,
+			wantLabel:  "排队中",
+		},
+		{
+			name: "ready clears queue",
+			meta: map[string]any{
+				"trae": map[string]any{
+					"queueStatus": map[string]any{"state": "ready"},
+				},
+			},
+			wantOK:     true,
+			wantActive: false,
+			wantLabel:  "",
+		},
+		{
+			name:   "missing queue",
+			meta:   map[string]any{"trae": map[string]any{"load": map[string]any{"percent": 80}}},
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := promptQueueStatusFromMeta(tt.meta)
+			if ok != tt.wantOK {
+				t.Fatalf("promptQueueStatusFromMeta() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got.Active != tt.wantActive || got.Label != tt.wantLabel {
+				t.Fatalf("promptQueueStatusFromMeta() = %+v, want active=%v label=%q", got, tt.wantActive, tt.wantLabel)
+			}
+		})
+	}
+}
+
 func TestPromptStatusBarUsesMillionUnit(t *testing.T) {
 	startedAt := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	status := promptStatusBar{
