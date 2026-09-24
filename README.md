@@ -340,10 +340,11 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会按目的群 `/show` 配置展示后台反思执行过程。
 - `/meeting on|off|status`、`/meeting trace on|off`：仅 bot owner 可用。管理静默会议助手和会议整理过程展示；`/meeting trace on` 会把当前聊天设为过程卡片目的地，`off` 只拒绝新邀请，不中断正在整理的会议。纪要卡片固定私聊发送给 `meeting.recipient_open_id`，未配置且只有一个 owner 时自动使用该 owner。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
+- `/stop`：停止当前会话正在运行的普通 prompt。支持同一 turn 补充消息的 ACP server（例如 TraeX）会把运行中收到的普通消息追加到当前 turn，显式停止时请使用该命令。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。
 - `//command [args]`：`/cmds /command [args]` 的简写，用于避免 bridge 本地命令拦截。
-- `/compact`、`/compact on 80%`、`/compact off`：查看或配置当前会话的 bridge 侧自动 compact。自动 compact 使用上下文窗口使用率阈值，在普通 prompt 完成后、且 ACP server 已上报 `compact` 命令时触发；手动执行 agent compact 请使用 `//compact`。自动 compact 按同一会话里的普通 ACP command 执行，等价于本轮结束后自动补发一次 `//compact`：它会占用当前 session 的 user task，并且可被后续用户消息按普通 prompt 规则打断，但不会取消独立的 Wiki companion 任务。自动 compact 成功时静默，不创建流式卡片、不额外回复用户；失败会记录到 `/status` 的 ACP 错误中。
+- `/compact`、`/compact on 80%`、`/compact off`：查看或配置当前会话的 bridge 侧自动 compact。自动 compact 使用上下文窗口使用率阈值，在普通 prompt 完成后、且 ACP server 已上报 `compact` 命令时触发；手动执行 agent compact 请使用 `//compact`。自动 compact 按同一会话里的普通 ACP command 执行，等价于本轮结束后自动补发一次 `//compact`：它会占用当前 session 的 user task，可用 `/stop` 停止，但不会取消独立的 Wiki companion 任务。自动 compact 成功时静默，不创建流式卡片、不额外回复用户；失败会记录到 `/status` 的 ACP 错误中。
 - `/config`：查看当前 ACP server 上报的配置项。
 - `/config <id>`：查看指定配置项的类型、当前值和可选值。
 - `/config <id> <value>`：通过 ACP `session/set_config_option` 设置指定配置项。当前支持 `select` 和 `boolean` 类型；布尔值可用 `true/false`、`on/off`、`yes/no`、`1/0`。
@@ -358,8 +359,8 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/update [--check] [--version <tag>]`：仅 bot owner 可用。复用 `internal/update` 查询 GitHub/Gitee 最新 Release，下载当前平台 tar.gz、校验 sha256 并原子替换当前二进制。`--check` 只检查不替换，`--version <tag>` 指定版本。更新只替换二进制，**不会自动重启**，完成后需用 `/restart` 重启服务使新版本生效。当前二进制是 `go run` 临时文件时会拒绝原地更新。
 - `/new [cwd] [title]`：为当前飞书会话手动创建或重开当前聊天默认 agent 的 ACP 会话，执行 `initialize` 和 `session/new`，并持久化会话映射。传入 `cwd` 时必须是可访问目录，支持绝对路径、`~/path`、`./path` 和 `../path`；相对路径优先基于当前会话已有 `cwd` 解析，首次创建则基于当前聊天默认 agent 配置里的 `default_cwd` 解析。不传 `cwd` 时优先沿用当前会话已有的 `cwd`，首次创建则使用当前聊天默认 agent 配置里的 `default_cwd`。`cwd` 后面的文本会作为标题；也可以使用 `/new --title 标题` 或 `/new 标题`。未指定标题时默认使用 `session#N`。回复会短暂等待 `session/update`，并展示当前 mode 和 model；ACP server 未上报时显示未知。`/new` 只管理用户会话，不影响旧 source 已排队或运行中的 companion 知识沉淀。
 - `/new chat [group|topic] [群标题] [mentions...]`：仅 bot owner 可用。新建普通群或话题群，默认普通群；`topic` 创建话题群，`group` 可显式指定普通群。群名可省略。创建时只把触发命令的人作为初始成员并设为群主，随后再把消息中提及的其他用户拉入群，避免单个成员不可邀请导致建群失败；bot 等非用户 mention 不会被当作额外成员。若拉人部分失败，回复会保留已创建的 `chat_id` 并列出未拉入的 open_id。该能力依赖 bot 具备 `im:chat:create` 和 `im:chat.members:write_only` 权限。
-- 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话没有 session 时会自动使用当前聊天默认 agent 的 `default_cwd` 创建；如果当前会话 agent 和当前聊天默认 agent 不一致，会自动基于当前 `cwd` 创建新 agent 的 ACP session。会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
+- 普通文本：发送到当前会话的 ACP session，执行 `session/prompt`；执行过程中会创建一张飞书流式卡片，持续更新 agent 文本和工具调用状态，最终文本如果已经写入卡片则不再重复发送普通文本。当前会话已有运行中的普通 prompt 且 ACP server 支持 steering 时，新普通消息会作为补充消息追加到当前 turn；如需停止当前 turn，请发送 `/stop`。当前会话没有 session 时会自动使用当前聊天默认 agent 的 `default_cwd` 创建；如果当前会话 agent 和当前聊天默认 agent 不一致，会自动基于当前 `cwd` 创建新 agent 的 ACP session。会话创建失败或未配置默认 cwd 时再提示用户用 `/new <cwd>` 指定。话题群卡片会进入当前话题；普通群和私聊回复引用原消息但不强制进入话题模式。
 - 权限卡片：权限选项来自 ACP agent，正文完整展示选项内容，按钮使用短编号文本避免截断。只有 bot owner 可以点击权限卡片；owner 优先来自 `bots[].owner_open_ids`，未配置时启动阶段会尝试从飞书应用所有者、创建者和管理员/开发者协作者自动解析。未解析到 owner 时，无论群聊还是私聊，权限卡片都不能被任何人批准。请求被取消时，bridge 会把卡片更新为已取消/已失效状态并移除按钮。
 
-同一用户会话里新消息优先级最高：用户重新发送普通消息或执行 `/new` 时，bridge 会取消当前会话正在执行的上一轮用户 ACP prompt。自动 Wiki 属于 workspace 级 companion 生命周期，不被普通消息或 `/new` 控制；只有 `/wiki off`、服务关闭或 companion 自身失败会取消其任务，且都不会触碰原用户 session。
+同一用户会话里，运行中的普通 prompt 优先接收 ACP steering 补充消息；ACP server 不支持补充或拒绝注入时，bridge 才会按旧行为取消上一轮用户 ACP prompt 并发送新 prompt。需要明确中止当前 turn 时请使用 `/stop`。自动 Wiki 属于 workspace 级 companion 生命周期，不被普通消息、`/stop` 或 `/new` 控制；只有 `/wiki off`、服务关闭或 companion 自身失败会取消其任务，且都不会触碰原用户 session。
 

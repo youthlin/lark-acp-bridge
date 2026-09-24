@@ -635,6 +635,15 @@ func (s *Service) cancelRunningSessionWorkSync(ctx context.Context, key SessionK
 	}
 }
 
+func (s *Service) cancelRunningUserTaskSync(ctx context.Context, key SessionKey) bool {
+	task := s.takeRunningTaskOfKind(key, taskKindUser)
+	if task == nil {
+		return false
+	}
+	s.cancelTask(ctx, task, true)
+	return true
+}
+
 func (s *Service) interruptRunningSessionWork(ctx context.Context, key SessionKey) error {
 	task := s.takeRunningTask(key)
 	if task == nil {

@@ -37,6 +37,9 @@ func TestHandleFeishuMessageHelp(t *testing.T) {
 	if !strings.Contains(reply, "/loop add <补充消息>|status|stop") {
 		t.Fatalf("reply = %q, want loop add help", reply)
 	}
+	if !strings.Contains(reply, "/stop - 停止当前会话正在运行的普通 prompt") {
+		t.Fatalf("reply = %q, want stop help", reply)
+	}
 	if !strings.Contains(reply, "/sid <acp_session_id> <prompt>") {
 		t.Fatalf("reply = %q, want sid help", reply)
 	}
@@ -199,6 +202,11 @@ func TestSlashCommandTableIncludesHelpAndHandler(t *testing.T) {
 			name: "/queue",
 			text: "/queue",
 			msg:  feishu.Message{Text: "/queue"},
+		},
+		{
+			name: "/stop",
+			text: "/stop",
+			msg:  feishu.Message{Text: "/stop"},
 		},
 		{
 			name: "/sid",

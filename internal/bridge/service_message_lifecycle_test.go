@@ -1482,6 +1482,84 @@ func TestHandleFeishuMessageFallsBackWhenSteeringOutcomeNotInjected(t *testing.T
 	}
 }
 
+func TestHandleFeishuMessageStopCancelsInFlightPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptReply:   "ACP 回复",
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    filepath.Join(t.TempDir(), "workspace"),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:     "bot-a",
+			MessageID: "om_first",
+			ChatID:    "oc_chat",
+			ChatType:  "topic_group",
+			ThreadID:  "omt_thread",
+			Mentions:  testBotMentions(),
+			Text:      "先做这个长任务",
+			Workspace: session.Workspace,
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_stop",
+		ChatID:    "oc_chat",
+		ChatType:  "topic_group",
+		ThreadID:  "omt_thread",
+		Mentions:  testBotMentions(),
+		Text:      "/stop",
+		Workspace: session.Workspace,
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(/stop) error = %v", err)
+	}
+	if reply != "已停止当前会话正在运行的任务。" {
+		t.Fatalf("reply = %q, want stop confirmation", reply)
+	}
+	if got := rt.cancelCallCount(); got != 1 {
+		t.Fatalf("cancel calls = %d, want one explicit stop cancel", got)
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want /stop not to start replacement prompt", got)
+	}
+	if got := rt.steerCallsSnapshot(); len(got) != 0 {
+		t.Fatalf("steer calls = %+v, want /stop to cancel directly", got)
+	}
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt was not cancelled")
+	}
+}
+
 func TestHandleFeishuMessageReadOnlyCommandDoesNotCancelInFlightPrompt(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{

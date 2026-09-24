@@ -161,6 +161,13 @@ var slashRoutedCommandTable = []slashCommandSpec{
 		},
 	},
 	{
+		name:      "/stop",
+		helpLines: []string{"/stop - 停止当前会话正在运行的普通 prompt"},
+		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
+			return s.handleStopCommand(ctx, msg)
+		},
+	},
+	{
 		name:      "/rules",
 		helpLines: []string{"/rules [status]|set <规则>|clear - 管理当前 chat 随 workspace 注入的补充规则"},
 		run: func(s *Service, ctx context.Context, text string, msg feishu.Message) string {
@@ -306,6 +313,7 @@ func (s *Service) handleHelpCommand() string {
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/wiki"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/loop"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/queue"),
+		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/stop"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/rules"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/sid"),
 		lookupSlashCommandHelpIn(slashRoutedCommandTable, "/schedule"),
@@ -329,6 +337,18 @@ func (s *Service) handleHelpCommand() string {
 		"普通文本消息会发送到当前会话的 ACP session；当前会话没有 session 时会自动创建。",
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) handleStopCommand(ctx context.Context, msg feishu.Message) string {
+	session, ok := s.findSession(msg)
+	if !ok {
+		return "当前会话没有正在运行的任务。"
+	}
+	if !s.cancelRunningUserTaskSync(ctx, session.Key) {
+		return "当前会话没有正在运行的任务。"
+	}
+	slog.InfoContext(ctx, "已按 /stop 停止当前会话正在运行的普通 prompt", "session", session.ACPSessionID)
+	return "已停止当前会话正在运行的任务。"
 }
 
 func (s *Service) handleDebugCommand(ctx context.Context, text string) string {
