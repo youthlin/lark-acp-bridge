@@ -126,9 +126,11 @@ func TestWikiCoordinatorUsesCompanionAndCommitsFrozenCursor(t *testing.T) {
 	runtime := &fakeRuntime{newSessionID: "acp-wiki-companion", promptReply: "NoReply"}
 	svc.setRuntime(runtime)
 	var traceInitialProcess string
+	var traceProcessTitle string
 	card := &fakeStreamCard{message: feishu.SentMessage{MessageID: "om_wiki_trace", ChatID: "oc_trace"}}
 	svc.setScheduledTaskStreamStarter("bot-a", func(ctx context.Context, msg feishu.Message, options feishu.StreamCardOptions) (feishu.StreamCard, error) {
 		traceInitialProcess = options.InitialProcess
+		traceProcessTitle = options.ProcessTitle
 		return card, nil
 	})
 	session := Session{
@@ -153,9 +155,15 @@ func TestWikiCoordinatorUsesCompanionAndCommitsFrozenCursor(t *testing.T) {
 	if runtime.wikiRuntimeCallCount() != 1 {
 		t.Fatalf("wiki runtime calls = %d, want 1", runtime.wikiRuntimeCallCount())
 	}
+	if traceProcessTitle != "执行过程(traex gpt-5.5)" {
+		t.Fatalf("trace process title = %q, want agent and model", traceProcessTitle)
+	}
 	call := runtime.wikiRuntimeCalls[0]
 	if call.Runtime.Scope != runtimeScopeWikiCompanion || call.Session.ACPSessionID != "acp-wiki-companion" {
 		t.Fatalf("companion call = %+v", call)
+	}
+	if currentModelDisplay(call.Session) != "gpt-5.5" {
+		t.Fatalf("companion session model = %q, want gpt-5.5", currentModelDisplay(call.Session))
 	}
 	if !strings.Contains(call.Text, "seq: (0, 3]") || !strings.Contains(call.Text, "acp-source.jsonl") {
 		t.Fatalf("companion prompt = %q", call.Text)

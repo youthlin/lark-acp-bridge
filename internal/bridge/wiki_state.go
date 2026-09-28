@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/youthlin/lark-acp-bridge/internal/acp"
 )
 
 const wikiStateVersion = 1
@@ -22,10 +24,13 @@ type wikiState struct {
 }
 
 type wikiCompanionState struct {
-	AgentName    string    `json:"agent_name"`
-	ACPSessionID string    `json:"acp_session_id"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	AgentName     string                    `json:"agent_name"`
+	ACPSessionID  string                    `json:"acp_session_id"`
+	ConfigOptions []acp.SessionConfigOption `json:"config_options,omitempty"`
+	Models        *acp.SessionModelState    `json:"models,omitempty"`
+	Mode          *acp.SessionModeState     `json:"mode,omitempty"`
+	CreatedAt     time.Time                 `json:"created_at"`
+	UpdatedAt     time.Time                 `json:"updated_at"`
 }
 
 type wikiSourceState struct {
@@ -129,15 +134,33 @@ func cloneWikiState(state wikiState) wikiState {
 		Sources:          make(map[string]wikiSourceState, len(state.Sources)),
 	}
 	for key, value := range state.Companions {
-		copy.Companions[key] = value
+		copy.Companions[key] = cloneWikiCompanionState(value)
 	}
 	for key, value := range state.AtAutoCompanions {
-		copy.AtAutoCompanions[key] = value
+		copy.AtAutoCompanions[key] = cloneWikiCompanionState(value)
 	}
 	for key, value := range state.Sources {
 		copy.Sources[key] = value
 	}
 	return copy
+}
+
+func cloneWikiCompanionState(state wikiCompanionState) wikiCompanionState {
+	state.ConfigOptions = cloneConfigOptions(state.ConfigOptions)
+	if state.Models != nil {
+		models := *state.Models
+		models.AvailableModels = append([]acp.SessionModel(nil), state.Models.AvailableModels...)
+		for i := range models.AvailableModels {
+			models.AvailableModels[i].Meta = cloneJSONMap(models.AvailableModels[i].Meta)
+		}
+		state.Models = &models
+	}
+	if state.Mode != nil {
+		mode := *state.Mode
+		mode.AvailableModes = append([]acp.SessionMode(nil), state.Mode.AvailableModes...)
+		state.Mode = &mode
+	}
+	return state
 }
 
 func writeWikiStateAtomic(path string, state wikiState) error {

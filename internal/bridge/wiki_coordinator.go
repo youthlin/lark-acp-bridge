@@ -330,7 +330,15 @@ func (c *wikiCoordinator) createCompanionSession(ctx context.Context, agent conf
 	defer candidate.Abort()
 	info := candidate.Info()
 	now := time.Now()
-	companion := wikiCompanionState{AgentName: agentName, ACPSessionID: info.SessionID, CreatedAt: now, UpdatedAt: now}
+	companion := wikiCompanionState{
+		AgentName:     agentName,
+		ACPSessionID:  info.SessionID,
+		ConfigOptions: info.ConfigOptions,
+		Models:        info.Models,
+		Mode:          info.Mode,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
 	err = candidate.Commit(func() error {
 		return c.state.update(func(state *wikiState) { state.Companions[agentName] = companion })
 	})
@@ -341,13 +349,17 @@ func (c *wikiCoordinator) createCompanionSession(ctx context.Context, agent conf
 }
 
 func wikiCompanionSession(botID, workspace string, companion wikiCompanionState) Session {
+	companion = cloneWikiCompanionState(companion)
 	return Session{
-		Key:          SessionKey{BotID: botID, Source: "wiki", MainID: "companion:" + companion.AgentName},
-		Title:        "wiki companion " + companion.AgentName,
-		AgentName:    companion.AgentName,
-		ACPSessionID: companion.ACPSessionID,
-		Cwd:          workspace,
-		Workspace:    workspace,
+		Key:           SessionKey{BotID: botID, Source: "wiki", MainID: "companion:" + companion.AgentName},
+		Title:         "wiki companion " + companion.AgentName,
+		AgentName:     companion.AgentName,
+		ACPSessionID:  companion.ACPSessionID,
+		ConfigOptions: companion.ConfigOptions,
+		Models:        companion.Models,
+		Mode:          companion.Mode,
+		Cwd:           workspace,
+		Workspace:     workspace,
 	}
 }
 

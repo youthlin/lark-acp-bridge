@@ -469,10 +469,38 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		return false, "", nil
 	}
 	if agentName := s.chatAgentName(msg); strings.TrimSpace(agentName) != "" && session.AgentName != agentName {
+		slog.InfoContext(ctx, "跳过 ACP steering，当前消息选择的 agent 与会话不一致",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"session_agent", session.AgentName,
+			"message_agent", agentName,
+		)
 		return false, "", nil
 	}
 	task := s.runningUserTaskSnapshot(session.Key)
-	if task == nil || !task.steeringReady || !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+	if task == nil {
+		slog.InfoContext(ctx, "跳过 ACP steering，未找到运行中的用户任务",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"key", session.Key,
+		)
+		return false, "", nil
+	}
+	if !task.steeringReady {
+		slog.InfoContext(ctx, "跳过 ACP steering，运行中任务尚未进入可补充状态",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"key", session.Key,
+		)
+		return false, "", nil
+	}
+	if !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+		slog.InfoContext(ctx, "跳过 ACP steering，运行中任务的 ACP session 与当前会话不一致",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"task_session", task.session.ACPSessionID,
+			"key", session.Key,
+		)
 		return false, "", nil
 	}
 	text := promptTextWithReplyContext(msg, userText)
@@ -487,7 +515,29 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		return false, "", nil
 	}
 	task = s.runningUserTaskSnapshot(session.Key)
-	if task == nil || !task.steeringReady || !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+	if task == nil {
+		slog.InfoContext(ctx, "跳过 ACP steering，准备补充消息期间运行中的用户任务已结束",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"key", session.Key,
+		)
+		return false, "", nil
+	}
+	if !task.steeringReady {
+		slog.InfoContext(ctx, "跳过 ACP steering，准备补充消息期间任务变为不可补充",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"key", session.Key,
+		)
+		return false, "", nil
+	}
+	if !sameACPSession(task.session.ACPSessionID, session.ACPSessionID) {
+		slog.InfoContext(ctx, "跳过 ACP steering，准备补充消息期间 ACP session 已变化",
+			"message_id", msg.MessageID,
+			"session", session.ACPSessionID,
+			"task_session", task.session.ACPSessionID,
+			"key", session.Key,
+		)
 		return false, "", nil
 	}
 	steer := func() (acp.SteeringResult, error) {

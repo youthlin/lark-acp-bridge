@@ -1295,6 +1295,114 @@ func TestHandleFeishuMessageSteersRunningPromptForNewMessage(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageSteersReplySupplementInAtEveryTopicThread(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewSessionStore(filepath.Join(workspace, ".local", "sessions.json"))
+	rt := &fakeRuntime{
+		newSessionID:   "acp-session-1",
+		promptReply:    "ACP 回复",
+		steerSupported: true,
+		blockPrompt:    make(chan struct{}),
+		blockPromptAt:  1,
+	}
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	if err := store.Upsert(Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	if err := store.UpsertChat(ChatConfig{
+		Key:             ChatKey{BotID: "bot-a", ChatID: "oc_chat"},
+		MentionOptional: true,
+		AtMode:          atModeEvery,
+	}); err != nil {
+		t.Fatalf("UpsertChat() error = %v", err)
+	}
+	cfg := config.Default()
+	cfg.Bots[0].ID = "bot-a"
+	cfg.Bots[0].Workspace = workspace
+	cfg.Bots[0].Trace = config.TraceConfig{Enabled: true, RetentionDays: 7}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	client := newFakeSentMessageClient("")
+	svc.setOutbound("bot-a", client)
+
+	firstDone := make(chan struct {
+		reply string
+		err   error
+	}, 1)
+	go func() {
+		reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+			BotID:            "bot-a",
+			MessageID:        "om_first",
+			ChatID:           "oc_chat",
+			ChatType:         "group",
+			GroupMessageType: "thread",
+			ThreadID:         "omt_thread",
+			Text:             "先做这个长任务",
+		})
+		firstDone <- struct {
+			reply string
+			err   error
+		}{reply: reply, err: err}
+	}()
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_second",
+		ChatID:           "oc_chat",
+		ChatType:         "group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		RootID:           "om_first",
+		ParentID:         "om_first",
+		Text:             "允许老实例完全停机不保留db，重建v2的db哈",
+		Reply: &feishu.ReplyContext{
+			MessageID:  "om_first",
+			SenderType: "user",
+			MsgType:    "post",
+			Text:       "进入album仓库，依据设计稿对当前分支整体做代码审查",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second) error = %v", err)
+	}
+	if reply != "" {
+		t.Fatalf("reply = %q, want threaded steering confirmation sent directly", reply)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want steering without cancel", got)
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want only original prompt", got)
+	}
+	steerCalls := rt.steerCallsSnapshot()
+	if len(steerCalls) != 1 {
+		t.Fatalf("steer calls = %+v, want one", steerCalls)
+	}
+	if !strings.Contains(steerCalls[0].Text, "允许老实例完全停机不保留db") {
+		t.Fatalf("steer text = %q, want supplemental text", steerCalls[0].Text)
+	}
+	if !strings.Contains(steerCalls[0].Text, "Replied Message Context") {
+		t.Fatalf("steer text = %q, want reply context", steerCalls[0].Text)
+	}
+
+	close(rt.blockPrompt)
+	select {
+	case got := <-firstDone:
+		if got.err != nil {
+			t.Fatalf("first HandleFeishuMessage() error = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first prompt did not finish")
+	}
+}
+
 func TestTrySteerRunningPromptSkipsTaskBeforeSteeringReady(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{
