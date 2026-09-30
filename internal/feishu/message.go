@@ -317,6 +317,9 @@ func collectInteractiveCardText(value any, parts []string) []string {
 }
 
 func collectInteractiveCardObjectText(value map[string]any, parts []string) []string {
+	if isIgnoredInteractiveElement(value) {
+		return parts
+	}
 	if text := interactiveCardElementText(value); text != "" {
 		parts = appendReadableText(parts, text)
 	}
@@ -331,6 +334,15 @@ func collectInteractiveCardObjectText(value map[string]any, parts []string) []st
 		parts = collectInteractiveCardText(child, parts)
 	}
 	return parts
+}
+
+func isIgnoredInteractiveElement(value map[string]any) bool {
+	switch strings.TrimSpace(firstString(value, "element_id")) {
+	case streamCardProcessPanelID, streamCardUsagePanelID, streamCardStatusElementID:
+		return true
+	default:
+		return false
+	}
 }
 
 func interactiveInlineLine(items []any) (string, bool) {
@@ -740,7 +752,7 @@ func collectImageKeys(value any, keys []string) []string {
 		if userDSL := firstString(v, "user_dsl"); userDSL != "" {
 			var child any
 			if err := json.Unmarshal([]byte(userDSL), &child); err == nil {
-				keys = collectImageKeys(child, keys)
+				return collectImageKeys(child, keys)
 			}
 		}
 		if tag := strings.ToLower(strings.TrimSpace(firstString(v, "tag"))); tag == "md" || tag == "markdown" || tag == "lark_md" {

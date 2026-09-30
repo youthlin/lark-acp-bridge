@@ -496,8 +496,45 @@ func TestParseMessageInteractivePrefersUserDSL(t *testing.T) {
 	if strings.Contains(msg.Text, "请升级至最新版本客户端") {
 		t.Fatalf("Text = %q, should prefer user_dsl over downgraded fallback text", msg.Text)
 	}
-	if len(msg.Images) != 2 || msg.Images[0].ImageKey != "img_v3_card" || msg.Images[1].ImageKey != "img_v3_fallback" || msg.ImageKey != "img_v3_card" {
-		t.Fatalf("Images = %+v ImageKey=%q, want card image before fallback image", msg.Images, msg.ImageKey)
+	if len(msg.Images) != 1 || msg.Images[0].ImageKey != "img_v3_card" || msg.ImageKey != "img_v3_card" {
+		t.Fatalf("Images = %+v ImageKey=%q, want only user_dsl image", msg.Images, msg.ImageKey)
+	}
+}
+
+func TestParseMessageInteractiveBridgeForwardSkipsRuntimePanels(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_bridge_forward"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("interactive"),
+				Content: ptr(`{
+  "title": null,
+  "elements": [[
+    {"tag":"img","image_key":"img_v3_fallback"},
+    {"tag":"text","text":"请升级至最新版本客户端，以查看内容"}
+  ]],
+  "user_dsl": "{\"schema\":\"2.0\",\"body\":{\"elements\":[{\"tag\":\"markdown\",\"element_id\":\"md_stream\",\"content\":\"复查后仍有 1 个问题\"},{\"tag\":\"collapsible_panel\",\"element_id\":\"panel_process\",\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"执行过程(traex gpt-5.6-sol)\"}},\"elements\":[{\"tag\":\"markdown\",\"element_id\":\"md_process\",\"content\":\"sid: 01a0ed0c\\n✅ go test ./...\"}]},{\"tag\":\"collapsible_panel\",\"element_id\":\"panel_usage_detail\",\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"用量明细\"}},\"elements\":[{\"tag\":\"markdown\",\"element_id\":\"md_usage_detail\",\"content\":\"usage totalTokens 3241871\"}]},{\"tag\":\"markdown\",\"element_id\":\"md_status\",\"content\":\"✅ 4m33s | 3.2M(84%)\"}]},\"config\":{\"enable_forward_interaction\":false}}"
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.Text != "复查后仍有 1 个问题" {
+		t.Fatalf("Text = %q, want only stream content", msg.Text)
+	}
+	for _, unwanted := range []string{"请升级至最新版本客户端", "执行过程", "sid: 01a0ed0c", "用量明细", "totalTokens", "4m33s"} {
+		if strings.Contains(msg.PromptText(), unwanted) {
+			t.Fatalf("PromptText() = %q, should not contain %q", msg.PromptText(), unwanted)
+		}
+	}
+	if len(msg.Images) != 0 || msg.ImageKey != "" {
+		t.Fatalf("Images = %+v ImageKey=%q, want no fallback placeholder image", msg.Images, msg.ImageKey)
 	}
 }
 
