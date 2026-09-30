@@ -1890,11 +1890,8 @@ func TestHandleFeishuMessageStatusShowsRuntimeDiagnostics(t *testing.T) {
 	}
 	// 第一个 prompt 结束后会异步 drain /queue 暂存的任务，它会写 sessions.json。
 	// 等待队列 drain 完成，避免后台 goroutine 与 t.TempDir() 清理竞态。
-	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 2 })
-	svc.taskMu.Lock()
-	busy := svc.tasks[key] != nil
-	svc.taskMu.Unlock()
-	if busy {
-		t.Fatal("queued prompt still running after drain")
-	}
+	waitForCondition(t, time.Second, func() bool {
+		status := svc.sessionRuntimeStatusSnapshot(key)
+		return rt.promptCallCount() == 2 && !status.Busy && status.QueueLen == 0 && !status.QueueDraining
+	})
 }
