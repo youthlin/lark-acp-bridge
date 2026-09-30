@@ -245,6 +245,112 @@ func TestParseMessagePostWithTopLevelContentAndImage(t *testing.T) {
 	}
 }
 
+func TestParseMessagePostWithTopLevelFiles(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_post_file"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content: ptr(`{
+  "title": "",
+  "content": [[
+    {"tag":"text","text":"页面破边了","style":[]},
+    {"tag":"emotion","emoji_type":"Lark_Emoji_Facepalm_0"}
+  ]],
+  "content_v2": [[
+    {"tag":"text","text":"页面破边了","style":[]},
+    {"tag":"emotion","emoji_type":"Lark_Emoji_Facepalm_0"}
+  ]],
+  "files": [
+    {
+      "file_key": "file_v3_00160_edfb3356-e419-4d65-a9fc-5109dcc859ag",
+      "file_name": "Screenshot_20260929-141938.png",
+      "is_folder": false
+    }
+  ]
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	prompt := msg.PromptText()
+	for _, want := range []string{
+		"页面破边了[表情: Lark_Emoji_Facepalm_0]",
+		"[文件消息]",
+		"file_name: Screenshot_20260929-141938.png",
+		"file_key: file_v3_00160_edfb3356-e419-4d65-a9fc-5109dcc859ag",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PromptText() = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestParseMessagePostOnlyCollectsTopLevelFiles(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_post_preferred_files"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("p2p"),
+				MessageType: ptr("post"),
+				Content: ptr(`{
+  "files": [
+    {"file_key":"folder_selected","file_name":"需求资料","is_folder":true},
+    {"file_key":"file_selected","file_name":"selected.txt","is_folder":false},
+    {"file_key":"file_selected","file_name":"selected.txt","is_folder":false}
+  ],
+  "zh_cn": {
+    "title": "中文消息",
+    "content": [[
+      {"tag":"text","text":"旧版正文","files":[{"file_key":"file_legacy","file_name":"legacy.txt"}]}
+    ]],
+    "content_v2": [[
+      {"tag":"text","text":"新版正文","files":[{"file_key":"file_selected","file_name":"selected.txt"}]}
+    ]],
+    "files": [{"file_key":"file_zh","file_name":"zh.txt","is_folder":false}]
+  },
+  "en_us": {
+    "title": "English message",
+    "content": [[{"tag":"text","text":"English body"}]],
+    "files": [{"file_key":"file_en","file_name":"english.txt","is_folder":false}]
+  }
+}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	prompt := msg.PromptText()
+	for _, want := range []string{
+		"中文消息",
+		"新版正文",
+		"[文件夹消息]\nfile_name: 需求资料\nfile_key: folder_selected",
+		"[文件消息]\nfile_name: selected.txt\nfile_key: file_selected",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PromptText() = %q, want %q", prompt, want)
+		}
+	}
+	for _, unwanted := range []string{"旧版正文", "file_legacy", "file_zh", "English message", "file_en"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("PromptText() = %q, should not contain %q", prompt, unwanted)
+		}
+	}
+	if count := strings.Count(prompt, "file_key: file_selected"); count != 1 {
+		t.Fatalf("PromptText() contains selected file %d times, want 1: %q", count, prompt)
+	}
+}
+
 func TestParseMessagePostRichTextElements(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{

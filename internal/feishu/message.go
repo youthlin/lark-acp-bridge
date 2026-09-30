@@ -441,6 +441,7 @@ func parsePostContent(content string) string {
 		return ""
 	}
 	parts := collectPostText(value, nil)
+	parts = appendTopLevelPostFileText(value, parts)
 	if len(parts) == 0 {
 		return extractReadableMessageText(content)
 	}
@@ -492,6 +493,40 @@ func collectPostObjectText(value map[string]any, parts []string) []string {
 	}
 	if len(parts) == 0 {
 		parts = collectReadableText(value, parts)
+	}
+	return parts
+}
+
+func appendTopLevelPostFileText(value any, parts []string) []string {
+	post, ok := value.(map[string]any)
+	if !ok {
+		return parts
+	}
+	return appendPostFileListText(post["files"], parts, make(map[string]struct{}))
+}
+
+func appendPostFileListText(value any, parts []string, seen map[string]struct{}) []string {
+	files, ok := value.([]any)
+	if !ok {
+		return parts
+	}
+	for _, item := range files {
+		file, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		fileKey := firstString(file, "file_key")
+		if fileKey != "" {
+			if _, ok := seen[fileKey]; ok {
+				continue
+			}
+			seen[fileKey] = struct{}{}
+		}
+		label := "文件消息"
+		if isFolder, _ := file["is_folder"].(bool); isFolder {
+			label = "文件夹消息"
+		}
+		parts = appendPostText(parts, labeledMessageText(label, messageFields(file, "file_name", "file_key")...))
 	}
 	return parts
 }
