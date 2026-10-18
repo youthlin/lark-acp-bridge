@@ -1502,6 +1502,62 @@ func TestTrySteerRunningPromptAllowsReadyTaskWithoutTraceRecorder(t *testing.T) 
 	}
 }
 
+func TestHandleFeishuMessageKeepsRunningPromptWhenSteeringOutcomeUnknown(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		steerSupported: true,
+		steerError:     fmt.Errorf("%w: %w", acp.ErrSteeringOutcomeUnknown, context.DeadlineExceeded),
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "omt_thread"))
+	session := Session{
+		Key:          key,
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+	}
+	if err := store.Upsert(session); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	agent := mustConfigAgent(t, config.Default(), "traex")
+	svc.taskMu.Lock()
+	svc.tasks[key] = &runningTask{
+		kind:          taskKindUser,
+		runtime:       currentRuntimeKey(key),
+		session:       session,
+		agent:         agent,
+		steeringReady: true,
+	}
+	svc.taskMu.Unlock()
+
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotID:            "bot-a",
+		MessageID:        "om_second",
+		ChatID:           "oc_chat",
+		ChatType:         "topic_group",
+		GroupMessageType: "thread",
+		ThreadID:         "omt_thread",
+		Mentions:         testBotMentions(),
+		Text:             "补充：不要打断当前任务",
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != steeringSupplementUnknownAckText {
+		t.Fatalf("reply = %q, want unknown steering acknowledgement", reply)
+	}
+	if got := rt.cancelCallCount(); got != 0 {
+		t.Fatalf("cancel calls = %d, want current prompt preserved", got)
+	}
+	if got := rt.promptCallCount(); got != 0 {
+		t.Fatalf("prompt calls = %d, want no replacement prompt", got)
+	}
+	if got := rt.steerCallsSnapshot(); len(got) != 1 {
+		t.Fatalf("steer calls = %+v, want one", got)
+	}
+}
+
 func TestHandleFeishuMessageFallsBackWhenSteeringOutcomeNotInjected(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{

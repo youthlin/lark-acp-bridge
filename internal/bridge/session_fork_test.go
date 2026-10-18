@@ -590,8 +590,9 @@ func TestReadForkTraceSnapshotMergesSteeringUserRecords(t *testing.T) {
 		{Seq: 1, Type: "user", MessageID: "m1", Content: "先实现主流程"},
 		{Seq: 2, Type: "assistant", MessageID: "m1", Content: "处理中"},
 		{Seq: 3, Type: "user", Kind: "steering", MessageID: "m1", Content: "补充：加测试"},
-		{Seq: 4, Type: "assistant", MessageID: "m1", IsFinal: true, Content: "完成"},
-		{Seq: 5, Type: "turn_result", MessageID: "m1"},
+		{Seq: 4, Type: "user", Kind: "steering_unknown", Status: "unknown", MessageID: "m1", Content: "补充：确认状态未知"},
+		{Seq: 5, Type: "assistant", MessageID: "m1", IsFinal: true, Content: "完成"},
+		{Seq: 6, Type: "turn_result", MessageID: "m1"},
 	}
 	var data []byte
 	for _, record := range records {
@@ -605,11 +606,11 @@ func TestReadForkTraceSnapshotMergesSteeringUserRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := readForkTraceSnapshot(path, 5)
+	snapshot, err := readForkTraceSnapshot(path, 6)
 	if err != nil {
 		t.Fatalf("readForkTraceSnapshot() error = %v", err)
 	}
-	if snapshot.LastUserText != "先实现主流程\n\n补充：加测试" {
+	if snapshot.LastUserText != "先实现主流程\n\n补充：加测试\n\n补充：确认状态未知" {
 		t.Fatalf("LastUserText = %q, want merged user records", snapshot.LastUserText)
 	}
 	var userRecords []traceRecord
@@ -618,8 +619,8 @@ func TestReadForkTraceSnapshotMergesSteeringUserRecords(t *testing.T) {
 			userRecords = append(userRecords, record)
 		}
 	}
-	if len(userRecords) != 2 || userRecords[1].Kind != "steering" {
-		t.Fatalf("user records = %+v, want original and steering records", userRecords)
+	if len(userRecords) != 3 || userRecords[1].Kind != "steering" || userRecords[2].Kind != "steering_unknown" || userRecords[2].Status != "unknown" {
+		t.Fatalf("user records = %+v, want original, steering, and unknown steering records", userRecords)
 	}
 }
 

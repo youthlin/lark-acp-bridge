@@ -225,6 +225,73 @@ func TestClientSteerRejectsUndeclaredCapability(t *testing.T) {
 	}
 }
 
+func TestClientSteerReportsUnknownOutcomeAfterWrittenRequestTimesOut(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{
+		ProtocolVersion: 1,
+		Meta: map[string]any{
+			"steering": map[string]any{"supported": true},
+		},
+	}
+
+	requestRead := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		req := server.readRequest(t)
+		if req.Method != "_session/steering" {
+			t.Errorf("method = %q, want _session/steering", req.Method)
+		}
+		close(requestRead)
+		cancelReq := server.readRequest(t)
+		if cancelReq.Method != "$/cancel_request" {
+			t.Errorf("method = %q, want $/cancel_request", cancelReq.Method)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := client.Steer(ctx, "session-1", "补充信息")
+	if !errors.Is(err, ErrSteeringOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Steer() error = %v, want unknown outcome wrapping deadline exceeded", err)
+	}
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("steering request was not written")
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("steering cancellation notification was not written")
+	}
+}
+
+func TestClientSteerDoesNotWriteWithCanceledContext(t *testing.T) {
+	client, server := newPipeClient(t)
+	defer server.close()
+	client.initialize = InitializeResult{
+		ProtocolVersion: 1,
+		Meta: map[string]any{
+			"steering": map[string]any{"supported": true},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.Steer(ctx, "session-1", "补充信息")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Steer() error = %v, want context canceled", err)
+	}
+	if errors.Is(err, ErrSteeringOutcomeUnknown) {
+		t.Fatalf("Steer() error = %v, canceled before write must not be unknown outcome", err)
+	}
+	if got := client.nextID.Load(); got != 1 {
+		t.Fatalf("next request id = %d, want unchanged before write", got)
+	}
+}
+
 func TestClientAuthenticateUsesDeclaredMethodID(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()

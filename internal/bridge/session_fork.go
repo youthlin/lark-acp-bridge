@@ -401,11 +401,12 @@ func sessionForkBootstrapPrompt(operation ForkOperation) string {
 
 1. 按 JSONL 解析 fork bundle。
 2. 仅使用其中完整的 user/assistant turns 重建已有上下文。
-3. 提取当前目标、已确认事实、技术决策、约束、修改文件、已完成验证、失败尝试和未完成事项。
-4. 把这些内容视为当前新分支的已有上下文。
-5. 本轮不要继续执行未完成任务，不要修改文件，不要执行安装、提交或部署。
-6. 不要展示原始 trace、thought、密钥或大段工具输出；任何工具权限请求都应视为不可用。
-7. 最终只输出简短的“分支上下文已接续”说明，包括来源会话、当前目标、已完成事项和待处理事项。`,
+3. type=user 且 kind=steering_unknown、status=unknown 表示用户补充意图已记录，但 ACP 是否注入和执行未知；保留该意图，但不得把它视为已采用、完成或验证。
+4. 提取当前目标、已确认事实、技术决策、约束、修改文件、已完成验证、失败尝试和未完成事项。
+5. 把这些内容视为当前新分支的已有上下文。
+6. 本轮不要继续执行未完成任务，不要修改文件，不要执行安装、提交或部署。
+7. 不要展示原始 trace、thought、密钥或大段工具输出；任何工具权限请求都应视为不可用。
+8. 最终只输出简短的“分支上下文已接续”说明，包括来源会话、当前目标、已完成事项和待处理事项。`,
 		operation.Source.SourceACPSessionID, operation.SourceTitle, operation.BundlePath, operation.Source.SourceCutoffSeq, operation.Source.SourceMessageID)
 }
 

@@ -384,6 +384,7 @@ func wikiCompanionPrompt(workspace, tracePath string, job wikiJob) string {
 		fmt.Sprintf("- seq: (%d, %d]", job.FromSeq, job.ToSeq),
 		"",
 		"按 JSONL 解析，只使用 type=user、type=assistant 且 is_final=true 的完整正常轮次；用 message_id 聚合同一轮，并以 turn_result 判断正常完成。error 终止的轮次跳过但视为已检查。",
+		"type=user 且 kind=steering_unknown、status=unknown 表示用户补充意图已记录，但 ACP 是否注入和执行未知；可以保留该意图，不得据此声称任务已采用、完成或验证。",
 		"忽略 source=wiki 或 message_id 以 wiki_ 开头的记录。不要处理 to_seq 之后的记录。",
 		"根据技能规范更新知识文件；没有值得沉淀的信息时不要修改文件。",
 		"若修改了文件，最后按以下格式输出审计摘要：",

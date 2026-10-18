@@ -192,8 +192,8 @@ func TestLoopStatusHelpersIgnoreStaleStarted(t *testing.T) {
 	}
 
 	svc.markLoopRound(key, oldStarted, 7)
-	if got := svc.takeLoopPendingAdd(key, oldStarted); got != "" {
-		t.Fatalf("takeLoopPendingAdd(old) = %q, want empty", got)
+	if got := svc.loopPendingAddSnapshot(key, oldStarted); got != "" {
+		t.Fatalf("loopPendingAddSnapshot(old) = %q, want empty", got)
 	}
 	svc.markLoopFinished(key, oldStarted, "旧 loop 结束", nil)
 
@@ -208,8 +208,10 @@ func TestLoopStatusHelpersIgnoreStaleStarted(t *testing.T) {
 	}
 
 	svc.markLoopRound(key, newStarted, 1)
-	if got := svc.takeLoopPendingAdd(key, newStarted); got != "新补充" {
-		t.Fatalf("takeLoopPendingAdd(new) = %q, want new supplement", got)
+	if got := svc.loopPendingAddSnapshot(key, newStarted); got != "新补充" {
+		t.Fatalf("loopPendingAddSnapshot(new) = %q, want new supplement", got)
+	} else if !svc.ackLoopPendingAdd(key, newStarted, got) {
+		t.Fatal("ackLoopPendingAdd(new) = false, want consumed supplement cleared")
 	}
 	svc.markLoopFinished(key, newStarted, "新 loop 完成", nil)
 
@@ -364,7 +366,7 @@ func TestAppendLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
 	}
 }
 
-func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
+func TestLoopPendingMessageSnapshotAndAckSessionWorkBoundaries(t *testing.T) {
 	key := imSessionKey("bot-a", "oc_chat", "")
 	normalizedKey := normalizeSessionKey(key)
 	otherKey := normalizeSessionKey(imSessionKey("bot-a", "oc_other", ""))
@@ -420,14 +422,17 @@ func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
 			}
 			svc.taskMu.Unlock()
 
-			pending := svc.consumeLoopPendingMessage(key, tt.consumeStart)
+			pending := svc.loopPendingAddSnapshot(key, tt.consumeStart)
+			if pending != "" {
+				svc.ackLoopPendingAdd(key, tt.consumeStart, pending)
+			}
 
 			svc.taskMu.Lock()
 			status := svc.loopStatuses[normalizedKey]
 			otherStatus := svc.loopStatuses[otherKey]
 			svc.taskMu.Unlock()
 			if pending != tt.wantPending {
-				t.Fatalf("consumeLoopPendingMessage() = %q, want %q", pending, tt.wantPending)
+				t.Fatalf("loopPendingAddSnapshot() = %q, want %q", pending, tt.wantPending)
 			}
 			if status.pendingAdd != tt.wantRemaining {
 				t.Fatalf("remaining pendingAdd = %q, want %q", status.pendingAdd, tt.wantRemaining)
@@ -436,6 +441,27 @@ func TestConsumeLoopPendingMessageSessionWorkBoundaries(t *testing.T) {
 				t.Fatalf("other status = %+v, want unchanged other session", otherStatus)
 			}
 		})
+	}
+}
+
+func TestAckLoopPendingAddKeepsMessagesAppendedAfterSnapshot(t *testing.T) {
+	svc := newTestService(config.Default(), NewSessionStore(filepath.Join(t.TempDir(), "sessions.json")))
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	started := time.Date(2026, 8, 1, 10, 55, 0, 0, time.UTC)
+	svc.markLoopStarted(key, started, loopRequest{Prompt: "目标 loop", Interval: time.Second})
+	if !svc.addLoopPendingMessage(key, "本轮补充") {
+		t.Fatal("addLoopPendingMessage(first) = false")
+	}
+	snapshot := svc.loopPendingAddSnapshot(key, started)
+	if !svc.addLoopPendingMessage(key, "下一轮补充") {
+		t.Fatal("addLoopPendingMessage(second) = false")
+	}
+	if !svc.ackLoopPendingAdd(key, started, snapshot) {
+		t.Fatal("ackLoopPendingAdd() = false")
+	}
+	status, ok := svc.loopStatusSnapshot(key)
+	if !ok || status.pendingAdd != "下一轮补充" {
+		t.Fatalf("loop status = %+v, want later supplement preserved", status)
 	}
 }
 

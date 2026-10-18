@@ -18,6 +18,8 @@ type loopRunStatus struct {
 	started     time.Time
 	ended       time.Time
 	round       int
+	attempt     int
+	failures    int
 	maxRounds   int
 	maxDuration time.Duration
 	interval    time.Duration
@@ -32,8 +34,11 @@ type loopProgressState string
 const (
 	loopProgressStarted   loopProgressState = "started"
 	loopProgressRunning   loopProgressState = "running"
+	loopProgressRetrying  loopProgressState = "retrying"
 	loopProgressCompleted loopProgressState = "completed"
 	loopProgressFinished  loopProgressState = "finished"
+
+	loopMaxConsecutiveFailures = 3
 )
 
 type loopAnchor struct {
@@ -147,29 +152,47 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return "已达到最长运行时间", nil
 		}
-		s.markLoopRound(session.Key, started, round)
-		s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
-		roundPrompt, chatRulesRevision := s.promptWrappedTextWithWorkspaceContextForSessionRevision(session, msg, loopPrompt(basePrompt, s.takeLoopPendingAdd(session.Key, started), req, round, started, deadline))
-		includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
-		run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round))
-		result := run.result
-		rawResult := run.rawResult
-		streamedReply := run.reply
-		if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
-			session = s.markWorkspacePrompted(ctx, msg, session, chatRulesRevision)
-		}
-		s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
-		if run.err != nil {
-			if errors.Is(run.err, context.Canceled) {
-				return "已取消", context.Canceled
+		roundPendingAdd := s.loopPendingAddSnapshot(session.Key, started)
+		for attempt := 1; ; attempt++ {
+			s.markLoopAttempt(session.Key, started, round, attempt)
+			s.updateLoopAnchor(ctx, anchor, loopProgressRunning, round, "")
+			recovery := attempt > 1
+			roundPrompt, chatRulesRevision := s.promptWrappedTextWithWorkspaceContextForSessionRevision(session, msg, loopPrompt(basePrompt, roundPendingAdd, req, round, attempt, recovery, started, deadline))
+			includedWorkspaceContext := shouldIncludeWorkspaceContextPrompt(session, sessionWorkspace(session, msg))
+			run := s.promptRuntimeWithProgressRawStatusPrefix(ctx, cardMsg, session, agent, roundPrompt, loopStatusPrefix(round, attempt))
+			result := run.result
+			rawResult := run.rawResult
+			streamedReply := run.reply
+			if includedWorkspaceContext && (run.err == nil || run.sentProgress) {
+				session = s.markWorkspacePrompted(ctx, msg, session, chatRulesRevision)
 			}
-			if strings.TrimSpace(rawResult.Text) != "" || strings.TrimSpace(result.Text) != "" {
-				return "执行失败：" + run.err.Error(), run.err
+			if run.err != nil {
+				if errors.Is(run.err, context.Canceled) {
+					return "已取消", context.Canceled
+				}
+				failures := s.markLoopAttemptFailed(session.Key, started, round, attempt, run.err)
+				if failures >= loopMaxConsecutiveFailures {
+					return fmt.Sprintf("连续 %d 次执行失败：%s", failures, run.err.Error()), run.err
+				}
+				s.updateLoopAnchor(ctx, anchor, loopProgressRetrying, round, fmt.Sprintf("%s（连续失败 %d/%d）", run.err.Error(), failures, loopMaxConsecutiveFailures))
+				if !deadline.IsZero() && !time.Now().Add(req.Interval).Before(deadline) {
+					return "已达到最长运行时间", nil
+				}
+				if !waitLoopInterval(ctx, req.Interval) {
+					return "已取消", ctx.Err()
+				}
+				if !deadline.IsZero() && !time.Now().Before(deadline) {
+					return "已达到最长运行时间", nil
+				}
+				continue
 			}
-			return "执行失败：" + run.err.Error(), run.err
-		}
-		if loopDone(rawResult.Text) || loopDone(result.Text) || loopDone(streamedReply) {
-			return "agent 返回 DONE", nil
+			s.ackLoopPendingAdd(session.Key, started, roundPendingAdd)
+			s.markLoopAttemptSucceeded(session.Key, started, round, attempt)
+			s.updateLoopAnchor(ctx, anchor, loopProgressCompleted, round, "")
+			if loopDone(rawResult.Text) || loopDone(result.Text) || loopDone(streamedReply) {
+				return "agent 返回 DONE", nil
+			}
+			break
 		}
 		if req.MaxRounds > 0 && round >= req.MaxRounds {
 			return "已达到最大轮次", nil
@@ -177,17 +200,24 @@ func (s *Service) runLoop(ctx context.Context, msg feishu.Message, anchor loopAn
 		if !deadline.IsZero() && !time.Now().Add(req.Interval).Before(deadline) {
 			return "已达到最长运行时间", nil
 		}
-		timer := time.NewTimer(req.Interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !waitLoopInterval(ctx, req.Interval) {
 			return "已取消", ctx.Err()
-		case <-timer.C:
 		}
 	}
 }
 
-func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int, started time.Time, deadline time.Time) string {
+func waitLoopInterval(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int, attempt int, recovery bool, started time.Time, deadline time.Time) string {
 	maxDuration := "不限"
 	if req.MaxDuration > 0 {
 		maxDuration = formatDuration(req.MaxDuration)
@@ -203,6 +233,7 @@ func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int
 	prefixes := []string{
 		"## Loop Metadata\n" + strings.Join([]string{
 			"round: " + strconv.Itoa(round),
+			"attempt: " + strconv.Itoa(attempt),
 			"started_at: " + started.Format(time.RFC3339),
 			"deadline: " + deadlineText,
 			"max_duration: " + maxDuration,
@@ -211,10 +242,14 @@ func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int
 		}, "\n"),
 		"## Loop Stop Rules\n" + strings.Join([]string{
 			"这是 /loop 自动循环任务的一轮。",
+			"以下停止规则仅适用于当前这条包含 ## Loop Metadata 的消息；后续不含该段的普通用户消息不得沿用本规则，也不得只回复 DONE。",
 			"如果用户目标已经完成、无需继续，或继续执行没有新增价值，最终回复必须只输出 DONE。",
 			"如果还需要继续推进，请正常执行本轮工作并说明结果。",
 			"不要因为这是循环任务而空转。",
 		}, "\n"),
+	}
+	if recovery {
+		prefixes = append(prefixes, "## Loop Recovery Hint\n上一轮异常终止。请检查当前工作区和计划文件的真实状态，从当前状态继续推进；不要假设上一轮完整完成。")
 	}
 	userMessage := strings.TrimSpace(promptText)
 	if strings.TrimSpace(pendingAdd) != "" {
@@ -228,11 +263,15 @@ func loopPrompt(promptText string, pendingAdd string, req loopRequest, round int
 	return promptWithUserMessage(prefixes, userMessage)
 }
 
-func loopStatusPrefix(round int) string {
+func loopStatusPrefix(round int, attempt int) string {
 	if round <= 0 {
 		return ""
 	}
-	return "L" + strconv.Itoa(round)
+	prefix := "L" + strconv.Itoa(round)
+	if attempt > 1 {
+		prefix += "." + strconv.Itoa(attempt)
+	}
+	return prefix
 }
 
 func loopDone(text string) bool {
@@ -304,7 +343,11 @@ func loopAnchorText(req loopRequest, state loopProgressState, round int, reason 
 		"状态：" + loopProgressText(state, round),
 	}
 	if strings.TrimSpace(reason) != "" {
-		lines = append(lines, "结束原因："+strings.TrimSpace(reason))
+		label := "结束原因："
+		if state == loopProgressRetrying {
+			label = "最近错误："
+		}
+		lines = append(lines, label+strings.TrimSpace(reason))
 	}
 	if !started.IsZero() && !now.IsZero() {
 		lines = append(lines, "已运行："+nonNegativeDuration(now.Sub(started)).String())
@@ -341,6 +384,11 @@ func loopProgressText(state loopProgressState, round int) string {
 			return "第 " + strconv.Itoa(round) + " 轮已完成"
 		}
 		return "本轮已完成"
+	case loopProgressRetrying:
+		if round > 0 {
+			return "第 " + strconv.Itoa(round) + " 轮异常结束，准备重试"
+		}
+		return "异常结束，准备重试"
 	case loopProgressFinished:
 		return "已完成"
 	default:
@@ -380,10 +428,19 @@ func (s *Service) startLoopStatus(key SessionKey, started time.Time, req loopReq
 
 func (s *Service) markLoopRound(key SessionKey, started time.Time, round int) {
 	key = normalizeSessionKey(key)
-	s.updateLoopRoundStatus(key, started, round)
+	s.markLoopAttempt(key, started, round, 1)
+}
+
+func (s *Service) markLoopAttempt(key SessionKey, started time.Time, round int, attempt int) {
+	key = normalizeSessionKey(key)
+	s.updateLoopAttemptStatus(key, started, round, attempt)
 }
 
 func (s *Service) updateLoopRoundStatus(key SessionKey, started time.Time, round int) bool {
+	return s.updateLoopAttemptStatus(key, started, round, 1)
+}
+
+func (s *Service) updateLoopAttemptStatus(key SessionKey, started time.Time, round int, attempt int) bool {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
@@ -393,6 +450,43 @@ func (s *Service) updateLoopRoundStatus(key SessionKey, started time.Time, round
 	}
 	status.running = true
 	status.round = round
+	status.attempt = attempt
+	s.loopStatuses[key] = status
+	return true
+}
+
+func (s *Service) markLoopAttemptFailed(key SessionKey, started time.Time, round int, attempt int, err error) int {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status := s.loopStatuses[key]
+	if !status.started.Equal(started) {
+		return 0
+	}
+	status.running = true
+	status.round = round
+	status.attempt = attempt
+	status.failures++
+	if err != nil {
+		status.lastError = err.Error()
+	}
+	s.loopStatuses[key] = status
+	return status.failures
+}
+
+func (s *Service) markLoopAttemptSucceeded(key SessionKey, started time.Time, round int, attempt int) bool {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status := s.loopStatuses[key]
+	if !status.started.Equal(started) {
+		return false
+	}
+	status.running = true
+	status.round = round
+	status.attempt = attempt
+	status.failures = 0
+	status.lastError = ""
 	s.loopStatuses[key] = status
 	return true
 }
@@ -439,12 +533,7 @@ func (s *Service) appendLoopPendingMessage(key SessionKey, text string) bool {
 	return true
 }
 
-func (s *Service) takeLoopPendingAdd(key SessionKey, started time.Time) string {
-	key = normalizeSessionKey(key)
-	return s.consumeLoopPendingMessage(key, started)
-}
-
-func (s *Service) consumeLoopPendingMessage(key SessionKey, started time.Time) string {
+func (s *Service) loopPendingAddSnapshot(key SessionKey, started time.Time) string {
 	key = normalizeSessionKey(key)
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
@@ -452,10 +541,32 @@ func (s *Service) consumeLoopPendingMessage(key SessionKey, started time.Time) s
 	if !ok || status.started != started || status.pendingAdd == "" {
 		return ""
 	}
-	pending := status.pendingAdd
-	status.pendingAdd = ""
+	return status.pendingAdd
+}
+
+func (s *Service) ackLoopPendingAdd(key SessionKey, started time.Time, consumed string) bool {
+	key = normalizeSessionKey(key)
+	consumed = strings.TrimSpace(consumed)
+	if consumed == "" {
+		return false
+	}
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	status, ok := s.loopStatuses[key]
+	if !ok || status.started != started {
+		return false
+	}
+	current := strings.TrimSpace(status.pendingAdd)
+	switch {
+	case current == consumed:
+		status.pendingAdd = ""
+	case strings.HasPrefix(current, consumed+"\n\n"):
+		status.pendingAdd = strings.TrimSpace(strings.TrimPrefix(current, consumed+"\n\n"))
+	default:
+		return false
+	}
 	s.loopStatuses[key] = status
-	return pending
+	return true
 }
 
 func (s *Service) markLoopFinished(key SessionKey, started time.Time, reason string, err error) {
@@ -564,6 +675,12 @@ func (s *Service) loopStatus(msg feishu.Message) string {
 	}
 	if status.round > 0 {
 		lines = append(lines, "当前轮次："+strconv.Itoa(status.round))
+	}
+	if status.attempt > 1 {
+		lines = append(lines, "当前尝试："+strconv.Itoa(status.attempt))
+	}
+	if status.failures > 0 {
+		lines = append(lines, fmt.Sprintf("连续失败：%d/%d", status.failures, loopMaxConsecutiveFailures))
 	}
 	if !status.started.IsZero() {
 		lines = append(lines, "开始时间："+status.started.Format(time.RFC3339))

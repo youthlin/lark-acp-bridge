@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -258,7 +259,10 @@ const maxSessionHistoryPerChat = 10
 
 const mentionOnlyPromptText = "（用户提及你，但本次无消息内容，请按历史消息，引用上下文回复）"
 
-const steeringSupplementAckText = "收到补充消息"
+const (
+	steeringSupplementAckText        = "收到补充消息"
+	steeringSupplementUnknownAckText = "补充消息已发送，但 ACP 未在超时前确认是否注入；当前任务继续执行。"
+)
 
 type incomingPromptMessage struct {
 	msg           feishu.Message
@@ -550,6 +554,13 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		result, err = steer()
 	}
 	if err != nil {
+		if errors.Is(err, acp.ErrSteeringOutcomeUnknown) {
+			slog.WarnContext(ctx, "ACP steering 请求已发出但确认超时，保留当前任务以避免重复提交",
+				"session", session.ACPSessionID,
+				"错误", err,
+			)
+			return s.confirmSteeringSupplement(ctx, msg, session.ACPSessionID, steeringSupplementUnknownAckText)
+		}
 		slog.InfoContext(ctx, "ACP steering 失败，回退为打断并发送新任务",
 			"session", session.ACPSessionID,
 			"错误", err,
@@ -567,16 +578,20 @@ func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message,
 		"session", session.ACPSessionID,
 		"outcome", result.Outcome,
 	)
+	return s.confirmSteeringSupplement(ctx, msg, session.ACPSessionID, steeringSupplementAckText)
+}
+
+func (s *Service) confirmSteeringSupplement(ctx context.Context, msg feishu.Message, sessionID string, confirmation string) (bool, string, error) {
 	reply := msg
 	reply.ForceReplyInThread = true
-	if ok, sendErr := s.sendIntermediateReply(ctx, reply, steeringSupplementAckText); sendErr != nil {
+	if ok, sendErr := s.sendIntermediateReply(ctx, reply, confirmation); sendErr != nil {
 		slog.WarnContext(ctx, "发送 ACP steering 补充确认失败",
-			"session", session.ACPSessionID,
+			"session", sessionID,
 			"错误", sendErr,
 		)
-		return true, steeringSupplementAckText, nil
+		return true, confirmation, nil
 	} else if ok {
 		return true, "", nil
 	}
-	return true, steeringSupplementAckText, nil
+	return true, confirmation, nil
 }

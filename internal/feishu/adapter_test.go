@@ -837,6 +837,29 @@ func TestReplyContextFromLarkInteractiveMessagePrefersUserDSL(t *testing.T) {
 	}
 }
 
+func TestReplyContextFromLarkInteractiveMessageDropsUpgradeFallback(t *testing.T) {
+	item := larkim.NewMessageBuilder().
+		MessageId("om_parent").
+		MsgType("interactive").
+		Sender(larkim.NewSenderBuilder().Id("cli_other_bot").SenderType("app").Build()).
+		Body(larkim.NewMessageBodyBuilder().
+			Content(`{"title":null,"elements":[[{"tag":"img","image_key":"img_v3_fallback"},{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]]}`).
+			Build()).
+		Build()
+
+	msg := messageFromLarkMessage(item)
+	if msg == nil {
+		t.Fatal("messageFromLarkMessage() = nil")
+	}
+	reply := replyContextFromMessage(msg)
+	if reply == nil {
+		t.Fatal("replyContextFromMessage() = nil, want metadata-only reply context")
+	}
+	if got := reply.PromptText(); got != "" {
+		t.Fatalf("ReplyContext.PromptText() = %q, want fallback content removed", got)
+	}
+}
+
 func TestReplyContextFromLarkImageMessage(t *testing.T) {
 	item := larkim.NewMessageBuilder().
 		MessageId("om_parent").

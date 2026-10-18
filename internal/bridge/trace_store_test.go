@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,85 @@ func TestTraceRecorderSteeringBeforeTurnResult(t *testing.T) {
 	}
 }
 
+func TestTraceRecorderPersistsUnknownSteering(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := newTraceStore(workspace, config.TraceConfig{Enabled: true, RetentionDays: 7})
+	recorder := newTraceRecorderWithMessageID(store, session, "原始请求", "om_prompt_1")
+	unknownErr := fmt.Errorf("%w: %w", acp.ErrSteeringOutcomeUnknown, context.DeadlineExceeded)
+	if _, err := recorder.RunSteering("可能未确认的补充", func() (acp.SteeringResult, error) {
+		return acp.SteeringResult{}, unknownErr
+	}); !errors.Is(err, acp.ErrSteeringOutcomeUnknown) {
+		t.Fatalf("RunSteering() error = %v, want unknown steering outcome", err)
+	}
+	recorder.Complete(acp.PromptResult{Text: "完成", StopReason: "end_turn"}, nil)
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,user,assistant,turn_result" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	unknown := records[1]
+	if unknown["kind"] != "steering_unknown" || unknown["status"] != "unknown" || unknown["content"] != "可能未确认的补充" {
+		t.Fatalf("unknown steering record = %+v", unknown)
+	}
+	if !strings.Contains(unknown["error"].(string), context.DeadlineExceeded.Error()) {
+		t.Fatalf("unknown steering error = %v, want deadline", unknown["error"])
+	}
+}
+
+func TestTraceRecorderInterruptedWaitsForUnknownSteering(t *testing.T) {
+	workspace := t.TempDir()
+	session := Session{
+		Key:          normalizeSessionKey(imSessionKey("bot-a", "oc_chat", "")),
+		AgentName:    "traex",
+		ACPSessionID: "acp-session-1",
+		Cwd:          t.TempDir(),
+		Workspace:    workspace,
+	}
+	store := newTraceStore(workspace, config.TraceConfig{Enabled: true, RetentionDays: 7})
+	recorder := newTraceRecorderWithMessageID(store, session, "原始请求", "om_prompt_1")
+	steerEntered := make(chan struct{})
+	allowSteerReturn := make(chan struct{})
+	interruptedDone := make(chan struct{})
+	go func() {
+		_, _ = recorder.RunSteering("未确认补充", func() (acp.SteeringResult, error) {
+			close(steerEntered)
+			<-allowSteerReturn
+			return acp.SteeringResult{}, fmt.Errorf("%w: %w", acp.ErrSteeringOutcomeUnknown, context.DeadlineExceeded)
+		})
+	}()
+	<-steerEntered
+	go func() {
+		recorder.Interrupted("被打断")
+		close(interruptedDone)
+	}()
+	select {
+	case <-interruptedDone:
+		t.Fatal("Interrupted returned before pending steering finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowSteerReturn)
+	select {
+	case <-interruptedDone:
+	case <-time.After(time.Second):
+		t.Fatal("Interrupted did not finish after steering returned")
+	}
+
+	records := readTraceRecords(t, filepath.Join(workspace, ".local", "traces", "acp-session-1.jsonl"))
+	if got := traceRecordTypes(records); strings.Join(got, ",") != "user,user,error" {
+		t.Fatalf("record types = %v, records = %+v", got, records)
+	}
+	if records[1]["kind"] != "steering_unknown" || records[2]["interrupted"] != true {
+		t.Fatalf("records = %+v, want unknown steering before interrupted error", records)
+	}
+}
+
 func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	workspace := t.TempDir()
 	session := Session{
@@ -312,6 +392,7 @@ func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	}
 	records := []traceRecord{
 		{TS: traceTimestamp(time.Now()), Type: "user", Content: "hello"},
+		{TS: traceTimestamp(time.Now()), Type: "user", Kind: "steering_unknown", Status: "unknown", Content: "uncertain supplement"},
 		{TS: traceTimestamp(time.Now()), Type: "lifecycle", Stage: "started"},
 		{TS: traceTimestamp(time.Now()), Type: "lifecycle", Stage: "timeout_max_duration", Error: "ACP prompt 执行超过绝对上限 1h0m0s: context deadline exceeded"},
 		{TS: traceTimestamp(time.Now()), Type: "tool", ToolCallID: "tool-1", Output: json.RawMessage(`"` + strings.Repeat("x", 800) + `"`)},
@@ -335,13 +416,13 @@ func TestTraceStoreCompactsLargeSessionFileToSummary(t *testing.T) {
 	}
 
 	gotRecords := readTraceRecords(t, path)
-	if got := traceRecordTypes(gotRecords); strings.Join(got, ",") != "user,lifecycle,assistant" {
+	if got := traceRecordTypes(gotRecords); strings.Join(got, ",") != "user,user,lifecycle,assistant" {
 		t.Fatalf("record types = %v, records = %+v", got, gotRecords)
 	}
-	if gotRecords[0]["content"] != "hello" || gotRecords[1]["stage"] != "timeout_max_duration" || gotRecords[2]["content"] != "done" {
+	if gotRecords[0]["content"] != "hello" || gotRecords[1]["kind"] != "steering_unknown" || gotRecords[1]["status"] != "unknown" || gotRecords[2]["stage"] != "timeout_max_duration" || gotRecords[3]["content"] != "done" {
 		t.Fatalf("records = %+v, want summary user, timeout lifecycle, and final assistant", gotRecords)
 	}
-	assertTraceRecordFinal(t, gotRecords[2], true)
+	assertTraceRecordFinal(t, gotRecords[3], true)
 }
 
 func TestTraceRecordTimestampMarshalsAsFixedTS(t *testing.T) {

@@ -383,6 +383,213 @@ func TestLoopCommandStopsAtMaxRounds(t *testing.T) {
 	}
 }
 
+func TestLoopCommandRetriesFailedAttemptWithoutConsumingRound(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptErrors:  []error{context.DeadlineExceeded},
+		promptResults: []acp.PromptResult{{Text: "discarded"}, {Text: "继续"}, {Text: "继续"}},
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p",
+		Text: "/loop -n 2 -i 1ms 失败后继续",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 3 })
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "结束原因：已达到最大轮次")
+	})
+
+	rt.mu.Lock()
+	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if !strings.Contains(calls[0].Text, "round: 1") || !strings.Contains(calls[0].Text, "attempt: 1") {
+		t.Fatalf("first prompt = %q, want round 1 attempt 1", calls[0].Text)
+	}
+	for _, want := range []string{"round: 1", "attempt: 2", "## Loop Recovery Hint", "上一轮异常终止"} {
+		if !strings.Contains(calls[1].Text, want) {
+			t.Fatalf("retry prompt = %q, want %q", calls[1].Text, want)
+		}
+	}
+	if strings.Contains(calls[1].Text, context.DeadlineExceeded.Error()) {
+		t.Fatalf("retry prompt = %q, should not include detailed error", calls[1].Text)
+	}
+	if !strings.Contains(calls[2].Text, "round: 2") || !strings.Contains(calls[2].Text, "attempt: 1") {
+		t.Fatalf("third prompt = %q, want round 2 attempt 1", calls[2].Text)
+	}
+	if !containsStringWithAll(client.updatesSnapshot(), "状态：第 1 轮异常结束，准备重试", "连续失败 1/3") {
+		t.Fatalf("updates = %#v, want retry state", client.updatesSnapshot())
+	}
+	status, ok := svc.loopStatusSnapshot(key)
+	if !ok || status.running || status.round != 2 || status.failures != 0 || status.lastError != "" {
+		t.Fatalf("loop status = %+v, want two successful logical rounds after one retry", status)
+	}
+}
+
+func TestLoopCommandKeepsPendingAddAcrossFailedAttempt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{
+		promptErrors:  []error{nil, context.DeadlineExceeded},
+		blockPrompt:   make(chan struct{}),
+		blockPromptAt: 1,
+	}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p",
+		Text: "/loop -n 2 -i 1ms 补充消息重试",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p",
+		Text: "/loop add 重试时仍要携带",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop add) error = %v", err)
+	}
+	close(rt.blockPrompt)
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 3 })
+	waitForCondition(t, time.Second, func() bool {
+		status, ok := svc.loopStatusSnapshot(key)
+		return ok && !status.running
+	})
+
+	calls := rt.promptCallsSnapshot()
+	for i := 1; i <= 2; i++ {
+		for _, want := range []string{"round: 2", "## 本轮补充消息", "重试时仍要携带"} {
+			if !strings.Contains(calls[i].Text, want) {
+				t.Fatalf("prompt call %d = %q, want %q", i+1, calls[i].Text, want)
+			}
+		}
+	}
+	if !strings.Contains(calls[2].Text, "attempt: 2") {
+		t.Fatalf("retry prompt = %q, want second attempt", calls[2].Text)
+	}
+	status, _ := svc.loopStatusSnapshot(key)
+	if status.pendingAdd != "" {
+		t.Fatalf("pendingAdd = %q, want cleared after logical round succeeds", status.pendingAdd)
+	}
+}
+
+func TestLoopRetryDoesNotWaitPastMaxDuration(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptErrors: []error{context.DeadlineExceeded}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+
+	started := time.Now()
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p",
+		Text: "/loop -t 50ms -i 24h 失败后不要超期等待",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		status, ok := svc.loopStatusSnapshot(key)
+		return ok && !status.running && status.reason == "已达到最长运行时间"
+	})
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("loop stopped after %s, want deadline checked before 24h retry interval", elapsed)
+	}
+	if got := rt.promptCallCount(); got != 1 {
+		t.Fatalf("prompt calls = %d, want one failed attempt before max duration stop", got)
+	}
+}
+
+func TestLoopCommandStopsAfterThreeConsecutiveAttemptFailures(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	errBoom := context.DeadlineExceeded
+	rt := &fakeRuntime{promptErrors: []error{errBoom, errBoom, errBoom}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p",
+		Text: "/loop -n 0 -i 1ms 连续失败",
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 3 })
+	waitForCondition(t, time.Second, func() bool {
+		updates := client.updatesSnapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "连续 3 次执行失败")
+	})
+	status, ok := svc.loopStatusSnapshot(key)
+	if !ok || status.running || status.round != 1 || status.attempt != 3 || status.failures != 3 {
+		t.Fatalf("loop status = %+v, want stopped after three failures", status)
+	}
+}
+
+func TestLoopDoneRulesDoNotWrapFollowingNormalPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	rt := &fakeRuntime{promptResults: []acp.PromptResult{{Text: "DONE"}, {Text: "正常回答"}}}
+	svc := newTestService(config.Default(), store)
+	svc.setRuntime(rt)
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_chat", ""))
+	if err := store.Upsert(Session{Key: key, AgentName: "traex", ACPSessionID: "acp-session-1", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	client := newFakeSentMessageClient("om_loop_start")
+	ctx := withFakeSentMessageClient(context.Background(), svc, "bot-a", client)
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p", Text: "/loop -i 1ms 完成后退出"}); err != nil {
+		t.Fatalf("HandleFeishuMessage(/loop) error = %v", err)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		status, ok := svc.loopStatusSnapshot(key)
+		return ok && !status.running && status.reason == "agent 返回 DONE"
+	})
+	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{BotID: "bot-a", ChatID: "oc_chat", ChatType: "p2p", Text: "现在完成了吗？"})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(normal) error = %v", err)
+	}
+	if reply != "正常回答" {
+		t.Fatalf("reply = %q, want normal answer", reply)
+	}
+	rt.mu.Lock()
+	calls := append([]fakePromptCall(nil), rt.promptCalls...)
+	rt.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("prompt calls = %d, want loop and normal prompt", len(calls))
+	}
+	if !strings.Contains(calls[0].Text, "后续不含该段的普通用户消息不得沿用本规则") {
+		t.Fatalf("loop prompt = %q, want scoped DONE rule", calls[0].Text)
+	}
+	if strings.Contains(calls[1].Text, "## Loop Metadata") || strings.Contains(calls[1].Text, "## Loop Stop Rules") {
+		t.Fatalf("normal prompt = %q, should not contain loop rules", calls[1].Text)
+	}
+}
+
 func TestNewMessageCancelsRunningLoop(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	rt := &fakeRuntime{

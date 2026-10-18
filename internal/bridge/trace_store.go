@@ -726,6 +726,17 @@ func (r *traceRecorder) RunSteering(content string, steer func() (acp.SteeringRe
 		r.recordCond.Broadcast()
 	}
 	if err != nil {
+		if errors.Is(err, acp.ErrSteeringOutcomeUnknown) && r.terminalSeq == 0 {
+			r.flushProcessUpdates()
+			r.flushAssistant()
+			r.append(traceRecord{
+				Type:    "user",
+				Kind:    "steering_unknown",
+				Status:  "unknown",
+				Content: content,
+				Error:   err.Error(),
+			})
+		}
 		return result, err
 	}
 	if strings.TrimSpace(result.Outcome) != acp.SteeringOutcomeInjected {
@@ -778,6 +789,12 @@ func (r *traceRecorder) Interrupted(reason string) uint64 {
 	}
 	r.recordMu.Lock()
 	defer r.recordMu.Unlock()
+	for r.pendingSteering > 0 {
+		if r.recordCond == nil {
+			break
+		}
+		r.recordCond.Wait()
+	}
 	r.flushProcessUpdates()
 	r.flushTools()
 	r.flushAssistant()

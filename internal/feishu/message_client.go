@@ -83,7 +83,7 @@ func messageFromLarkMessage(item *larkim.Message) *Message {
 	}
 	if item.Body != nil {
 		content := value(item.Body.Content)
-		msg.Images = parseMessageImages(content)
+		msg.Images = parseMessageImagesForType(msg.MsgType, content)
 		setMessagePrimaryImage(msg)
 		if strings.EqualFold(msg.MsgType, "image") {
 			msg.Text = ""

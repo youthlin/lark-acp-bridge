@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -12,6 +13,11 @@ type SteeringResult struct {
 }
 
 const SteeringOutcomeInjected = "injected"
+
+// ErrSteeringOutcomeUnknown 表示 steering 请求已经成功写入 ACP 连接，但在收到
+// agent 的确认响应前调用上下文结束。此时 agent 可能已经注入补充消息，调用方
+// 不应把它当成明确的“未注入”并自动重发，否则可能造成重复提交或误打断当前 turn。
+var ErrSteeringOutcomeUnknown = errors.New("ACP steering 提交结果未知")
 
 func (c *Client) SupportsSteering() bool {
 	c.capMu.RLock()
@@ -24,6 +30,9 @@ func (c *Client) SupportsSteering() bool {
 }
 
 func (c *Client) Steer(ctx context.Context, sessionID, text string) (SteeringResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SteeringResult{}, err
+	}
 	if err := c.ensureInitialized(); err != nil {
 		return SteeringResult{}, err
 	}
@@ -37,13 +46,19 @@ func (c *Client) Steer(ctx context.Context, sessionID, text string) (SteeringRes
 	if strings.TrimSpace(text) == "" {
 		return SteeringResult{}, fmt.Errorf("ACP steering 输入为空")
 	}
-	result, err := c.call(ctx, "_session/steering", map[string]any{
+	requestWritten := false
+	result, err := c.callWithAfterWrite(ctx, "_session/steering", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []ContentBlock{
 			{Type: "text", Text: text},
 		},
+	}, func() {
+		requestWritten = true
 	})
 	if err != nil {
+		if requestWritten && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return SteeringResult{}, fmt.Errorf("%w: %w", ErrSteeringOutcomeUnknown, err)
+		}
 		return SteeringResult{}, err
 	}
 	var parsed SteeringResult

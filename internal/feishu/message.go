@@ -12,6 +12,8 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+const interactiveClientUpgradeFallback = "请升级至最新版本客户端，以查看内容"
+
 type Message struct {
 	BotID     string
 	BotOpenID string
@@ -118,7 +120,7 @@ func ParseMessage(event *larkim.P2MessageReceiveV1) (Message, error) {
 		msg.SenderType = value(event.Event.Sender.SenderType)
 	}
 	content := value(raw.Content)
-	msg.Images = parseMessageImages(content)
+	msg.Images = parseMessageImagesForType(msg.MsgType, content)
 	if len(msg.Images) > 0 {
 		msg.ImageKey = msg.Images[0].ImageKey
 	}
@@ -281,9 +283,21 @@ func parseInteractiveContent(content string) string {
 		}
 	}
 	if text := interactiveCardText(payload); text != "" {
-		return text
+		return removeInteractiveFallbackText(text)
 	}
-	return extractReadableMessageText(content)
+	return removeInteractiveFallbackText(extractReadableMessageText(content))
+}
+
+func removeInteractiveFallbackText(text string) string {
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) == interactiveClientUpgradeFallback {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 func parseInteractiveCardDSL(raw string) string {
@@ -739,6 +753,57 @@ func parseMessageImages(content string) []MessageImage {
 		images = append(images, MessageImage{ImageKey: key})
 	}
 	return images
+}
+
+func parseMessageImagesForType(msgType string, content string) []MessageImage {
+	if strings.EqualFold(strings.TrimSpace(msgType), "interactive") && interactiveContentHasUpgradeFallback(content) {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(content), &payload); err == nil {
+			userDSL := firstString(payload, "user_dsl")
+			if userDSL == "" {
+				return nil
+			}
+			var card any
+			if err := json.Unmarshal([]byte(userDSL), &card); err != nil {
+				return nil
+			}
+			keys := collectImageKeys(card, nil)
+			images := make([]MessageImage, 0, len(keys))
+			for _, key := range keys {
+				images = append(images, MessageImage{ImageKey: key})
+			}
+			return images
+		}
+	}
+	return parseMessageImages(content)
+}
+
+func interactiveContentHasUpgradeFallback(content string) bool {
+	var value any
+	if err := json.Unmarshal([]byte(content), &value); err != nil {
+		return false
+	}
+	return interactiveValueContainsExactText(value, interactiveClientUpgradeFallback)
+}
+
+func interactiveValueContainsExactText(value any, target string) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		for _, child := range v {
+			if interactiveValueContainsExactText(child, target) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if interactiveValueContainsExactText(child, target) {
+				return true
+			}
+		}
+	case string:
+		return strings.TrimSpace(v) == target
+	}
+	return false
 }
 
 func collectImageKeys(value any, keys []string) []string {

@@ -538,6 +538,31 @@ func TestParseMessageInteractiveBridgeForwardSkipsRuntimePanels(t *testing.T) {
 	}
 }
 
+func TestParseMessageInteractiveDropsUpgradeFallbackWithoutUserDSL(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageId:   ptr("om_interactive_fallback"),
+				ChatId:      ptr("oc_1"),
+				ChatType:    ptr("group"),
+				MessageType: ptr("interactive"),
+				Content:     ptr(`{"title":null,"elements":[[{"tag":"img","image_key":"img_v3_fallback"},{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]]}`),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(event)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if got := msg.PromptText(); got != "" {
+		t.Fatalf("PromptText() = %q, want empty fallback context", got)
+	}
+	if len(msg.Images) != 0 || msg.ImageKey != "" {
+		t.Fatalf("Images = %+v ImageKey=%q, want fallback image removed", msg.Images, msg.ImageKey)
+	}
+}
+
 func TestParseMessageInteractiveDefaultContent(t *testing.T) {
 	got, err := parseMessageContent("interactive", `{
   "title": "卡片标题",
