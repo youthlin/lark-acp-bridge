@@ -823,7 +823,7 @@ func (r *traceRecorder) recordToolChunk(kind string, u acp.SessionUpdate, text s
 		tool = &traceToolAggregate{id: id}
 		r.tools[id] = tool
 	}
-	if name := toolDisplayName(u); name != "" {
+	if name := toolBaseName(u); name != "" {
 		tool.name = name
 	}
 	if u.Kind != "" {
@@ -858,7 +858,7 @@ func (r *traceRecorder) recordToolUpdate(kind string, u acp.SessionUpdate) {
 		tool = &traceToolAggregate{id: id}
 		r.tools[id] = tool
 	}
-	if name := toolDisplayName(u); name != "" {
+	if name := toolBaseName(u); name != "" {
 		tool.name = name
 	}
 	if u.Kind != "" {

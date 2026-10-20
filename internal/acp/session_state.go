@@ -72,10 +72,12 @@ type SessionConfigOption struct {
 }
 
 type SessionConfigOptionValue struct {
-	Value       string         `json:"value"`
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Meta        map[string]any `json:"_meta,omitempty"`
+	Value       string                     `json:"value,omitempty"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description,omitempty"`
+	Meta        map[string]any             `json:"_meta,omitempty"`
+	Group       string                     `json:"group,omitempty"`
+	Options     []SessionConfigOptionValue `json:"options,omitempty"`
 }
 
 func filterSupportedConfigOptions(options []SessionConfigOption) []SessionConfigOption {
@@ -96,11 +98,17 @@ func normalizeConfigOption(opt SessionConfigOption) SessionConfigOption {
 	opt.ID = strings.TrimSpace(opt.ID)
 	opt.Category = strings.TrimSpace(opt.Category)
 	opt.Type = strings.TrimSpace(opt.Type)
-	for i := range opt.Options {
-		opt.Options[i].Value = strings.TrimSpace(opt.Options[i].Value)
-		opt.Options[i].Name = strings.TrimSpace(opt.Options[i].Name)
-	}
+	normalizeConfigOptionValues(opt.Options)
 	return opt
+}
+
+func normalizeConfigOptionValues(values []SessionConfigOptionValue) {
+	for i := range values {
+		values[i].Value = strings.TrimSpace(values[i].Value)
+		values[i].Name = strings.TrimSpace(values[i].Name)
+		values[i].Group = strings.TrimSpace(values[i].Group)
+		normalizeConfigOptionValues(values[i].Options)
+	}
 }
 
 func isSupportedConfigOptionType(optionType string) bool {

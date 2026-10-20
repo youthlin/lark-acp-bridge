@@ -30,6 +30,25 @@ func TestModelSelectionOptionsFallsBackToModels(t *testing.T) {
 	}
 }
 
+func TestModelSelectionOptionsIncludesGroupedConfigOptions(t *testing.T) {
+	options := modelSelectionOptions(Session{}, acp.SessionConfigOption{
+		ID:       "model",
+		Category: "model",
+		Options: []acp.SessionConfigOptionValue{
+			{
+				Group: "mock",
+				Name:  "Mock Provider",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "[\"mock\",\"plain\"]", Name: "Mock Plain"},
+				},
+			},
+		},
+	})
+	if len(options) != 1 || options[0].Value != "[\"mock\",\"plain\"]" || options[0].Name != "Mock Plain" {
+		t.Fatalf("options = %+v, want flattened grouped model option", options)
+	}
+}
+
 func TestModelSelectionOptionsIncludesTraeLoadFromConfigOptions(t *testing.T) {
 	options := modelSelectionOptions(Session{}, acp.SessionConfigOption{
 		ID:       "model",
@@ -84,6 +103,25 @@ func traeLoadMeta(percent int) map[string]any {
 	}
 }
 
+func TestModeSelectionOptionsIncludesGroupedConfigOptions(t *testing.T) {
+	options := modeSelectionOptions(Session{}, acp.SessionConfigOption{
+		ID:       "mode",
+		Category: "mode",
+		Options: []acp.SessionConfigOptionValue{
+			{
+				Group: "builtin",
+				Name:  "Builtin",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "plan", Name: "Plan"},
+				},
+			},
+		},
+	})
+	if len(options) != 1 || options[0].Value != "plan" || options[0].Name != "Plan" {
+		t.Fatalf("options = %+v, want flattened grouped mode option", options)
+	}
+}
+
 func TestModeSelectionOptionsFallsBackToModeState(t *testing.T) {
 	session := Session{
 		Mode: &acp.SessionModeState{
@@ -97,6 +135,30 @@ func TestModeSelectionOptionsFallsBackToModeState(t *testing.T) {
 	options := modeSelectionOptions(session, acp.SessionConfigOption{ID: "mode", Category: "mode"})
 	if len(options) != 2 || options[1].Value != "plan" || options[1].Name != "Plan" {
 		t.Fatalf("options = %+v, want modes fallback", options)
+	}
+}
+
+func TestResolveModelValueSupportsGroupedConfigOptions(t *testing.T) {
+	opt := acp.SessionConfigOption{
+		ID:       "model",
+		Category: "model",
+		Type:     "select",
+		Options: []acp.SessionConfigOptionValue{
+			{
+				Group: "mock",
+				Name:  "Mock Provider",
+				Options: []acp.SessionConfigOptionValue{
+					{Value: "[\"mock\",\"plain\"]", Name: "Mock Plain"},
+				},
+			},
+		},
+	}
+	value, ok := resolveModelValue(opt, "Mock Plain")
+	if !ok || value != "[\"mock\",\"plain\"]" {
+		t.Fatalf("resolveModelValue() = %q, %v, want DSH grouped model value", value, ok)
+	}
+	if display := modelOptionName(opt, value); display != "Mock Plain（[\"mock\",\"plain\"]）" {
+		t.Fatalf("modelOptionName() = %q, want friendly grouped display", display)
 	}
 }
 

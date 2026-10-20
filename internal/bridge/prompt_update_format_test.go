@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/youthlin/lark-acp-bridge/internal/acp"
@@ -92,5 +94,49 @@ func TestIsPlanUpdateKindRequiresPlanToken(t *testing.T) {
 		if isPlanUpdateKind(kind) {
 			t.Fatalf("isPlanUpdateKind(%q) = true, want false", kind)
 		}
+	}
+}
+
+func TestToolDisplayNameRedactsRawInput(t *testing.T) {
+	rawInput := json.RawMessage(`{"file_path":"/tmp/secret.go","offset":12,"limit":20,"app_secret":"show-as-requested","key":"key-value","password":"pw-value","密码":"pwd-value","密钥":"secret-key","私钥":"private-key"}`)
+	got := toolDisplayName(acp.SessionUpdate{Name: "read", RawInput: rawInput})
+	for _, unexpected := range []string{"show-as-requested", "key-value", "pw-value", "pwd-value", "secret-key", "private-key"} {
+		if strings.Contains(got, unexpected) {
+			t.Fatalf("toolDisplayName() = %q, should not include %q", got, unexpected)
+		}
+	}
+	for _, want := range []string{
+		`read({`,
+		`"app_secret":"[已隐藏]"`,
+		`"key":"[已隐藏]"`,
+		`"password":"[已隐藏]"`,
+		`"密码":"[已隐藏]"`,
+		`"密钥":"[已隐藏]"`,
+		`"私钥":"[已隐藏]"`,
+		`"file_path":"/tmp/secret.go"`,
+		`"limit":20`,
+		`"offset":12`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("toolDisplayName() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestToolDisplayNameKeepsFullRawInput(t *testing.T) {
+	rawInput := json.RawMessage(`{"file_path":"/tmp/main.go","old_string":"old content","new_string":"new content"}`)
+	got := toolDisplayName(acp.SessionUpdate{Name: "edit", RawInput: rawInput})
+	want := `edit({"file_path":"/tmp/main.go","new_string":"new content","old_string":"old content"})`
+	if got != want {
+		t.Fatalf("toolDisplayName() = %q, want %q", got, want)
+	}
+}
+
+func TestToolDisplayNameUsesRawNestedInput(t *testing.T) {
+	raw := json.RawMessage(`{"toolCall":{"name":"grep"},"input":{"path":"/repo","pattern":"TODO","include":"*.go"}}`)
+	got := toolDisplayName(acp.SessionUpdate{Raw: raw})
+	want := `grep({"include":"*.go","path":"/repo","pattern":"TODO"})`
+	if got != want {
+		t.Fatalf("toolDisplayName() = %q, want %q", got, want)
 	}
 }

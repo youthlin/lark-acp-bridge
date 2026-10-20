@@ -19,24 +19,7 @@ func formatModelStatus(session Session) string {
 	if hasModelOpt && len(modelOpt.Options) > 0 {
 		lines = append(lines, "", "可用模型：")
 		modelLoads := modelLoadPercentByID(session.Models)
-		for _, opt := range modelOpt.Options {
-			value := strings.TrimSpace(opt.Value)
-			if value == "" {
-				continue
-			}
-			marker := ""
-			if value == modelValueString(modelOpt.CurrentValue) {
-				marker = " *"
-			}
-			label := value
-			if strings.TrimSpace(opt.Name) != "" && opt.Name != opt.Value {
-				label += " - " + strings.TrimSpace(opt.Name)
-			}
-			if load := formatModelOptionLoad(opt, modelLoads); load != "" {
-				label += " - " + load
-			}
-			lines = append(lines, marker+" "+label)
-		}
+		appendModelConfigOptionStatusLines(&lines, modelOpt.Options, modelValueString(modelOpt.CurrentValue), modelLoads)
 	} else if session.Models != nil && len(session.Models.AvailableModels) > 0 {
 		lines = append(lines, "", "可用模型：")
 		for _, model := range session.Models.AvailableModels {
@@ -63,6 +46,31 @@ func formatModelStatus(session Session) string {
 	return strings.Join(lines, "\n")
 }
 
+func appendModelConfigOptionStatusLines(lines *[]string, values []acp.SessionConfigOptionValue, current string, modelLoads map[string]*int) {
+	for _, opt := range values {
+		if len(opt.Options) > 0 {
+			appendModelConfigOptionStatusLines(lines, opt.Options, current, modelLoads)
+			continue
+		}
+		value := strings.TrimSpace(opt.Value)
+		if value == "" {
+			continue
+		}
+		marker := ""
+		if value == current {
+			marker = " *"
+		}
+		label := value
+		if strings.TrimSpace(opt.Name) != "" && opt.Name != opt.Value {
+			label += " - " + strings.TrimSpace(opt.Name)
+		}
+		if load := formatModelOptionLoad(opt, modelLoads); load != "" {
+			label += " - " + load
+		}
+		*lines = append(*lines, marker+" "+label)
+	}
+}
+
 func formatModeStatus(session Session) string {
 	lines := []string{"当前会话模式："}
 	current := currentModeDisplay(session)
@@ -73,7 +81,7 @@ func formatModeStatus(session Session) string {
 	modeOpt, hasModeOpt := findModeConfigOption(session)
 	if hasModeOpt && len(modeOpt.Options) > 0 {
 		lines = append(lines, "", "可用模式：")
-		for _, opt := range modeOpt.Options {
+		for _, opt := range flattenConfigOptionValues(modeOpt.Options) {
 			if strings.TrimSpace(opt.Value) == "" {
 				continue
 			}
@@ -150,6 +158,18 @@ func formatConfigOptionSummaryWithModelState(opt acp.SessionConfigOption, models
 	return fmt.Sprintf("%s [%s] = %s", label, optionType, current)
 }
 
+func flattenConfigOptionValues(values []acp.SessionConfigOptionValue) []acp.SessionConfigOptionValue {
+	flattened := make([]acp.SessionConfigOptionValue, 0, len(values))
+	for _, value := range values {
+		if len(value.Options) > 0 {
+			flattened = append(flattened, flattenConfigOptionValues(value.Options)...)
+			continue
+		}
+		flattened = append(flattened, value)
+	}
+	return flattened
+}
+
 func formatConfigOptionDetailWithModelState(opt acp.SessionConfigOption, models *acp.SessionModelState) string {
 	id := strings.TrimSpace(opt.ID)
 	lines := []string{"ACP 配置项：" + id}
@@ -175,7 +195,7 @@ func formatConfigOptionDetailWithModelState(opt acp.SessionConfigOption, models 
 	if len(opt.Options) > 0 {
 		lines = append(lines, "", "可选值：")
 		modelLoads := modelLoadPercentByID(models)
-		for _, option := range opt.Options {
+		for _, option := range flattenConfigOptionValues(opt.Options) {
 			value := strings.TrimSpace(option.Value)
 			if value == "" {
 				continue
@@ -214,7 +234,7 @@ func configDetailCardWithModelState(opt acp.SessionConfigOption, models *acp.Ses
 	}
 	options := make([]feishu.ConfigOptionValue, 0, len(opt.Options))
 	modelLoads := modelLoadPercentByID(models)
-	for _, option := range opt.Options {
+	for _, option := range flattenConfigOptionValues(opt.Options) {
 		value := strings.TrimSpace(option.Value)
 		if value == "" {
 			continue
@@ -267,7 +287,7 @@ func formatCurrentConfigOptionLoad(opt acp.SessionConfigOption, models *acp.Sess
 		return ""
 	}
 	modelLoads := modelLoadPercentByID(models)
-	for _, option := range opt.Options {
+	for _, option := range flattenConfigOptionValues(opt.Options) {
 		if strings.TrimSpace(option.Value) == current {
 			return formatModelOptionLoad(option, modelLoads)
 		}
@@ -360,7 +380,7 @@ func resolveConfigOptionValue(opt acp.SessionConfigOption, target string) (strin
 	if len(opt.Options) == 0 {
 		return target, true
 	}
-	for _, value := range opt.Options {
+	for _, value := range flattenConfigOptionValues(opt.Options) {
 		if value.Value == target || strings.EqualFold(value.Name, target) {
 			return value.Value, true
 		}
@@ -426,7 +446,7 @@ func modelOptionName(opt acp.SessionConfigOption, value string) string {
 }
 
 func configOptionDisplayName(opt acp.SessionConfigOption, value string) string {
-	for _, option := range opt.Options {
+	for _, option := range flattenConfigOptionValues(opt.Options) {
 		if option.Value != value {
 			continue
 		}

@@ -636,7 +636,7 @@ func escapeInlineMarkdown(text string) string {
 // 再退回到最近一个活跃工具;都没有时用占位文案。
 func (s *promptCardStream) resolveToolTitleLocked(id, rawTitle string) string {
 	if rawTitle != "" {
-		return truncateRunes(rawTitle, 80)
+		return truncateRunes(rawTitle, 160)
 	}
 	if id != "" {
 		if idx := s.findToolRowLocked(id, ""); idx >= 0 {

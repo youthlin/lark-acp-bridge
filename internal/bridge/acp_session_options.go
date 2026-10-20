@@ -214,22 +214,7 @@ func (s *Service) sendModelSelectionCard(ctx context.Context, msg feishu.Message
 
 func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []feishu.ModelOption {
 	modelLoads := modelLoadPercentByID(session.Models)
-	options := make([]feishu.ModelOption, 0, len(modelOpt.Options))
-	for _, option := range modelOpt.Options {
-		value := strings.TrimSpace(option.Value)
-		if value == "" {
-			continue
-		}
-		load := modelLoadPercentPtr(option.Meta)
-		if load == nil {
-			load = modelLoads[value]
-		}
-		options = append(options, feishu.ModelOption{
-			Value:       option.Value,
-			Name:        option.Name,
-			LoadPercent: load,
-		})
-	}
+	options := flattenConfigModelOptions(modelOpt.Options, modelLoads)
 	if len(options) > 0 || session.Models == nil {
 		return options
 	}
@@ -242,6 +227,30 @@ func modelSelectionOptions(session Session, modelOpt acp.SessionConfigOption) []
 			Value:       model.ModelID,
 			Name:        model.Name,
 			LoadPercent: modelLoadPercentPtr(model.Meta),
+		})
+	}
+	return options
+}
+
+func flattenConfigModelOptions(values []acp.SessionConfigOptionValue, modelLoads map[string]*int) []feishu.ModelOption {
+	options := make([]feishu.ModelOption, 0, len(values))
+	for _, option := range values {
+		if len(option.Options) > 0 {
+			options = append(options, flattenConfigModelOptions(option.Options, modelLoads)...)
+			continue
+		}
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		load := modelLoadPercentPtr(option.Meta)
+		if load == nil {
+			load = modelLoads[value]
+		}
+		options = append(options, feishu.ModelOption{
+			Value:       option.Value,
+			Name:        option.Name,
+			LoadPercent: load,
 		})
 	}
 	return options
@@ -331,7 +340,7 @@ func (s *Service) sendModeSelectionCard(ctx context.Context, msg feishu.Message,
 
 func modeSelectionOptions(session Session, modeOpt acp.SessionConfigOption) []feishu.ModeOption {
 	options := make([]feishu.ModeOption, 0, len(modeOpt.Options))
-	for _, option := range modeOpt.Options {
+	for _, option := range flattenConfigOptionValues(modeOpt.Options) {
 		if strings.TrimSpace(option.Value) == "" {
 			continue
 		}

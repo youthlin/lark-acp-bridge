@@ -1465,6 +1465,42 @@ func TestConfigOptionsTrimStructuredFields(t *testing.T) {
 	}
 }
 
+func TestConfigOptionsPreserveGroupedSelectOptions(t *testing.T) {
+	var info SessionInfo
+	if err := json.Unmarshal([]byte(`{
+		"sessionId": "session-1",
+		"configOptions": [
+			{
+				"id": "model",
+				"category": "model",
+				"type": "select",
+				"currentValue": "[\"mock\",\"plain\"]",
+				"options": [
+					{
+						"group": " mock ",
+						"name": " Mock Provider ",
+						"options": [
+							{"value": " [\"mock\",\"plain\"] ", "name": " Mock Plain "}
+						]
+					}
+				]
+			}
+		]
+	}`), &info); err != nil {
+		t.Fatalf("Unmarshal SessionInfo error = %v", err)
+	}
+	if len(info.ConfigOptions) != 1 {
+		t.Fatalf("ConfigOptions = %+v, want one option", info.ConfigOptions)
+	}
+	groups := info.ConfigOptions[0].Options
+	if len(groups) != 1 || groups[0].Group != "mock" || groups[0].Name != "Mock Provider" {
+		t.Fatalf("groups = %+v, want trimmed model group", groups)
+	}
+	if len(groups[0].Options) != 1 || groups[0].Options[0].Value != "[\"mock\",\"plain\"]" || groups[0].Options[0].Name != "Mock Plain" {
+		t.Fatalf("group values = %+v, want trimmed nested option", groups[0].Options)
+	}
+}
+
 func TestClientSetMode(t *testing.T) {
 	client, server := newPipeClient(t)
 	defer server.close()

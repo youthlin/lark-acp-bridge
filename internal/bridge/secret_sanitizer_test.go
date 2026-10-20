@@ -120,6 +120,28 @@ func TestSanitizePromptSecretsKeepsBaseURLAndPlainKeyText(t *testing.T) {
 	}
 }
 
+func TestRedactSensitiveValuesForDisplayRedactsGenericAndChineseKeys(t *testing.T) {
+	text := `key=key-value password=pw-value 密码=pwd-value 密钥=secret-key 私钥=private-key use the key concept`
+	got := redactSensitiveValuesForDisplay(text)
+	for _, unexpected := range []string{"key-value", "pw-value", "pwd-value", "secret-key", "private-key"} {
+		if strings.Contains(got, unexpected) {
+			t.Fatalf("redactSensitiveValuesForDisplay() = %q, should not include %q", got, unexpected)
+		}
+	}
+	for _, want := range []string{
+		"key=" + secretInputPlaceholder,
+		"password=" + secretInputPlaceholder,
+		"密码=" + secretInputPlaceholder,
+		"密钥=" + secretInputPlaceholder,
+		"私钥=" + secretInputPlaceholder,
+		"use the key concept",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("redactSensitiveValuesForDisplay() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestACPCommandSecretsAreRedactedWithoutBreakingSlashCommand(t *testing.T) {
 	workspace := t.TempDir()
 	markWorkspaceBootstrapped(t, workspace)

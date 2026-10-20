@@ -1136,10 +1136,19 @@ func cloneConfigOptions(options []acp.SessionConfigOption) []acp.SessionConfigOp
 	}
 	cloned := append([]acp.SessionConfigOption(nil), options...)
 	for i := range cloned {
-		cloned[i].Options = append([]acp.SessionConfigOptionValue(nil), cloned[i].Options...)
-		for j := range cloned[i].Options {
-			cloned[i].Options[j].Meta = cloneJSONMap(cloned[i].Options[j].Meta)
-		}
+		cloned[i].Options = cloneConfigOptionValues(cloned[i].Options)
+	}
+	return cloned
+}
+
+func cloneConfigOptionValues(options []acp.SessionConfigOptionValue) []acp.SessionConfigOptionValue {
+	if options == nil {
+		return nil
+	}
+	cloned := append([]acp.SessionConfigOptionValue(nil), options...)
+	for i := range cloned {
+		cloned[i].Meta = cloneJSONMap(cloned[i].Meta)
+		cloned[i].Options = cloneConfigOptionValues(cloned[i].Options)
 	}
 	return cloned
 }

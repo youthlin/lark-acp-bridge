@@ -292,7 +292,62 @@ func rawChunkTextValue(value any) string {
 }
 
 func toolDisplayName(u acp.SessionUpdate) string {
+	name := toolBaseName(u)
+	input := toolInputText(u.RawInput, u.Raw)
+	if input == "" {
+		return redactSensitiveValuesForDisplay(name)
+	}
+	if name == "" {
+		return redactSensitiveValuesForDisplay("(" + input + ")")
+	}
+	return redactSensitiveValuesForDisplay(name + "(" + input + ")")
+}
+
+func toolBaseName(u acp.SessionUpdate) string {
 	return firstNonEmpty(u.Title, u.Name, rawName(u.Raw), rawString(u.Raw, "title"))
+}
+
+func toolInputText(rawInput, raw json.RawMessage) string {
+	if text := compactJSON(rawInput); text != "" {
+		return text
+	}
+	value := rawValue(raw)
+	for _, key := range []string{"rawInput", "input", "arguments", "args", "params"} {
+		if text := compactJSONValue(rawNestedValue(value, key)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func compactJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return compactJSONValue(value)
+}
+
+func compactJSONValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func rawNestedValue(value any, key string) any {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return object[key]
 }
 
 func contentText(content *acp.ContentBlock) string {
