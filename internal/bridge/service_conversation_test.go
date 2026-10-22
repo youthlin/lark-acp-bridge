@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1240,7 +1241,7 @@ func TestHandleFeishuTopicGroupPendingMentionCacheIsTopicScoped(t *testing.T) {
 	}
 }
 
-func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *testing.T) {
+func TestHandleFeishuGroupChatPendingMentionCacheKeepsHundredAndInjectsLatestTwenty(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	workDir := t.TempDir()
 	cfg := config.Default()
@@ -1268,6 +1269,10 @@ func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *tes
 			t.Fatalf("reply = %q, want silent cache for %d", reply, i)
 		}
 	}
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_group", ""))
+	if got := len(svc.pendingAtTexts[key]); got != maxPendingAtMessages {
+		t.Fatalf("pending cache len = %d, want %d", got, maxPendingAtMessages)
+	}
 	reply, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
 		BotID:     "bot-a",
 		MessageID: "om_group_mention",
@@ -1287,17 +1292,211 @@ func TestHandleFeishuGroupChatPendingMentionCacheKeepsLastHundredMessages(t *tes
 		t.Fatalf("promptCalls = %+v, want one prompt after consuming cache", rt.promptCalls)
 	}
 	prompt := rt.promptCalls[0].Text
-	if strings.Contains(prompt, "cached-000") || strings.Contains(prompt, "sender=ou_000") {
-		t.Fatalf("prompt = %q, should drop oldest cached message", prompt)
+	if strings.Contains(prompt, "cached-080") || strings.Contains(prompt, "sender=ou_080") {
+		t.Fatalf("prompt = %q, should inject only the latest bounded history", prompt)
 	}
 	for _, want := range []string{
-		"- [msgid=om_group_cached_001, sender=ou_001]: cached-001",
+		"- [msgid=om_group_cached_081, sender=ou_081]: cached-081",
 		"- [msgid=om_group_cached_100, sender=ou_100]: cached-100",
 		"content：@智能助手 汇总一下",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want %q", prompt, want)
 		}
+	}
+	if got := len(svc.pendingAtTexts[key]); got != maxPendingAtMessages-maxPendingAtHistory {
+		t.Fatalf("pending cache len after first mention = %d, want %d", got, maxPendingAtMessages-maxPendingAtHistory)
+	}
+
+	reply, err = handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_group_second_mention",
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		SenderID:  "ou_a",
+		Text:      "@智能助手 再看前面的上下文",
+		Mentions:  []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(second mention) error = %v", err)
+	}
+	if reply != "ACP 回复" {
+		t.Fatalf("second reply = %q, want ACP reply", reply)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("promptCalls = %+v, want two prompts after second mention", rt.promptCalls)
+	}
+	secondPrompt := rt.promptCalls[1].Text
+	if strings.Contains(secondPrompt, "cached-060") || strings.Contains(secondPrompt, "cached-081") {
+		t.Fatalf("second prompt = %q, should inject the next remaining history window", secondPrompt)
+	}
+	for _, want := range []string{
+		"- [msgid=om_group_cached_061, sender=ou_061]: cached-061",
+		"- [msgid=om_group_cached_080, sender=ou_080]: cached-080",
+		"content：@智能助手 再看前面的上下文",
+	} {
+		if !strings.Contains(secondPrompt, want) {
+			t.Fatalf("second prompt = %q, want %q", secondPrompt, want)
+		}
+	}
+	if got := len(svc.pendingAtTexts[key]); got != maxPendingAtMessages-2*maxPendingAtHistory {
+		t.Fatalf("pending cache len after second mention = %d, want %d", got, maxPendingAtMessages-2*maxPendingAtHistory)
+	}
+}
+
+func TestHandleFeishuGroupChatPendingHistoryFiltersControlNoise(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	for _, msg := range []feishu.Message{
+		{
+			BotID: "bot-a", MessageID: "om_other_card_command", ChatID: "oc_group", ChatType: "group",
+			SenderID: "ou_owner", SenderType: "user", MsgType: "text", Text: "@ACP助手 /card",
+			Mentions: []feishu.Mention{{ID: "ou_other_bot", Name: "ACP助手", Type: "bot"}},
+		},
+		{
+			BotID: "bot-a", MessageID: "om_other_overview", ChatID: "oc_group", ChatType: "group",
+			SenderID: "ou_other_bot", SenderType: "bot", MsgType: "interactive", Text: "当前聊天全览\n运行态：空闲",
+		},
+		{
+			BotID: "bot-a", MessageID: "om_handoff", ChatID: "oc_group", ChatType: "group",
+			SenderID: "ou_other_bot", SenderType: "bot", MsgType: "text", Text: "生产排障结论：需要修复超时。",
+		},
+	} {
+		reply, err := handleFeishuMessage(t, svc, ctx, msg)
+		if err != nil || reply != "" {
+			t.Fatalf("cache message %s: reply=%q err=%v", msg.MessageID, reply, err)
+		}
+	}
+
+	_, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", MessageID: "om_current", ChatID: "oc_group", ChatType: "group",
+		SenderID: "ou_owner", SenderType: "user", MsgType: "text", Text: "@智能助手 继续",
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage(current) error = %v", err)
+	}
+	prompt := rt.promptCalls[0].Text
+	for _, unexpected := range []string{"/card", "当前聊天全览", "运行态：空闲"} {
+		if strings.Contains(prompt, unexpected) {
+			t.Fatalf("prompt = %q, should filter %q", prompt, unexpected)
+		}
+	}
+	for _, want := range []string{
+		"这些消息未提及当前 bot",
+		"msgid=om_handoff, sender=ou_other_bot, sender_type=bot, msg_type=text",
+		"生产排障结论：需要修复超时。",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHandleFeishuGroupChatPendingHistoryPrefersReplyChain(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-1", promptReply: "ACP 回复"}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	for _, msg := range []feishu.Message{
+		{BotID: "bot-a", MessageID: "om_unrelated", ChatID: "oc_group", ChatType: "group", Text: "无关的并行话题"},
+		{BotID: "bot-a", MessageID: "om_root", ChatID: "oc_group", ChatType: "group", Text: "请 ACP 检查生产"},
+		{BotID: "bot-a", MessageID: "om_reply", ChatID: "oc_group", ChatType: "group", RootID: "om_root", ParentID: "om_root", Text: "生产检查结论"},
+	} {
+		if _, err := handleFeishuMessage(t, svc, ctx, msg); err != nil {
+			t.Fatalf("cache message %s: %v", msg.MessageID, err)
+		}
+	}
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", MessageID: "om_scoped", ChatID: "oc_group", ChatType: "group",
+		RootID: "om_root", ParentID: "om_reply", Text: "@智能助手 根据上面结论处理",
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(scoped) error = %v", err)
+	}
+	firstPrompt := rt.promptCalls[0].Text
+	if !strings.Contains(firstPrompt, "请 ACP 检查生产") || !strings.Contains(firstPrompt, "生产检查结论") {
+		t.Fatalf("first prompt = %q, want reply-chain context", firstPrompt)
+	}
+	if strings.Contains(firstPrompt, "无关的并行话题") {
+		t.Fatalf("first prompt = %q, should exclude unrelated context", firstPrompt)
+	}
+
+	if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+		BotID: "bot-a", MessageID: "om_later", ChatID: "oc_group", ChatType: "group", Text: "@智能助手 再总结",
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	}); err != nil {
+		t.Fatalf("HandleFeishuMessage(later) error = %v", err)
+	}
+	if !strings.Contains(rt.promptCalls[1].Text, "无关的并行话题") {
+		t.Fatalf("second prompt = %q, want retained unscoped context", rt.promptCalls[1].Text)
+	}
+}
+
+func TestHandleFeishuGroupChatPendingHistoryRestoredAfterPromptFailure(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{
+		newSessionID: "acp-session-1",
+		promptReply:  "ACP 回复",
+		promptErrors: []error{errors.New("prompt failed"), nil},
+	}
+	svc := NewService(cfg, store)
+	svc.setRuntime(rt)
+	ctx := context.Background()
+
+	for i := 0; i <= maxPendingAtHistory; i++ {
+		if _, err := handleFeishuMessage(t, svc, ctx, feishu.Message{
+			BotID: "bot-a", MessageID: fmt.Sprintf("om_pending_%03d", i), ChatID: "oc_group", ChatType: "group",
+			Text: fmt.Sprintf("需要保留的背景-%03d", i),
+		}); err != nil {
+			t.Fatalf("cache pending %d: %v", i, err)
+		}
+	}
+	current := feishu.Message{
+		BotID: "bot-a", MessageID: "om_current_1", ChatID: "oc_group", ChatType: "group", Text: "@智能助手 处理",
+		Mentions: []feishu.Mention{testBotMention("智能助手")},
+	}
+	if _, err := handleFeishuMessage(t, svc, ctx, current); err == nil {
+		t.Fatal("first prompt error = nil, want failure")
+	}
+	current.MessageID = "om_current_2"
+	if _, err := handleFeishuMessage(t, svc, ctx, current); err != nil {
+		t.Fatalf("second prompt error = %v", err)
+	}
+	if len(rt.promptCalls) != 2 {
+		t.Fatalf("prompt calls = %+v, want restored history on retry", rt.promptCalls)
+	}
+	secondPrompt := rt.promptCalls[1].Text
+	if strings.Contains(secondPrompt, "需要保留的背景-000") {
+		t.Fatalf("second prompt = %q, should leave the oldest message for a later turn", secondPrompt)
+	}
+	for _, want := range []string{"需要保留的背景-001", "需要保留的背景-020"} {
+		if !strings.Contains(secondPrompt, want) {
+			t.Fatalf("second prompt = %q, want restored %q", secondPrompt, want)
+		}
+	}
+	key := normalizeSessionKey(imSessionKey("bot-a", "oc_group", ""))
+	if got := len(svc.pendingAtTexts[key]); got != 1 || svc.pendingAtTexts[key][0].MessageID != "om_pending_000" {
+		t.Fatalf("pending cache after retry = %+v, want only oldest message", svc.pendingAtTexts[key])
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
@@ -30,6 +32,52 @@ func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
 	msg.BotOpenID = ""
 	if messageMentionsBot(msg) {
 		t.Fatalf("messageMentionsBot without BotOpenID = true, want false")
+	}
+}
+
+func TestSelectPendingAtHistoryDropsExpiredAndTruncatesLongMessages(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.Local)
+	longText := strings.Repeat("长", maxPendingAtMessageLen+100)
+	selected, remaining := selectPendingAtHistory([]pendingAtMessage{
+		{MessageID: "old", Text: "过期消息", CachedAt: now.Add(-pendingAtHistoryTTL - time.Second)},
+		{MessageID: "fresh", Text: longText, CachedAt: now.Add(-time.Minute)},
+	}, feishu.Message{}, now)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining = %+v, want none", remaining)
+	}
+	if len(selected) != 1 || selected[0].MessageID != "fresh" {
+		t.Fatalf("selected = %+v, want only fresh message", selected)
+	}
+	if got := len([]rune(selected[0].Text)); got != maxPendingAtMessageLen {
+		t.Fatalf("selected text runes = %d, want %d", got, maxPendingAtMessageLen)
+	}
+	if !strings.HasSuffix(selected[0].Text, pendingAtTruncatedText) {
+		t.Fatalf("selected text = %q, want truncation marker", selected[0].Text)
+	}
+}
+
+func TestClearPendingAtTextsForChatClearsAllThreadsOnlyInTargetChat(t *testing.T) {
+	svc := NewService(config.Config{}, NewSessionStore(""))
+	targetGroup := normalizeSessionKey(imSessionKey("bot-a", "chat-a", ""))
+	targetThread := normalizeSessionKey(imSessionKey("bot-a", "chat-a", "thread-a"))
+	otherChat := normalizeSessionKey(imSessionKey("bot-a", "chat-b", ""))
+	otherBot := normalizeSessionKey(imSessionKey("bot-b", "chat-a", ""))
+	for _, key := range []SessionKey{targetGroup, targetThread, otherChat, otherBot} {
+		svc.pendingAtTexts[key] = []pendingAtMessage{{Text: key.MainID}}
+	}
+
+	svc.clearPendingAtTextsForChat("bot-a", "chat-a")
+	if _, ok := svc.pendingAtTexts[targetGroup]; ok {
+		t.Fatal("target group cache still exists")
+	}
+	if _, ok := svc.pendingAtTexts[targetThread]; ok {
+		t.Fatal("target thread cache still exists")
+	}
+	if _, ok := svc.pendingAtTexts[otherChat]; !ok {
+		t.Fatal("other chat cache was removed")
+	}
+	if _, ok := svc.pendingAtTexts[otherBot]; !ok {
+		t.Fatal("other bot cache was removed")
 	}
 }
 

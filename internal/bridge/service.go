@@ -453,18 +453,29 @@ func firstSlashCommandName(text string) string {
 }
 
 func (s *Service) handlePromptMessage(ctx context.Context, incoming incomingPromptMessage) (string, error) {
-	promptText, textWrapped := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
+	promptText, textWrapped, pendingClaim := s.promptTextWithPendingAtTexts(incoming.msg, incoming.promptText)
 	if s.shouldQueueAtAutoMessage(incoming.msg) {
-		return s.handleAtAutoPromptMessage(ctx, incoming, promptText, textWrapped)
-	}
-	if handled, reply, err := s.trySteerRunningPrompt(ctx, incoming.msg, promptText, textWrapped); err != nil || handled {
+		reply, err := s.handleAtAutoPromptMessage(ctx, incoming, promptText, textWrapped)
+		if err != nil {
+			s.restorePendingAtTextClaim(pendingClaim)
+		}
 		return reply, err
 	}
-	return s.promptWithOptions(ctx, incoming.msg, promptText, promptSessionOptions{
+	if handled, reply, err := s.trySteerRunningPrompt(ctx, incoming.msg, promptText, textWrapped); err != nil || handled {
+		if err != nil {
+			s.restorePendingAtTextClaim(pendingClaim)
+		}
+		return reply, err
+	}
+	reply, err := s.promptWithOptions(ctx, incoming.msg, promptText, promptSessionOptions{
 		TitleText:    incoming.titleText,
 		TitleTextSet: true,
 		TextWrapped:  textWrapped,
 	})
+	if err != nil {
+		s.restorePendingAtTextClaim(pendingClaim)
+	}
+	return reply, err
 }
 
 func (s *Service) trySteerRunningPrompt(ctx context.Context, msg feishu.Message, userText string, textWrapped bool) (bool, string, error) {
