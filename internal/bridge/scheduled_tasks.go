@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,8 @@ import (
 const (
 	scheduleOverlapSkipIfRunning = "skip_if_running"
 	sessionSourceSchedule        = "schedule"
+	scheduleSessionModeIsolated  = "isolated"
+	scheduleSessionModeBound     = "bound"
 	scheduleRunHistoryLimit      = 100
 	scheduleStreamCardRunning    = "定时任务执行中"
 	scheduleStreamCardCompleted  = "定时任务已完成"
@@ -41,8 +44,16 @@ type ScheduledTask struct {
 	AgentName            string                  `json:"agent_name"`
 	Cwd                  string                  `json:"cwd"`
 	Prompt               string                  `json:"prompt"`
+	SessionMode          string                  `json:"session_mode,omitempty"`
+	BoundSessionKey      SessionKey              `json:"bound_session_key,omitempty"`
+	BoundACPSessionID    string                  `json:"bound_acp_session_id,omitempty"`
+	MaxRuns              int                     `json:"max_runs,omitempty"`
+	RunCount             int                     `json:"run_count,omitempty"`
+	ExpiresAt            *time.Time              `json:"expires_at,omitempty"`
+	RunTimeoutSec        int64                   `json:"run_timeout_sec,omitempty"`
 	CreatorOpenID        string                  `json:"creator_open_id,omitempty"`
 	CreatedFromChatID    string                  `json:"created_from_chat_id,omitempty"`
+	CreatedFromChatType  string                  `json:"created_from_chat_type,omitempty"`
 	CreatedFromThreadID  string                  `json:"created_from_thread_id,omitempty"`
 	CreatedFromMessageID string                  `json:"created_from_message_id,omitempty"`
 	ResultSink           ScheduledTaskResultSink `json:"result_sink,omitempty"`
@@ -83,8 +94,10 @@ type scheduledTaskJob struct {
 	workspace  string
 	schedule   scheduleSpec
 	cancel     context.CancelFunc
+	transient  bool
 	mu         sync.Mutex
 	activeRuns map[string]scheduledTaskActiveRun
+	activeWake chan struct{}
 }
 
 type scheduledTaskActiveRun struct {
@@ -197,6 +210,11 @@ func scheduledTaskRunOrderedMetadata(task ScheduledTask, runID string, triggered
 		{"schedule_spec", task.Spec},
 		{"timezone", task.Timezone},
 		{"triggered_at", triggeredAtText},
+		{"session_mode", task.SessionMode},
+		{"bound_acp_session_id", task.BoundACPSessionID},
+		{"run_count", strconv.Itoa(task.RunCount)},
+		{"max_runs", strconv.Itoa(task.MaxRuns)},
+		{"expires_at", scheduledTaskExpiresAtText(task)},
 		{"creator_open_id", task.CreatorOpenID},
 		{"created_from_chat_id", task.CreatedFromChatID},
 		{"created_from_thread_id", task.CreatedFromThreadID},
@@ -216,8 +234,28 @@ func normalizeScheduledTask(task ScheduledTask) ScheduledTask {
 	task.AgentName = strings.TrimSpace(task.AgentName)
 	task.Cwd = strings.TrimSpace(task.Cwd)
 	task.Prompt = strings.TrimSpace(task.Prompt)
+	task.SessionMode = strings.ToLower(strings.TrimSpace(task.SessionMode))
+	if task.SessionMode == "" {
+		task.SessionMode = scheduleSessionModeIsolated
+	}
+	task.BoundSessionKey = normalizeSessionKey(task.BoundSessionKey)
+	task.BoundACPSessionID = strings.TrimSpace(task.BoundACPSessionID)
+	if task.MaxRuns < 0 {
+		task.MaxRuns = 0
+	}
+	if task.RunCount < 0 {
+		task.RunCount = 0
+	}
+	if task.RunTimeoutSec < 0 {
+		task.RunTimeoutSec = 0
+	}
+	if task.ExpiresAt != nil {
+		expiresAt := task.ExpiresAt.UTC()
+		task.ExpiresAt = &expiresAt
+	}
 	task.CreatorOpenID = strings.TrimSpace(task.CreatorOpenID)
 	task.CreatedFromChatID = strings.TrimSpace(task.CreatedFromChatID)
+	task.CreatedFromChatType = strings.TrimSpace(task.CreatedFromChatType)
 	task.CreatedFromThreadID = strings.TrimSpace(task.CreatedFromThreadID)
 	task.CreatedFromMessageID = strings.TrimSpace(task.CreatedFromMessageID)
 	task.ResultSink.Type = strings.TrimSpace(task.ResultSink.Type)
@@ -232,10 +270,21 @@ func normalizeScheduledTask(task ScheduledTask) ScheduledTask {
 }
 
 func validScheduledTask(task ScheduledTask) bool {
-	return task.ID != "" &&
-		task.BotID != "" &&
-		task.Spec != "" &&
-		task.AgentName != "" &&
-		task.Cwd != "" &&
-		task.Prompt != ""
+	if task.ID == "" || task.BotID == "" || task.Spec == "" || task.AgentName == "" || task.Cwd == "" || task.Prompt == "" {
+		return false
+	}
+	if task.SessionMode != scheduleSessionModeIsolated && task.SessionMode != scheduleSessionModeBound {
+		return false
+	}
+	if task.SessionMode == scheduleSessionModeBound {
+		return task.BoundSessionKey.Valid() && task.BoundSessionKey.BotID == task.BotID && task.BoundACPSessionID != ""
+	}
+	return true
+}
+
+func scheduledTaskExpiresAtText(task ScheduledTask) string {
+	if task.ExpiresAt == nil || task.ExpiresAt.IsZero() {
+		return ""
+	}
+	return task.ExpiresAt.Format(time.RFC3339)
 }

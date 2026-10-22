@@ -805,15 +805,17 @@ func TestFinishRunningTaskSessionWorkBoundaries(t *testing.T) {
 			wantDrain:  true,
 		},
 		{
-			name:       "queued continuation 完成后删除但不触发队列 drain",
+			name:       "queued continuation 完成后删除并尝试触发队列 drain",
 			storedTask: func(current *runningTask) *runningTask { return current },
 			kind:       taskKindUser,
 			opts:       runningTaskOptions{queuedContinuation: true},
+			wantDrain:  true,
 		},
 		{
-			name:       "wiki task 完成后删除但不触发队列 drain",
+			name:       "wiki task 完成后删除并触发队列 drain",
 			storedTask: func(current *runningTask) *runningTask { return current },
 			kind:       taskKindWiki,
+			wantDrain:  true,
 		},
 		{
 			name:             "当前 task 已被替换时不删除新 task",

@@ -473,7 +473,14 @@ func (s *Service) finishRunningTask(key SessionKey, task *runningTask, kind task
 	if opts.skipPromptQueueDrain {
 		return false
 	}
-	return kind == taskKindUser && !opts.queuedContinuation
+	return true
+}
+
+func (s *Service) sessionHasRunningTask(key SessionKey) bool {
+	key = normalizeSessionKey(key)
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	return s.tasks[key] != nil
 }
 
 func (s *Service) sessionHasRunningUserTask(key SessionKey) bool {

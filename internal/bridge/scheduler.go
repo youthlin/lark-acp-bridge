@@ -18,13 +18,14 @@ import (
 type scheduler struct {
 	mu sync.Mutex
 
-	stores         map[string]*ScheduledTaskStore
-	senders        map[string]scheduledTaskIMSender
-	messageSenders map[string]scheduledTaskMessageSender
-	streams        map[string]scheduledTaskStreamStarter
-	runs           map[string]scheduleRunStatus
-	runsByTask     map[string]map[string]struct{}
-	jobs           map[string]*scheduledTaskJob
+	stores               map[string]*ScheduledTaskStore
+	senders              map[string]scheduledTaskIMSender
+	messageSenders       map[string]scheduledTaskMessageSender
+	streams              map[string]scheduledTaskStreamStarter
+	runs                 map[string]scheduleRunStatus
+	runsByTask           map[string]map[string]struct{}
+	jobs                 map[string]*scheduledTaskJob
+	persistenceRetryBase time.Duration
 
 	hooks schedulerHooks
 }
@@ -32,6 +33,7 @@ type scheduler struct {
 type schedulerHooks struct {
 	startBackground              func(context.Context, string, func(context.Context)) bool
 	runTriggerPrompt             func(context.Context, TriggerRequest) (TriggerResult, error)
+	runBoundScheduledTask        func(context.Context, ScheduledTask, string, time.Time) (TriggerResult, error)
 	cancelRunningSessionWorkSync func(context.Context, SessionKey)
 	cancelScheduledTaskRuns      func(context.Context, ScheduledTask)
 	botWorkspace                 func(string) string
@@ -41,14 +43,15 @@ type schedulerHooks struct {
 
 func newScheduler(hooks schedulerHooks) scheduler {
 	return scheduler{
-		stores:         make(map[string]*ScheduledTaskStore),
-		senders:        make(map[string]scheduledTaskIMSender),
-		messageSenders: make(map[string]scheduledTaskMessageSender),
-		streams:        make(map[string]scheduledTaskStreamStarter),
-		runs:           make(map[string]scheduleRunStatus),
-		runsByTask:     make(map[string]map[string]struct{}),
-		jobs:           make(map[string]*scheduledTaskJob),
-		hooks:          hooks,
+		stores:               make(map[string]*ScheduledTaskStore),
+		senders:              make(map[string]scheduledTaskIMSender),
+		messageSenders:       make(map[string]scheduledTaskMessageSender),
+		streams:              make(map[string]scheduledTaskStreamStarter),
+		runs:                 make(map[string]scheduleRunStatus),
+		runsByTask:           make(map[string]map[string]struct{}),
+		jobs:                 make(map[string]*scheduledTaskJob),
+		persistenceRetryBase: time.Second,
+		hooks:                hooks,
 	}
 }
 
@@ -215,21 +218,92 @@ func (s *scheduler) stopScheduledTask(ctx context.Context, task ScheduledTask) {
 	}
 }
 
+func (s *scheduler) registerExecutionRun(task ScheduledTask, workspace, runID string, key SessionKey, cancel context.CancelFunc) *scheduledTaskJob {
+	task = normalizeScheduledTask(task)
+	jobID := scheduledTaskJobID(task)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[jobID]
+	if job == nil {
+		job = &scheduledTaskJob{task: task, workspace: strings.TrimSpace(workspace), transient: true}
+		s.jobs[jobID] = job
+	}
+	job.mu.Lock()
+	job.addActiveRunLocked(runID, key, cancel)
+	job.mu.Unlock()
+	return job
+}
+
+func (s *scheduler) finishExecutionRun(job *scheduledTaskJob, runID string) {
+	if job == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job.mu.Lock()
+	job.removeActiveRunLocked(runID)
+	jobID := scheduledTaskJobID(job.task)
+	if job.transient && len(job.activeRuns) == 0 && s.jobs[jobID] == job {
+		delete(s.jobs, jobID)
+	}
+	job.mu.Unlock()
+}
+
+func (s *scheduler) replaceExecutionRunCancel(job *scheduledTaskJob, runID string, cancel context.CancelFunc) bool {
+	if job == nil || cancel == nil {
+		return false
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if s.jobs[scheduledTaskJobID(job.task)] != job {
+		return false
+	}
+	run, ok := job.activeRuns[runID]
+	if !ok {
+		return false
+	}
+	run.cancel = cancel
+	job.activeRuns[runID] = run
+	return true
+}
+
 func (s *scheduler) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJob) {
 	defer s.removeScheduledTaskJob(job)
+	persistenceFailures := 0
 	for {
 		now := time.Now()
+		task := job.taskSnapshot()
+		if reason := scheduledTaskStopReason(task, now); reason != "" {
+			if !s.disableScheduledTaskWithRetry(ctx, job, reason) {
+				return
+			}
+			job.waitForActiveRuns(ctx)
+			return
+		}
 		// 错过执行时不补跑：过期的一次性任务直接删除，循环任务只计算当前时间之后的下一次。
 		// 手动 /schedule run 不经过此循环，会显式启动一次立即执行。
 		next, ok := job.schedule.Next(now)
 		if !ok {
-			if job.task.Once {
-				s.completeOnceScheduledTask(ctx, job.task)
+			if task.Once {
+				s.completeOnceScheduledTask(ctx, task)
 				return
 			}
 			err := fmt.Errorf("定时任务无法计算下次触发时间")
-			s.markRunFinished(job.task, scheduledTaskRunID(job.task, now), now, err)
-			slog.WarnContext(ctx, "定时任务无法计算下次触发时间", "task_id", job.task.ID, "spec", job.task.Spec)
+			s.markRunFinished(task, scheduledTaskRunID(task, now), now, err)
+			slog.WarnContext(ctx, "定时任务无法计算下次触发时间", "task_id", task.ID, "spec", task.Spec)
+			return
+		}
+		if task.ExpiresAt != nil && next.After(*task.ExpiresAt) {
+			if !s.disableScheduledTaskWithRetry(ctx, job, "已达到截止时间") {
+				return
+			}
+			job.waitForActiveRuns(ctx)
 			return
 		}
 		timer := time.NewTimer(time.Until(next))
@@ -240,29 +314,60 @@ func (s *scheduler) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJ
 		case <-timer.C:
 		}
 		triggeredAt := next
-		runID := scheduledTaskRunID(job.task, triggeredAt)
+		runID := scheduledTaskRunID(task, triggeredAt)
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		runCtx, cancel := context.WithCancel(ctx)
-		job.addActiveRun(runID, scheduledTaskRunKey(job.task, runID), cancel)
-		if job.task.Once {
-			// 一次性任务：同步执行本次 run，完成后删除任务定义并退出调度循环。
-			s.executeScheduledTaskRun(runCtx, job, runID, triggeredAt)
+		runCtx, cancel := scheduledTaskRunContext(ctx, task)
+		job.addActiveRun(runID, scheduledTaskExecutionKey(task, runID), cancel)
+		prepared, early, err := s.prepareScheduledTaskRun(task, runID, triggeredAt, job.workspace, nil, func() (ScheduledTask, error) {
+			return s.claimScheduledTaskRun(job)
+		})
+		if err != nil {
 			cancel()
 			job.removeActiveRun(runID)
-			s.completeOnceScheduledTask(ctx, job.task)
+			if stopped := new(scheduledTaskStoppedError); errors.As(err, stopped) {
+				if !s.disableScheduledTaskWithRetry(ctx, job, stopped.reason) {
+					return
+				}
+				job.waitForActiveRuns(ctx)
+				return
+			}
+			if isScheduledTaskPersistenceError(err) {
+				persistenceFailures++
+				slog.WarnContext(ctx, "保存定时任务执行状态失败，稍后重试", "task_id", task.ID, "run_id", runID, "连续失败次数", persistenceFailures, "错误", err)
+				if !s.waitForScheduledTaskPersistenceRetry(ctx, persistenceFailures) {
+					return
+				}
+				continue
+			}
+			slog.ErrorContext(ctx, "准备定时任务执行失败", "task_id", task.ID, "run_id", runID, "错误", err)
+			return
+		}
+		persistenceFailures = 0
+		if early != nil {
+			cancel()
+			job.removeActiveRun(runID)
+			continue
+		}
+		task = prepared.task
+		if task.Once {
+			// 一次性任务：同步执行本次 run，完成后删除任务定义并退出调度循环。
+			s.executePreparedScheduledTaskRun(runCtx, prepared)
+			cancel()
+			job.removeActiveRun(runID)
+			s.completeOnceScheduledTask(ctx, task)
 			return
 		}
 		if s.hooks.startBackground == nil || !s.hooks.startBackground(
 			runCtx,
-			"scheduled-run:"+job.task.ID+"/"+runID,
+			"scheduled-run:"+task.ID+"/"+runID,
 			func(ctx context.Context) {
 				defer job.removeActiveRun(runID)
 				defer cancel()
-				s.executeScheduledTaskRun(ctx, job, runID, triggeredAt)
+				s.executePreparedScheduledTaskRun(ctx, prepared)
 			},
 		) {
 			cancel()
@@ -272,9 +377,165 @@ func (s *scheduler) runScheduledTaskJob(ctx context.Context, job *scheduledTaskJ
 	}
 }
 
-func (s *scheduler) executeScheduledTaskRun(ctx context.Context, job *scheduledTaskJob, runID string, triggeredAt time.Time) {
-	if _, err := s.runScheduledTaskOnce(ctx, job.task, runID, triggeredAt, job.workspace, nil); err != nil {
-		slog.ErrorContext(ctx, "定时任务执行失败", "task_id", job.task.ID, "run_id", runID, "错误", err)
+func (job *scheduledTaskJob) taskSnapshot() ScheduledTask {
+	if job == nil {
+		return ScheduledTask{}
+	}
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	return job.task
+}
+
+func (job *scheduledTaskJob) waitForActiveRuns(ctx context.Context) {
+	if job == nil {
+		return
+	}
+	for {
+		job.mu.Lock()
+		if len(job.activeRuns) == 0 {
+			job.mu.Unlock()
+			return
+		}
+		if job.activeWake == nil {
+			job.activeWake = make(chan struct{}, 1)
+		}
+		wake := job.activeWake
+		job.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		}
+	}
+}
+
+func scheduledTaskStopReason(task ScheduledTask, now time.Time) string {
+	if task.MaxRuns > 0 && task.RunCount >= task.MaxRuns {
+		return "已达到最大执行次数"
+	}
+	if task.ExpiresAt != nil && !now.Before(*task.ExpiresAt) {
+		return "已达到截止时间"
+	}
+	return ""
+}
+
+const scheduledTaskPersistenceRetryMax = time.Minute
+
+type scheduledTaskPersistenceError struct {
+	operation string
+	err       error
+}
+
+func (e *scheduledTaskPersistenceError) Error() string {
+	return e.operation + ": " + e.err.Error()
+}
+
+func (e *scheduledTaskPersistenceError) Unwrap() error {
+	return e.err
+}
+
+func isScheduledTaskPersistenceError(err error) bool {
+	var persistenceErr *scheduledTaskPersistenceError
+	return errors.As(err, &persistenceErr)
+}
+
+func (s *scheduler) waitForScheduledTaskPersistenceRetry(ctx context.Context, failures int) bool {
+	delay := s.persistenceRetryBase
+	if delay <= 0 {
+		delay = time.Second
+	}
+	if delay > scheduledTaskPersistenceRetryMax {
+		delay = scheduledTaskPersistenceRetryMax
+	}
+	for i := 1; i < failures && delay < scheduledTaskPersistenceRetryMax; i++ {
+		if delay > scheduledTaskPersistenceRetryMax/2 {
+			delay = scheduledTaskPersistenceRetryMax
+			break
+		}
+		delay *= 2
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (s *scheduler) claimScheduledTaskRun(job *scheduledTaskJob) (ScheduledTask, error) {
+	initial := job.taskSnapshot()
+	store := s.storeForBotID(initial.BotID)
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	task := job.task
+	if store == nil {
+		if reason := scheduledTaskStopReason(task, time.Now()); reason != "" {
+			return task, scheduledTaskStoppedError{reason: reason}
+		}
+		task.RunCount++
+		job.task = task
+		return task, nil
+	}
+	stopReason := ""
+	updated, ok, err := store.Update(task.ID, func(current *ScheduledTask) {
+		if reason := scheduledTaskStopReason(*current, time.Now()); reason != "" {
+			stopReason = reason
+			return
+		}
+		current.RunCount++
+	})
+	if err != nil {
+		return task, &scheduledTaskPersistenceError{operation: "保存定时任务执行次数", err: err}
+	}
+	if !ok {
+		return task, fmt.Errorf("定时任务不存在：%s", task.ID)
+	}
+	job.task = updated
+	if stopReason != "" {
+		return updated, scheduledTaskStoppedError{reason: stopReason}
+	}
+	return updated, nil
+}
+
+func (s *scheduler) disableScheduledTask(ctx context.Context, job *scheduledTaskJob, reason string) bool {
+	task := job.taskSnapshot()
+	store := s.storeForBotID(task.BotID)
+	if store != nil {
+		updated, ok, err := store.Update(task.ID, func(current *ScheduledTask) {
+			current.Enabled = false
+		})
+		if err != nil {
+			slog.WarnContext(ctx, "停用已结束的定时任务失败", "task_id", task.ID, "原因", reason, "错误", err)
+			return false
+		}
+		if !ok {
+			slog.InfoContext(ctx, "定时任务已被删除，无需自动停用", "task_id", task.ID, "原因", reason)
+			return true
+		}
+		if ok {
+			job.mu.Lock()
+			job.task = updated
+			job.mu.Unlock()
+		}
+	} else {
+		job.mu.Lock()
+		job.task.Enabled = false
+		job.mu.Unlock()
+	}
+	slog.InfoContext(ctx, "定时任务已自动停用", "task_id", task.ID, "原因", reason)
+	return true
+}
+
+func (s *scheduler) disableScheduledTaskWithRetry(ctx context.Context, job *scheduledTaskJob, reason string) bool {
+	for failures := 1; ; failures++ {
+		if s.disableScheduledTask(ctx, job, reason) {
+			return true
+		}
+		if !s.waitForScheduledTaskPersistenceRetry(ctx, failures) {
+			return false
+		}
 	}
 }
 
@@ -295,7 +556,7 @@ func (s *scheduler) removeScheduledTaskJob(job *scheduledTaskJob) {
 	if job == nil {
 		return
 	}
-	jobID := scheduledTaskJobID(job.task)
+	jobID := scheduledTaskJobID(job.taskSnapshot())
 	s.mu.Lock()
 	if s.jobs[jobID] == job {
 		delete(s.jobs, jobID)
@@ -318,7 +579,7 @@ func (s *scheduler) stopScheduledTasks() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		job.cancelActiveRuns(ctx, s.hooks.cancelRunningSessionWorkSync)
 		if s.hooks.cancelScheduledTaskRuns != nil {
-			s.hooks.cancelScheduledTaskRuns(ctx, job.task)
+			s.hooks.cancelScheduledTaskRuns(ctx, job.taskSnapshot())
 		}
 		cancel()
 		if job.cancel != nil {
@@ -336,6 +597,18 @@ func (job *scheduledTaskJob) addActiveRun(runID string, key SessionKey, cancel c
 		return
 	}
 	job.mu.Lock()
+	job.addActiveRunLocked(runID, key, cancel)
+	job.mu.Unlock()
+}
+
+func (job *scheduledTaskJob) addActiveRunLocked(runID string, key SessionKey, cancel context.CancelFunc) {
+	if job == nil || cancel == nil {
+		return
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return
+	}
 	if job.activeRuns == nil {
 		job.activeRuns = make(map[string]scheduledTaskActiveRun)
 	}
@@ -343,7 +616,7 @@ func (job *scheduledTaskJob) addActiveRun(runID string, key SessionKey, cancel c
 		key:    normalizeSessionKey(key),
 		cancel: cancel,
 	}
-	job.mu.Unlock()
+	job.notifyActiveChangedLocked()
 }
 
 func (job *scheduledTaskJob) removeActiveRun(runID string) {
@@ -355,8 +628,32 @@ func (job *scheduledTaskJob) removeActiveRun(runID string) {
 		return
 	}
 	job.mu.Lock()
-	delete(job.activeRuns, runID)
+	job.removeActiveRunLocked(runID)
 	job.mu.Unlock()
+}
+
+func (job *scheduledTaskJob) removeActiveRunLocked(runID string) {
+	if job == nil {
+		return
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return
+	}
+	if _, ok := job.activeRuns[runID]; ok {
+		delete(job.activeRuns, runID)
+		job.notifyActiveChangedLocked()
+	}
+}
+
+func (job *scheduledTaskJob) notifyActiveChangedLocked() {
+	if job.activeWake == nil {
+		return
+	}
+	select {
+	case job.activeWake <- struct{}{}:
+	default:
+	}
 }
 
 func (job *scheduledTaskJob) cancelActiveRuns(ctx context.Context, cancelRunningSessionWorkSync func(context.Context, SessionKey)) {
@@ -365,9 +662,8 @@ func (job *scheduledTaskJob) cancelActiveRuns(ctx context.Context, cancelRunning
 	}
 	job.mu.Lock()
 	runs := make([]scheduledTaskActiveRun, 0, len(job.activeRuns))
-	for runID, run := range job.activeRuns {
+	for _, run := range job.activeRuns {
 		runs = append(runs, run)
-		delete(job.activeRuns, runID)
 	}
 	job.mu.Unlock()
 	for _, run := range runs {
@@ -455,29 +751,109 @@ func (s *scheduler) streamStarter(botID string) scheduledTaskStreamStarter {
 	return s.streams[""]
 }
 
-func (s *scheduler) runScheduledTaskOnce(ctx context.Context, task ScheduledTask, runID string, triggeredAt time.Time, workspace string, sink TriggerSink) (scheduledTaskRunResult, error) {
+type scheduledTaskStoppedError struct {
+	reason string
+}
+
+func (e scheduledTaskStoppedError) Error() string {
+	return e.reason
+}
+
+type preparedScheduledTaskRun struct {
+	task        ScheduledTask
+	runID       string
+	triggeredAt time.Time
+	request     TriggerRequest
+}
+
+func (s *scheduler) prepareScheduledTaskRun(task ScheduledTask, runID string, triggeredAt time.Time, workspace string, sink TriggerSink, claim func() (ScheduledTask, error)) (preparedScheduledTaskRun, *scheduledTaskRunResult, error) {
 	task = normalizeScheduledTask(task)
 	runID = strings.TrimSpace(runID)
 	if triggeredAt.IsZero() {
 		triggeredAt = time.Now()
+	}
+	if reason := scheduledTaskStopReason(task, time.Now()); reason != "" {
+		return preparedScheduledTaskRun{}, nil, scheduledTaskStoppedError{reason: reason}
 	}
 	if sink == nil {
 		sink = s.scheduledTaskSink(task)
 	}
 	req, err := scheduledTaskTriggerRequest(task, runID, triggeredAt, workspace, sink)
 	if err != nil {
-		return scheduledTaskRunResult{RunID: runID}, err
+		return preparedScheduledTaskRun{}, nil, err
 	}
 	if skipped, ok := s.markRunRunningOrSkipped(task, runID, req.Key, triggeredAt, req.Prompt); ok {
-		return scheduledTaskRunResult{RunID: runID, Status: skipped, TriggerResult: TriggerResult{
+		result := scheduledTaskRunResult{RunID: runID, Status: skipped, TriggerResult: TriggerResult{
 			Request:    req,
 			Skipped:    true,
 			SkipReason: skipped.SkipReason,
-		}}, nil
+		}}
+		return preparedScheduledTaskRun{}, &result, nil
+	}
+	if claim != nil {
+		task, err = claim()
+		if err != nil {
+			status := s.markRunFinished(task, runID, time.Now(), err)
+			return preparedScheduledTaskRun{}, &scheduledTaskRunResult{RunID: runID, Status: status, TriggerResult: TriggerResult{Request: req, Err: err}}, err
+		}
+		req, err = scheduledTaskTriggerRequest(task, runID, triggeredAt, workspace, sink)
+		if err != nil {
+			status := s.markRunFinished(task, runID, time.Now(), err)
+			return preparedScheduledTaskRun{}, &scheduledTaskRunResult{RunID: runID, Status: status, TriggerResult: TriggerResult{Request: req, Err: err}}, err
+		}
+	}
+	return preparedScheduledTaskRun{task: task, runID: runID, triggeredAt: triggeredAt, request: req}, nil, nil
+}
+
+func (s *scheduler) executePreparedScheduledTaskRun(ctx context.Context, prepared preparedScheduledTaskRun) (scheduledTaskRunResult, error) {
+	task := prepared.task
+	runID := prepared.runID
+	req := prepared.request
+	if task.SessionMode == scheduleSessionModeBound {
+		if s.hooks.runBoundScheduledTask == nil {
+			err := fmt.Errorf("未配置 bound session 定时任务执行器")
+			status := s.markRunFinished(task, runID, time.Now(), err)
+			return scheduledTaskRunResult{RunID: runID, Status: status, TriggerResult: TriggerResult{Request: req, Err: err}}, err
+		}
+		result, err := s.hooks.runBoundScheduledTask(ctx, task, runID, prepared.triggeredAt)
+		if result.Request.Key == (SessionKey{}) {
+			result.Request = req
+		}
+		status := s.markRunFinished(task, runID, time.Now(), err)
+		return scheduledTaskRunResult{RunID: runID, TriggerResult: result, Status: status}, err
 	}
 	result, err := s.hooks.runTriggerPrompt(ctx, req)
 	status := s.markRunFinished(task, runID, time.Now(), err)
 	return scheduledTaskRunResult{RunID: runID, TriggerResult: result, Status: status}, err
+}
+
+func (s *scheduler) runScheduledTaskOnce(ctx context.Context, task ScheduledTask, runID string, triggeredAt time.Time, workspace string, sink TriggerSink) (scheduledTaskRunResult, error) {
+	prepared, early, err := s.prepareScheduledTaskRun(task, runID, triggeredAt, workspace, sink, nil)
+	if early != nil {
+		return *early, err
+	}
+	if err != nil {
+		return scheduledTaskRunResult{RunID: strings.TrimSpace(runID)}, err
+	}
+	return s.executePreparedScheduledTaskRun(ctx, prepared)
+}
+
+func scheduledTaskExecutionKey(task ScheduledTask, runID string) SessionKey {
+	task = normalizeScheduledTask(task)
+	if task.SessionMode == scheduleSessionModeBound {
+		// Bound runs share a user session and are cancelled through their own
+		// run context. Cancelling by session key could stop an unrelated user
+		// turn while this run is still waiting in the FIFO queue.
+		return SessionKey{}
+	}
+	return scheduledTaskRunKey(task, runID)
+}
+
+func scheduledTaskRunContext(ctx context.Context, task ScheduledTask) (context.Context, context.CancelFunc) {
+	if task.RunTimeoutSec > 0 {
+		return context.WithTimeout(ctx, time.Duration(task.RunTimeoutSec)*time.Second)
+	}
+	return context.WithCancel(ctx)
 }
 
 func (s *scheduler) jobCount() int {

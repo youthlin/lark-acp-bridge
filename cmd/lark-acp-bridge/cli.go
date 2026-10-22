@@ -51,7 +51,44 @@ func newRootCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newBotsCommand(options, false))
 	cmd.AddCommand(newServiceCommand(options))
+	cmd.AddCommand(newTaskCommand(options))
 	cmd.AddCommand(newUpdateCommand())
+	return cmd
+}
+
+func newTaskCommand(options *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:          "task",
+		Short:        "通过运行中的 bridge 管理 agent 定时任务",
+		Args:         noArgsUsage("用法: lark-acp-bridge task create --stdin"),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return fmt.Errorf("用法: lark-acp-bridge task create --stdin")
+		},
+	}
+	cmd.AddCommand(newTaskCreateCommand(options))
+	return cmd
+}
+
+func newTaskCreateCommand(options *rootOptions) *cobra.Command {
+	var stdin bool
+	cmd := &cobra.Command{
+		Use:          "create",
+		Short:        "从 stdin JSON 创建绑定当前 ACP session 的定时任务",
+		Args:         noArgsUsage("用法: lark-acp-bridge task create --stdin"),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !stdin {
+				return fmt.Errorf("请使用 --stdin 从 stdin 读取任务 JSON")
+			}
+			path, err := configPathOrDefault(options.ConfigPath)
+			if err != nil {
+				return err
+			}
+			return runTaskCreate(cmd.Context(), path, cmd.InOrStdin(), cmd.OutOrStdout())
+		},
+	}
+	cmd.Flags().BoolVar(&stdin, "stdin", false, "从 stdin 读取任务 JSON")
 	return cmd
 }
 
@@ -353,7 +390,7 @@ func splitFlagName(arg string) (string, bool) {
 
 func isTopLevelSubcommand(command string) bool {
 	switch command {
-	case "bots", "service", "update":
+	case "bots", "service", "task", "update":
 		return true
 	default:
 		return false

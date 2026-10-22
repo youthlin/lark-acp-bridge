@@ -516,8 +516,15 @@ func runForeground(cfg config.Config, configPath string) error {
 		fmt.Fprintf(os.Stderr, "启动失败, err=%v\n", err)
 		return err
 	}
+	control, err := startTaskControlServer(svc, configPath)
+	if err != nil {
+		_ = svc.Shutdown(context.Background())
+		fmt.Fprintf(os.Stderr, "启动本地任务控制端点失败, err=%v\n", err)
+		return err
+	}
 	cleanup, err := writeDaemonPIDFile(configPath)
 	if err != nil {
+		_ = control.Shutdown(context.Background())
 		_ = svc.Shutdown(context.Background())
 		fmt.Fprintf(os.Stderr, "写入pid文件失败, err=%v\n", err)
 		return err
@@ -525,6 +532,7 @@ func runForeground(cfg config.Config, configPath string) error {
 	defer cleanup()
 
 	<-ctx.Done()
+	_ = control.Shutdown(context.Background())
 	if err := svc.Shutdown(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "停止服务异常, err=%v\n", err)
 		return err

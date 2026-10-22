@@ -226,6 +226,11 @@ func (s *Service) promptWithOptions(ctx context.Context, msg feishu.Message, tex
 	if opts.TitleTextSet {
 		prepared.titleText = redactSensitiveValuesForDisplay(opts.TitleText)
 	}
+	capability, taskToolPrompt := s.issueAgentTaskCapability(msg, prepared.session)
+	if capability != "" {
+		defer s.revokeAgentTaskCapability(capability)
+		prepared.text = strings.Join([]string{taskToolPrompt, "", prepared.text}, "\n")
+	}
 	opts.TextWrapped = prepared.textWrapped
 	return s.promptSession(ctx, msg, prepared.session, prepared.agent, prepared.text, prepared.titleText, opts)
 }

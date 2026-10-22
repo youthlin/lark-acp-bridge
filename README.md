@@ -340,6 +340,8 @@ github.com/larksuite/oapi-sdk-go/v3
 - `/wiki trace on|off|new`：管理当前 bot 的自动知识沉淀过程卡片（owner only）。`on` 将当前群设为目的地，`new` 新建专用话题群；卡片会按目的群 `/show` 配置展示后台反思执行过程。
 - `/meeting on|off|status`、`/meeting trace on|off`：仅 bot owner 可用。管理静默会议助手和会议整理过程展示；`/meeting trace on` 会把当前聊天设为过程卡片目的地，`off` 只拒绝新邀请，不中断正在整理的会议。纪要卡片固定私聊发送给 `meeting.recipient_open_id`，未配置且只有一个 owner 时自动使用该 owner。
 - `/queue <prompt>`：把提示词暂存到当前会话的内存队列，不打断正在运行的用户任务；当前任务自然结束后按 FIFO 顺序逐条执行，结果会主动回复到原消息上下文。当前没有运行任务时会立即异步执行队列内容。
+- `/schedule add <spec> <prompt>`、`/schedule once <时间> <prompt>`、`/schedule list|status|run|edit|pause|resume|delete`：管理持久化定时任务。普通 `/schedule` 任务每个 run 使用独立 ACP session；`spec` 支持 `@every <duration>` 或 5 段 cron。
+- owner 在普通对话中明确要求 agent 创建周期任务时，bridge 会向当前 turn 提供短期 capability 和 `lark-acp-bridge task create --stdin` 工具说明。agent 创建的任务绑定当前 ACP session，触发时作为新的 user turn 进入同一 session 的 FIFO 队列，不使用 steering；如果用户已用 `/new` 等方式切换当前 ACP session，旧绑定任务会失败而不会写入新会话。agent 任务必须配置 `max_runs` 或 RFC3339 `expires_at`，也可配置单轮 `run_timeout`；达到执行次数或截止时间后自动停用。控制 CLI 只连接运行中 bridge 的本机回环端点，不直接修改 `scheduled_tasks.json`。
 - `/stop`：停止当前会话正在运行的普通 prompt。支持同一 turn 补充消息的 ACP server（例如 TraeX）会把运行中收到的普通消息追加到当前 turn，显式停止时请使用该命令。
 - `/cmds`：查看当前 ACP server 上报的 slash commands。
 - `/cmds /command [args]`：把 ACP slash command 原样发送到当前 ACP session，通过 `session/prompt` 执行。

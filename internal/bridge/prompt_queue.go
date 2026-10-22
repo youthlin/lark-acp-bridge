@@ -12,13 +12,21 @@ import (
 )
 
 type queuedPrompt struct {
-	msg         feishu.Message
-	session     Session
-	agent       config.AgentConfig
-	text        string
-	textWrapped bool
-	userText    string
-	replyIndex  int
+	msg                  feishu.Message
+	session              Session
+	agent                config.AgentConfig
+	text                 string
+	textWrapped          bool
+	userText             string
+	replyIndex           int
+	runCtx               context.Context
+	completion           chan queuedPromptResult
+	requiredACPSessionID string
+}
+
+type queuedPromptResult struct {
+	reply string
+	err   error
 }
 
 type promptQueue struct {
@@ -125,26 +133,49 @@ func (s *Service) drainPromptQueue(ctx context.Context, key SessionKey) {
 		if !ok {
 			return
 		}
-		reply, err := s.promptQueuedItem(ctx, item)
+		itemCtx := ctx
+		if item.runCtx != nil {
+			itemCtx = item.runCtx
+		}
+		if err := itemCtx.Err(); err != nil {
+			completeQueuedPrompt(item, "", err)
+			continue
+		}
+		reply, err := s.promptQueuedItem(itemCtx, item)
 		if errors.Is(err, errSessionTaskBusy) {
 			s.prependQueuedPrompt(key, item)
 			return
 		}
 		if errors.Is(err, context.Canceled) {
-			return
+			completeQueuedPrompt(item, "", err)
+			continue
 		}
 		if err != nil {
 			slog.WarnContext(ctx, "执行队列 prompt 失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", err)
 			reply = "队列任务执行失败：" + err.Error()
 		}
 		if strings.TrimSpace(reply) == "" {
+			completeQueuedPrompt(item, "", err)
 			continue
 		}
-		if ok, err := s.sendIntermediateReply(ctx, item.msg, reply); err != nil {
-			slog.WarnContext(ctx, "发送队列 prompt 回复失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", err)
+		completionErr := err
+		if ok, sendErr := s.sendIntermediateReply(ctx, item.msg, reply); sendErr != nil {
+			slog.WarnContext(ctx, "发送队列 prompt 回复失败", "session", item.session.ACPSessionID, "queue_index", item.replyIndex, "错误", sendErr)
+			completionErr = errors.Join(completionErr, sendErr)
 		} else if !ok {
 			slog.WarnContext(ctx, "缺少队列 prompt 回复发送器", "session", item.session.ACPSessionID, "queue_index", item.replyIndex)
 		}
+		completeQueuedPrompt(item, reply, completionErr)
+	}
+}
+
+func completeQueuedPrompt(item queuedPrompt, reply string, err error) {
+	if item.completion == nil {
+		return
+	}
+	select {
+	case item.completion <- queuedPromptResult{reply: reply, err: err}:
+	default:
 	}
 }
 
@@ -228,12 +259,28 @@ func (s *Service) refreshQueuedPromptSessionState(item queuedPrompt) queuedPromp
 }
 
 func (s *Service) promptQueuedItem(ctx context.Context, item queuedPrompt) (string, error) {
-	item = s.refreshQueuedPromptSessionState(item)
+	if strings.TrimSpace(item.requiredACPSessionID) != "" {
+		store := s.storeForBotID(item.session.Key.BotID)
+		if store == nil {
+			return "", fmt.Errorf("绑定会话存储不可用")
+		}
+		current, ok := store.Get(item.session.Key)
+		if !ok || !sameACPSession(current.ACPSessionID, item.requiredACPSessionID) {
+			return "", fmt.Errorf("绑定的 ACP session 已不再是当前会话：%s", item.requiredACPSessionID)
+		}
+		item.session = current
+	} else {
+		item = s.refreshQueuedPromptSessionState(item)
+	}
+	var refresh func(context.Context, Session) (Session, error)
+	if strings.TrimSpace(item.requiredACPSessionID) == "" {
+		refresh = func(refreshCtx context.Context, refreshSession Session) (Session, error) {
+			return s.refreshACPSession(refreshCtx, item.msg, refreshSession, item.agent)
+		}
+	}
 	out := s.executePromptWithRecovery(ctx, item.session, func(runCtx context.Context, runSession Session) promptRunOutcome {
 		return s.runUserPromptWithWorkspaceContext(runCtx, item.msg, runSession, item.agent, item.text, item.textWrapped, queuedPromptTaskOptions())
-	}, func(refreshCtx context.Context, refreshSession Session) (Session, error) {
-		return s.refreshACPSession(refreshCtx, item.msg, refreshSession, item.agent)
-	})
+	}, refresh)
 	post := s.finishPromptPostWork(ctx, out, promptPostWorkOptions{
 		botID:                 item.msg.BotID,
 		msg:                   item.msg,

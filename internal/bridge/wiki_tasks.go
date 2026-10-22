@@ -448,13 +448,18 @@ func (s *Service) beginWikiUpgradeTask(key SessionKey, workspace string) (func()
 	s.tasks[key] = task
 	s.workspaceLocks.set(workspace, task)
 	return func() {
+		removed := false
 		s.taskMu.Lock()
 		if s.tasks[key] == task {
 			delete(s.tasks, key)
+			removed = true
 		}
 		s.workspaceLocks.clear(workspace, task)
 		s.taskMu.Unlock()
 		task.closeDone()
+		if removed {
+			s.drainPromptQueueAsync(context.Background(), key)
+		}
 	}, true
 }
 

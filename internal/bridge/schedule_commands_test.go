@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -872,5 +873,126 @@ func TestHandleScheduleOnceCommandRejectsPastTime(t *testing.T) {
 	}
 	if tasks := svc.scheduledTaskStoreForBotID("bot-a").List(); len(tasks) != 0 {
 		t.Fatalf("tasks = %+v, want none persisted", tasks)
+	}
+}
+
+func TestImmediateScheduleRunClaimsLimitAndDisablesTask(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	svc.setRuntime(&fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-manual"}, promptReply: "done"})
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	task, err := store.Upsert(ScheduledTask{
+		ID: "manual-limited", BotID: "bot-a", Enabled: true, Spec: "@every 1h", AgentName: "traex", Cwd: workspace,
+		Prompt: "run", MaxRuns: 1, OverlapPolicy: scheduleOverlapSkipIfRunning,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := svc.startImmediateScheduleRun(context.Background(), task, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		stored, ok := store.Get(task.ID)
+		status, statusOK := svc.scheduleRunStatus(task, runID)
+		return ok && !stored.Enabled && stored.RunCount == 1 && statusOK && status.State == scheduleRunCompleted
+	})
+	latest, _ := store.Get(task.ID)
+	if _, err := svc.startImmediateScheduleRun(context.Background(), latest, workspace); err == nil || !strings.Contains(err.Error(), "最大执行次数") {
+		t.Fatalf("second manual run error = %v, want max-runs rejection", err)
+	}
+}
+
+func TestImmediateScheduleRunRetriesDisablePersistence(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	blockPrompt := make(chan struct{})
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-manual"}, promptReply: "done", blockPrompt: blockPrompt}
+	svc.setRuntime(rt)
+	svc.scheduler.persistenceRetryBase = time.Millisecond
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	task, err := store.Upsert(ScheduledTask{
+		ID: "manual-persist", BotID: "bot-a", Enabled: true, Spec: "@every 1h", AgentName: "traex", Cwd: workspace,
+		Prompt: "run", MaxRuns: 1, OverlapPolicy: scheduleOverlapSkipIfRunning,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := svc.startImmediateScheduleRun(context.Background(), task, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 })
+
+	storePath := workspaceLocalPath(workspace, "scheduled_tasks.json")
+	blockingPath := filepath.Join(workspace, "blocking")
+	if err := os.WriteFile(blockingPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setScheduledTaskStorePathForTest(store, filepath.Join(blockingPath, "scheduled_tasks.json"))
+	close(blockPrompt)
+	waitForCondition(t, time.Second, func() bool {
+		stored, ok := store.Get(task.ID)
+		status, statusOK := svc.scheduleRunStatus(task, runID)
+		return ok && stored.Enabled && statusOK && status.State == scheduleRunCompleted && svc.scheduledTaskJobCount() == 1
+	})
+
+	setScheduledTaskStorePathForTest(store, storePath)
+	waitForCondition(t, time.Second, func() bool {
+		stored, ok := store.Get(task.ID)
+		return ok && !stored.Enabled && svc.scheduledTaskJobCount() == 0
+	})
+}
+
+func TestImmediateScheduleRunIsTrackedAndCancelable(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Bots:      []config.BotConfig{{ID: "bot-a", Workspace: workspace}},
+		AgentList: []config.NamedAgentConfig{{Name: "traex", AgentConfig: config.AgentConfig{Command: "traex"}}},
+	}
+	svc := NewService(cfg, NewSessionStore(filepath.Join(workspace, "sessions.json")))
+	rt := &fakeRuntime{newSessionInfo: acp.SessionInfo{SessionID: "acp-manual"}, blockPrompt: make(chan struct{})}
+	svc.setRuntime(rt)
+	store := svc.scheduledTaskStoreForBotID("bot-a")
+	task, err := store.Upsert(ScheduledTask{
+		ID: "manual-cancel", BotID: "bot-a", Enabled: false, Spec: "@every 1h", AgentName: "traex", Cwd: workspace,
+		Prompt: "run", MaxRuns: 2, RunTimeoutSec: 60, OverlapPolicy: scheduleOverlapSkipIfRunning,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := svc.startImmediateScheduleRun(context.Background(), task, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, time.Second, func() bool { return rt.promptCallCount() == 1 && svc.scheduledTaskJobCount() == 1 })
+	svc.stopScheduledTask(context.Background(), task)
+	waitForCondition(t, time.Second, func() bool {
+		status, ok := svc.scheduleRunStatus(task, runID)
+		return ok && status.State == scheduleRunCancelled
+	})
+	if got := svc.scheduledTaskJobCount(); got != 0 {
+		t.Fatalf("job count = %d, want manual run removed after stop", got)
+	}
+}
+
+func TestScheduledTaskRunContextAppliesTimeout(t *testing.T) {
+	ctx, cancel := scheduledTaskRunContext(context.Background(), ScheduledTask{RunTimeoutSec: 1})
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run timeout was not applied")
 	}
 }

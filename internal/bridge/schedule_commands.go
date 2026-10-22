@@ -432,6 +432,7 @@ func newScheduledTaskFromCommand(msg feishu.Message, args scheduleTaskArgs) Sche
 		Prompt:               args.Prompt,
 		CreatorOpenID:        msg.SenderID,
 		CreatedFromChatID:    msg.ChatID,
+		CreatedFromChatType:  msg.ChatType,
 		CreatedFromThreadID:  msg.ThreadID,
 		CreatedFromMessageID: msg.MessageID,
 		ResultSink: ScheduledTaskResultSink{
@@ -463,24 +464,60 @@ func (s *Service) scheduleTaskWorkspace(task ScheduledTask, msg feishu.Message) 
 	return workspace
 }
 
-func (s *Service) startImmediateScheduleRun(ctx context.Context, task ScheduledTask, workspace string) string {
+func (s *Service) startImmediateScheduleRun(ctx context.Context, task ScheduledTask, workspace string) (string, error) {
 	triggeredAt := time.Now()
 	runID := scheduledTaskRunID(task, triggeredAt)
 	runKey := scheduledTaskRunKey(task, runID)
 	s.markScheduleRunPending(task, runID, runKey, triggeredAt)
-	runCtx := context.WithoutCancel(ctx)
+	runCtx, cancel := scheduledTaskRunContext(context.WithoutCancel(ctx), task)
+	job := s.scheduler.registerExecutionRun(task, workspace, runID, scheduledTaskExecutionKey(task, runID), cancel)
+	prepared, early, err := s.scheduler.prepareScheduledTaskRun(task, runID, triggeredAt, workspace, nil, func() (ScheduledTask, error) {
+		return s.scheduler.claimScheduledTaskRun(job)
+	})
+	if err != nil {
+		cancel()
+		s.scheduler.finishExecutionRun(job, runID)
+		s.markScheduleRunFinished(task, runID, time.Now(), err)
+		return "", err
+	}
+	if early != nil {
+		cancel()
+		s.scheduler.finishExecutionRun(job, runID)
+		return "", fmt.Errorf("%s", early.Status.SkipReason)
+	}
 	if !s.goBackground(
 		runCtx,
 		"schedule-once:"+task.ID,
 		func(ctx context.Context) {
-			if _, err := s.runScheduledTaskOnce(ctx, task, runID, triggeredAt, workspace, nil); err != nil {
+			defer func() {
+				if reason := scheduledTaskStopReason(job.taskSnapshot(), time.Now()); reason != "" {
+					retryCtx, retryCancel := context.WithCancel(context.Background())
+					if s.scheduler.replaceExecutionRunCancel(job, runID, retryCancel) {
+						cancel()
+						if s.scheduler.disableScheduledTaskWithRetry(retryCtx, job, reason) && job.cancel != nil {
+							job.cancel()
+						}
+						retryCancel()
+					} else {
+						retryCancel()
+						cancel()
+					}
+				} else {
+					cancel()
+				}
+				s.scheduler.finishExecutionRun(job, runID)
+			}()
+			if _, err := s.scheduler.executePreparedScheduledTaskRun(ctx, prepared); err != nil {
 				slog.ErrorContext(ctx, "立即执行定时任务失败", "task_id", task.ID, "run_id", runID, "错误", err)
 			}
 		},
 	) {
+		cancel()
+		s.scheduler.finishExecutionRun(job, runID)
 		s.markScheduleRunFinished(task, runID, time.Now(), context.Canceled)
+		return "", fmt.Errorf("服务正在关闭")
 	}
-	return runID
+	return runID, nil
 }
 
 func (s *Service) handleScheduleListCommand(msg feishu.Message) string {
@@ -507,7 +544,7 @@ func (s *Service) handleScheduleListCommand(msg feishu.Message) string {
 		if task.Once {
 			state = "一次性"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s [%s]\n   触发：%s\n   agent：%s\n   cwd：%s\n   prompt：%s", i+1, task.ID, state, scheduledTaskTriggerText(task), task.AgentName, task.Cwd, oneLine(redactSensitiveValuesForDisplay(task.Prompt), 80)))
+		lines = append(lines, fmt.Sprintf("%d. %s [%s]\n   触发：%s\n   agent：%s\n   cwd：%s\n   模式：%s\n   进度：%s\n   prompt：%s", i+1, task.ID, state, scheduledTaskTriggerText(task), task.AgentName, task.Cwd, task.SessionMode, scheduledTaskRunLimitText(task), oneLine(redactSensitiveValuesForDisplay(task.Prompt), 80)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -527,6 +564,10 @@ func (s *Service) handleScheduleStatusCommand(msg feishu.Message, id string) str
 		"触发：" + scheduledTaskTriggerText(task),
 		"agent：" + task.AgentName,
 		"cwd：" + task.Cwd,
+		"模式：" + task.SessionMode,
+		"执行进度：" + scheduledTaskRunLimitText(task),
+		"截止时间：" + firstNonEmpty(scheduledTaskExpiresAtText(task), "不限"),
+		"单轮超时：" + scheduledTaskRunTimeoutText(task),
 		"prompt：" + redactSensitiveValuesForDisplay(task.Prompt),
 		"创建者：" + task.CreatorOpenID,
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
@@ -595,6 +636,9 @@ func (s *Service) handleScheduleEditCommand(ctx context.Context, text string, ms
 	if !ok {
 		return "定时任务不存在：" + id
 	}
+	if latest, exists := store.Get(task.ID); exists {
+		task = latest
+	}
 	if task.Enabled {
 		workspace := s.scheduleTaskWorkspace(task, msg)
 		if err := s.startScheduledTask(ctx, task, workspace); err != nil {
@@ -636,7 +680,10 @@ func (s *Service) handleScheduleRunCommand(ctx context.Context, msg feishu.Messa
 	if workspace == "" {
 		return "定时任务 workspace 为空，无法执行：" + task.ID
 	}
-	runID := s.startImmediateScheduleRun(ctx, task, workspace)
+	runID, err := s.startImmediateScheduleRun(ctx, task, workspace)
+	if err != nil {
+		return "无法立即执行定时任务：" + err.Error()
+	}
 	return strings.Join([]string{
 		"已开始立即执行定时任务：" + task.ID,
 		"run：" + runID,
@@ -700,8 +747,26 @@ func formatScheduledTaskCreated(task ScheduledTask) string {
 		"触发：" + scheduledTaskTriggerText(task),
 		"agent：" + task.AgentName,
 		"cwd：" + task.Cwd,
+		"模式：" + task.SessionMode,
+		"执行上限：" + scheduledTaskRunLimitText(task),
+		"截止时间：" + firstNonEmpty(scheduledTaskExpiresAtText(task), "不限"),
+		"单轮超时：" + scheduledTaskRunTimeoutText(task),
 		"回传：" + scheduledTaskSinkText(task.ResultSink),
 	}, "\n")
+}
+
+func scheduledTaskRunLimitText(task ScheduledTask) string {
+	if task.MaxRuns <= 0 {
+		return fmt.Sprintf("%d / 不限", task.RunCount)
+	}
+	return fmt.Sprintf("%d / %d", task.RunCount, task.MaxRuns)
+}
+
+func scheduledTaskRunTimeoutText(task ScheduledTask) string {
+	if task.RunTimeoutSec <= 0 {
+		return "不限"
+	}
+	return formatDuration(time.Duration(task.RunTimeoutSec) * time.Second)
 }
 
 func formatScheduledTaskUpdated(task ScheduledTask) string {

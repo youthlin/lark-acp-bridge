@@ -30,9 +30,11 @@ type Service struct {
 	serviceOutbounds
 	serviceTasks
 	serviceACPUpdates
-	taskSupervisor      taskSupervisor
-	conversationManager conversationManager
-	scheduler           scheduler
+	agentTaskMu           sync.Mutex
+	agentTaskCapabilities map[string]agentTaskCapability
+	taskSupervisor        taskSupervisor
+	conversationManager   conversationManager
+	scheduler             scheduler
 }
 
 type serviceStores struct {
@@ -112,7 +114,8 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 		serviceACPUpdates: serviceACPUpdates{
 			acpUpdateUnsub: make(map[SessionKey]func()),
 		},
-		taskSupervisor: newTaskSupervisor(),
+		taskSupervisor:        newTaskSupervisor(),
+		agentTaskCapabilities: make(map[string]agentTaskCapability),
 	}
 	s.conversationManager = newConversationManager(s.registry, s.runtime)
 	s.conversationManager.hooks = conversationManagerHooks{
@@ -125,6 +128,7 @@ func NewService(cfg config.Config, store *SessionStore) *Service {
 	s.scheduler = newScheduler(schedulerHooks{
 		startBackground:              s.goBackground,
 		runTriggerPrompt:             s.runTriggerPrompt,
+		runBoundScheduledTask:        s.runBoundScheduledTask,
 		cancelRunningSessionWorkSync: s.cancelRunningSessionWorkSync,
 		cancelScheduledTaskRuns:      s.cancelScheduledTaskRuns,
 		botWorkspace:                 s.botWorkspace,
