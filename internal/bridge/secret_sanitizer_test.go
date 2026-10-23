@@ -121,9 +121,9 @@ func TestSanitizePromptSecretsKeepsBaseURLAndPlainKeyText(t *testing.T) {
 }
 
 func TestRedactSensitiveValuesForDisplayRedactsGenericAndChineseKeys(t *testing.T) {
-	text := `key=key-value password=pw-value 密码=pwd-value 密钥=secret-key 私钥=private-key use the key concept`
+	text := "key=key-value password=pw-value 密码=pwd-value 密钥=secret-key 私钥=private-key 初始密码：`initial-value` token＝full-token use the key concept"
 	got := redactSensitiveValuesForDisplay(text)
-	for _, unexpected := range []string{"key-value", "pw-value", "pwd-value", "secret-key", "private-key"} {
+	for _, unexpected := range []string{"key-value", "pw-value", "pwd-value", "secret-key", "private-key", "initial-value", "full-token"} {
 		if strings.Contains(got, unexpected) {
 			t.Fatalf("redactSensitiveValuesForDisplay() = %q, should not include %q", got, unexpected)
 		}
@@ -134,6 +134,8 @@ func TestRedactSensitiveValuesForDisplayRedactsGenericAndChineseKeys(t *testing.
 		"密码=" + secretInputPlaceholder,
 		"密钥=" + secretInputPlaceholder,
 		"私钥=" + secretInputPlaceholder,
+		"初始密码：`" + secretInputPlaceholder + "`",
+		"token＝" + secretInputPlaceholder,
 		"use the key concept",
 	} {
 		if !strings.Contains(got, want) {
@@ -214,6 +216,23 @@ func TestPendingAtAndAtAutoDisplayRedactsSecrets(t *testing.T) {
 	}
 	if string(data) != "sk-pending-secret" {
 		t.Fatalf("pending secret file content = %q, want raw secret", string(data))
+	}
+	fullwidth := svc.pendingAtMessageFromMessage(feishu.Message{
+		BotID:     "bot-a",
+		MessageID: "om_pending_fullwidth_secret",
+		SenderID:  "ou_sender",
+		Workspace: workspace,
+		Text:      "登录信息：\n- 初始密码：`demo-password`",
+	})
+	if strings.Contains(fullwidth.Text, "demo-password") || !strings.Contains(fullwidth.Text, "初始密码：`[已隐藏: ") {
+		t.Fatalf("fullwidth pending text = %q, want file placeholder without raw secret", fullwidth.Text)
+	}
+	data, err = os.ReadFile(filepath.Join(workspace, ".local", secretInputsDirName, "om_pending_fullwidth_secret", "secret-1.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(fullwidth pending secret) error = %v", err)
+	}
+	if string(data) != "demo-password" {
+		t.Fatalf("fullwidth pending secret file content = %q, want raw secret without markdown delimiters", string(data))
 	}
 	formatted := formatPendingAtMessageBlock("## Pending", []pendingAtMessage{{
 		MessageID: "om_1",

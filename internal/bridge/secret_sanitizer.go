@@ -31,7 +31,7 @@ var secretInputPatterns = []struct {
 		description: "authorization",
 	},
 	{
-		re:          regexp.MustCompile(`(?i)(["']?(?:\b(?:openai[_-]?api[_-]?key|ark[_-]?api[_-]?key|aws[_-]?access[_-]?key[_-]?id|awsaccesskeyid|aws[_-]?secret[_-]?access[_-]?key|awssecretaccesskey|api[_-]?key|apikey|app[_-]?secret|appsecret|client[_-]?secret|clientsecret|secret[_-]?key|secretkey|access[_-]?token|accesstoken|refresh[_-]?token|refreshtoken|password|passwd|secret|token|key|ak|sk)\b|密码|密钥|私钥)["']?\s*[:=]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s\r\n,;#]+))`),
+		re:          regexp.MustCompile(`(?i)(["']?(?:\b(?:openai[_-]?api[_-]?key|ark[_-]?api[_-]?key|aws[_-]?access[_-]?key[_-]?id|awsaccesskeyid|aws[_-]?secret[_-]?access[_-]?key|awssecretaccesskey|api[_-]?key|apikey|app[_-]?secret|appsecret|client[_-]?secret|clientsecret|secret[_-]?key|secretkey|access[_-]?token|accesstoken|refresh[_-]?token|refreshtoken|password|passwd|secret|token|key|ak|sk)\b|密码|密钥|私钥)["']?\s*[:=：＝]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|\x60([^\x60\r\n]*)\x60|([^\s\r\n,;#]+))`),
 		valueGroup:  -1,
 		description: "key-value",
 	},
@@ -222,7 +222,7 @@ func secretMatchValueRange(idx []int, valueGroup int) (int, int) {
 	if valueGroup > 0 {
 		return submatchRange(idx, valueGroup)
 	}
-	for group := 2; group <= 4; group++ {
+	for group := 2; group <= 5; group++ {
 		start, end := submatchRange(idx, group)
 		if start >= 0 && end >= start {
 			return start, end
