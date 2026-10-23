@@ -48,13 +48,40 @@ func TestStripLeadingBotMentionNames(t *testing.T) {
 		want     string
 	}{
 		{name: "multiple bots", text: "@智能助手 @其他助手 /rules set xxx", mentions: mentions, want: "/rules set xxx"},
-		{name: "reverse order", text: "@其他助手 @智能助手 /status", mentions: mentions, want: "/status"},
-		{name: "keep user mention", text: "@智能助手 @用户甲 /status", mentions: mentions, want: "@用户甲 /status"},
+		{name: "reverse order", text: "@其他助手 @智能助手 /status", mentions: []feishu.Mention{mentions[1], mentions[0]}, want: "/status"},
+		{name: "keep user mention", text: "@智能助手 @用户甲 /status", mentions: []feishu.Mention{mentions[0], mentions[2]}, want: "@用户甲 /status"},
 		{name: "keep command argument mention", text: "@智能助手 /rules set @其他助手", mentions: mentions, want: "/rules set @其他助手"},
 		{name: "keep non-leading bot mention", text: "说明 @智能助手 /status", mentions: mentions, want: "说明 @智能助手 /status"},
-		{name: "keep command for other leading bot", text: "@其他助手 /status @智能助手", mentions: mentions, want: "@其他助手 /status @智能助手"},
+		{name: "keep command for other leading bot", text: "@其他助手 /status @智能助手", mentions: []feishu.Mention{mentions[1], mentions[0]}, want: "@其他助手 /status @智能助手"},
 		{name: "do not handle command for other bot", text: "@其他助手 /status", mentions: mentions[1:], want: "@其他助手 /status"},
 		{name: "require mention boundary", text: "@智能助手扩展 /status", mentions: mentions, want: "@智能助手扩展 /status"},
+		{
+			name: "same display name bot and user",
+			text: "@助手 @助手 /restart",
+			mentions: []feishu.Mention{
+				{ID: testBotOpenID, Name: "助手", Type: "bot"},
+				{ID: "ou_user", Name: "助手", Type: "user"},
+			},
+			want: "@助手 /restart",
+		},
+		{
+			name: "same display name bots are consumed once each",
+			text: "@助手 @助手 /status",
+			mentions: []feishu.Mention{
+				{ID: testBotOpenID, Name: "助手", Type: "bot"},
+				{ID: "ou_other_bot", Name: "助手", Type: "bot"},
+			},
+			want: "/status",
+		},
+		{
+			name: "overlapping bot names follow metadata order",
+			text: "@A B @A /status",
+			mentions: []feishu.Mention{
+				{ID: testBotOpenID, Name: "A B", Type: "bot"},
+				{ID: "ou_other_bot", Name: "A", Type: "bot"},
+			},
+			want: "/status",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,6 +90,24 @@ func TestStripLeadingBotMentionNames(t *testing.T) {
 				t.Fatalf("stripLeadingBotMentionNames(%q) = %q, want %q", tt.text, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeIncomingMessageDoesNotTurnSameNameUserMentionIntoCommand(t *testing.T) {
+	svc := newTestService(config.Default(), nil)
+	incoming := svc.normalizeIncomingMessage(feishu.Message{
+		BotOpenID: testBotOpenID,
+		Text:      "@助手 @助手 /restart",
+		Mentions: []feishu.Mention{
+			{ID: testBotOpenID, Name: "助手", Type: "bot"},
+			{ID: "ou_user", Name: "助手", Type: "user"},
+		},
+	})
+	if incoming.text != "@助手 /restart" {
+		t.Fatalf("normalized text = %q, want user mention preserved before command", incoming.text)
+	}
+	if strings.HasPrefix(incoming.text, "/") {
+		t.Fatalf("normalized text = %q, must not be dispatched as a slash command", incoming.text)
 	}
 }
 

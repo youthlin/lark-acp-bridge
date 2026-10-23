@@ -349,8 +349,8 @@ func (s *Service) normalizeIncomingMessage(msg feishu.Message) incomingPromptMes
 	rawText := strings.TrimSpace(msg.Text)
 	text := strings.TrimSpace(msg.Text)
 	text = stripCurrentBotMentionNames(text, msg)
-	if commandText := stripLeadingBotMentionNames(rawText, msg); strings.HasPrefix(commandText, "/") {
-		text = commandText
+	if strings.HasPrefix(rawText, "@") && messageMentionsBot(msg) {
+		text = stripLeadingBotMentionNames(rawText, msg)
 	}
 	promptMsg := msg
 	msg.Text = text
