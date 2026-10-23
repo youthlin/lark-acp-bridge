@@ -592,6 +592,73 @@ func TestPromptActivityTimeoutExpiresAfterIdlePeriod(t *testing.T) {
 	}
 }
 
+func TestPromptWithOptionalIdleContinuationRetriesOptedInPromptOnce(t *testing.T) {
+	var prompts []string
+	var continuationFlags []bool
+	result, err := promptWithOptionalIdleContinuation(context.Background(), "原始任务", func(text string, opts acp.PromptOptions) (acp.PromptResult, error) {
+		prompts = append(prompts, text)
+		continuationFlags = append(continuationFlags, opts.ContinueOnIdle)
+		if len(prompts) == 1 {
+			return acp.PromptResult{Text: "已有进度"}, fmt.Errorf("session/prompt: %w", confirmedACPPromptIdleTimeoutError{cause: acpPromptIdleTimeoutError{Idle: time.Minute}})
+		}
+		return acp.PromptResult{Text: "继续结果"}, nil
+	}, acp.PromptOptions{ContinueOnIdle: true})
+	if err != nil {
+		t.Fatalf("promptWithOptionalIdleContinuation() error = %v", err)
+	}
+	if len(prompts) != 2 || prompts[0] != "原始任务" || prompts[1] != acpIdleContinuationPrompt {
+		t.Fatalf("prompts = %#v, want original prompt followed by continuation", prompts)
+	}
+	if len(continuationFlags) != 2 || !continuationFlags[0] || continuationFlags[1] {
+		t.Fatalf("ContinueOnIdle flags = %#v, want [true false]", continuationFlags)
+	}
+	if result.Text != "已有进度继续结果" {
+		t.Fatalf("result.Text = %q, want combined partial and continued output", result.Text)
+	}
+}
+
+func TestPromptWithOptionalIdleContinuationDoesNotRetryWithoutSafeCompletion(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		err     error
+	}{
+		{name: "not opted in", enabled: false, err: acpPromptIdleTimeoutError{Idle: time.Minute}},
+		{name: "ordinary deadline", enabled: true, err: context.DeadlineExceeded},
+		{name: "idle without confirmed completion", enabled: true, err: acpPromptIdleTimeoutError{Idle: time.Minute}},
+		{name: "cancel response unknown", enabled: true, err: fmt.Errorf("%w: %w", acpPromptIdleTimeoutError{Idle: time.Minute}, acp.ErrCancelResponseTimeout)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			_, gotErr := promptWithOptionalIdleContinuation(context.Background(), "原始任务", func(string, acp.PromptOptions) (acp.PromptResult, error) {
+				calls++
+				return acp.PromptResult{}, tt.err
+			}, acp.PromptOptions{ContinueOnIdle: tt.enabled})
+			if calls != 1 {
+				t.Fatalf("calls = %d, want 1", calls)
+			}
+			if gotErr != tt.err {
+				t.Fatalf("error = %v, want original error %v", gotErr, tt.err)
+			}
+		})
+	}
+}
+
+func TestPromptWithOptionalIdleContinuationStopsAfterOneRetry(t *testing.T) {
+	calls := 0
+	_, err := promptWithOptionalIdleContinuation(context.Background(), "原始任务", func(string, acp.PromptOptions) (acp.PromptResult, error) {
+		calls++
+		return acp.PromptResult{}, confirmedACPPromptIdleTimeoutError{cause: acpPromptIdleTimeoutError{Idle: time.Minute}}
+	}, acp.PromptOptions{ContinueOnIdle: true})
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "自动继续失败") || !isACPPromptIdleTimeout(err) {
+		t.Fatalf("error = %v, want wrapped second idle timeout", err)
+	}
+}
+
 func TestPromptActivityTimeoutTouchExtendsIdlePeriod(t *testing.T) {
 	timeout := newPromptActivityTimeout(context.Background(), 60*time.Millisecond, time.Second)
 	defer timeout.Stop()

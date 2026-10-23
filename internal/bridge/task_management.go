@@ -65,6 +65,7 @@ type runningTaskOptions struct {
 	traceTask            *runningTask
 	replacementWait      replacedTaskWaitObserver
 	replacementTimeout   time.Duration
+	continueOnIdle       bool
 }
 
 type replacedTaskWaitObserver interface {
@@ -75,15 +76,15 @@ type replacedTaskWaitObserver interface {
 }
 
 func userPromptTaskOptions() runningTaskOptions {
-	return runningTaskOptions{}
+	return runningTaskOptions{continueOnIdle: true}
 }
 
 func atAutoUserPromptTaskOptions() runningTaskOptions {
-	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}
+	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true, continueOnIdle: true}
 }
 
 func atAutoPromptTaskOptions() runningTaskOptions {
-	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true}
+	return runningTaskOptions{drainPendingAtAuto: true, queuePendingAtAuto: true, continueOnIdle: true}
 }
 
 func atAutoCompanionPromptTaskOptions(taskKey SessionKey, runtime runtimeKey) runningTaskOptions {
@@ -101,6 +102,7 @@ func queuedPromptTaskOptions() runningTaskOptions {
 		queuedContinuation: true,
 		skipPostPromptWork: true,
 		triggerWiki:        true,
+		continueOnIdle:     true,
 	}
 }
 

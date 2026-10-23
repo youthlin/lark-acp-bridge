@@ -16,6 +16,7 @@ type PromptOptions struct {
 	OnUpdate            PromptUpdateHandler
 	OnPermissionRequest PermissionRequestHandler
 	OnLifecycle         PromptLifecycleHandler
+	ContinueOnIdle      bool
 }
 
 type PromptLifecycleEvent struct {

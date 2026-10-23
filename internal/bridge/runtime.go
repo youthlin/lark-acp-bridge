@@ -18,8 +18,10 @@ import (
 
 const (
 	acpRequestTimeout    = 10 * time.Minute
-	acpPromptIdleTimeout = 10 * time.Minute
+	acpPromptIdleTimeout = 5 * time.Minute
 	acpPromptMaxDuration = 0
+
+	acpIdleContinuationPrompt = "继续之前的任务。先检查已经完成的步骤和外部操作状态，不要重复执行。"
 
 	acpRuntimeIdleTimeout       = 30 * time.Minute
 	acpRuntimeIdleSweepInterval = 5 * time.Minute
@@ -460,7 +462,9 @@ func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKe
 		return acp.PromptResult{}, err
 	}
 	defer release()
-	result, err := promptWithClient(ctx, client, session.ACPSessionID, text, opts)
+	result, err := promptWithOptionalIdleContinuation(ctx, text, func(promptText string, promptOpts acp.PromptOptions) (acp.PromptResult, error) {
+		return promptWithClient(ctx, client, session.ACPSessionID, promptText, promptOpts)
+	}, opts)
 	if errors.Is(err, acp.ErrCancelResponseTimeout) {
 		r.detachBrokenRuntimeClient(key, client)
 		return result, err
@@ -470,6 +474,28 @@ func (r *runtimeManager) PromptWithRuntimeKey(ctx context.Context, key runtimeKe
 	}
 	r.detachBrokenRuntimeClient(key, client)
 	return result, fmt.Errorf("%w: %v", errACPSessionUnavailable, err)
+}
+
+func promptWithOptionalIdleContinuation(
+	ctx context.Context,
+	text string,
+	run func(string, acp.PromptOptions) (acp.PromptResult, error),
+	opts acp.PromptOptions,
+) (acp.PromptResult, error) {
+	result, err := run(text, opts)
+	if !opts.ContinueOnIdle || err == nil || ctx.Err() != nil || !isConfirmedACPPromptIdleTimeout(err) {
+		return result, err
+	}
+	slog.WarnContext(ctx, "ACP prompt 空闲超时，自动继续一次", "idle_timeout", acpPromptIdleTimeout)
+	opts.ContinueOnIdle = false
+	continued, continueErr := run(acpIdleContinuationPrompt, opts)
+	if strings.TrimSpace(result.Text) != "" {
+		continued.Text = result.Text + continued.Text
+	}
+	if continueErr != nil {
+		return continued, fmt.Errorf("ACP prompt 自动继续失败: %w", continueErr)
+	}
+	return continued, nil
 }
 
 func (r *runtimeManager) Steer(ctx context.Context, session Session, agent config.AgentConfig, text string) (acp.SteeringResult, error) {
@@ -489,6 +515,7 @@ func (r *runtimeManager) Steer(ctx context.Context, session Session, agent confi
 
 func promptWithClient(ctx context.Context, client *acp.Client, sessionID string, text string, opts acp.PromptOptions) (acp.PromptResult, error) {
 	startedAt := time.Now()
+	cancelWaitFinished := false
 	onLifecycle := opts.OnLifecycle
 	emitLifecycle := func(event acp.PromptLifecycleEvent) {
 		if event.SessionID == "" {
@@ -499,6 +526,9 @@ func promptWithClient(ctx context.Context, client *acp.Client, sessionID string,
 		}
 		if event.Elapsed == 0 {
 			event.Elapsed = event.At.Sub(startedAt)
+		}
+		if event.Stage == "cancel_wait_finished" && event.Err == nil {
+			cancelWaitFinished = true
 		}
 		logPromptLifecycle(ctx, event)
 		if onLifecycle != nil {
@@ -547,6 +577,9 @@ func promptWithClient(ctx context.Context, client *acp.Client, sessionID string,
 					err = cause
 				}
 			}
+		}
+		if cancelWaitFinished && isACPPromptIdleTimeout(err) {
+			err = confirmedACPPromptIdleTimeoutError{cause: err}
 		}
 		return result, fmt.Errorf("session/prompt: %w", err)
 	}
@@ -712,7 +745,41 @@ func (t *promptActivityTimeout) handleIdleTimeout() {
 	}
 	idle := t.idle
 	t.mu.Unlock()
-	t.expire("idle", fmt.Errorf("ACP prompt 连续 %s 未收到活动更新: %w", idle, context.DeadlineExceeded))
+	t.expire("idle", acpPromptIdleTimeoutError{Idle: idle})
+}
+
+type acpPromptIdleTimeoutError struct {
+	Idle time.Duration
+}
+
+func (e acpPromptIdleTimeoutError) Error() string {
+	return fmt.Sprintf("ACP prompt 连续 %s 未收到活动更新: %v", e.Idle, context.DeadlineExceeded)
+}
+
+func (e acpPromptIdleTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+func isACPPromptIdleTimeout(err error) bool {
+	var target acpPromptIdleTimeoutError
+	return errors.As(err, &target)
+}
+
+type confirmedACPPromptIdleTimeoutError struct {
+	cause error
+}
+
+func (e confirmedACPPromptIdleTimeoutError) Error() string {
+	return e.cause.Error()
+}
+
+func (e confirmedACPPromptIdleTimeoutError) Unwrap() error {
+	return e.cause
+}
+
+func isConfirmedACPPromptIdleTimeout(err error) bool {
+	var target confirmedACPPromptIdleTimeoutError
+	return errors.As(err, &target)
 }
 
 func (t *promptActivityTimeout) expire(reason string, cause error) {

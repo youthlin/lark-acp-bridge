@@ -462,7 +462,7 @@ func (s *Service) runUserPromptWithOptionsDetailed(ctx context.Context, msg feis
 	out, err := runPromptTaskDetailed(s, ctx, session, agent, opts, func(taskCtx context.Context, task *runningTask) (promptRuntimeResult, error) {
 		recorder := s.newTraceRecorderForPrompt(session, msg, text, opts.triggerWiki)
 		s.markRunningTaskSteeringReady(session.Key, task, recorder)
-		result, err := s.runtime.Prompt(taskCtx, session, agent, text, tracePromptOptions(recorder, acp.PromptOptions{}))
+		result, err := s.runtime.Prompt(taskCtx, session, agent, text, tracePromptOptions(recorder, acp.PromptOptions{ContinueOnIdle: opts.continueOnIdle}))
 		if recorder != nil {
 			recorder.Complete(result, err)
 		}
@@ -603,6 +603,7 @@ func (s *Service) promptStreamOptions(msg feishu.Message, stream *promptCardStre
 
 func (s *Service) promptStreamOptionsWithTaskOptions(msg feishu.Message, stream *promptCardStream, chunks *promptChunkAccumulator, taskOpts runningTaskOptions) acp.PromptOptions {
 	return acp.PromptOptions{
+		ContinueOnIdle: taskOpts.continueOnIdle,
 		OnUpdate: func(update acp.PromptUpdate) {
 			sessionID := strings.TrimSpace(update.SessionID)
 			if sessionID == "" {

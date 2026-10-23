@@ -10,6 +10,34 @@ import (
 	"github.com/youthlin/lark-acp-bridge/internal/config"
 )
 
+func TestOnlyInteractiveUserTaskOptionsContinueOnIdle(t *testing.T) {
+	interactive := []runningTaskOptions{
+		userPromptTaskOptions(),
+		atAutoUserPromptTaskOptions(),
+		atAutoPromptTaskOptions(),
+		queuedPromptTaskOptions(),
+	}
+	for i, opts := range interactive {
+		if !opts.continueOnIdle {
+			t.Fatalf("interactive options[%d].continueOnIdle = false, want true", i)
+		}
+	}
+	background := []runningTaskOptions{
+		triggerPromptTaskOptions(),
+		loopTaskOptions(),
+		wikiLintTaskOptions(),
+		wikiReflectionTaskOptions(),
+		atAutoCompanionPromptTaskOptions(SessionKey{}, runtimeKey{}),
+		autoCompactTaskOptions(),
+		forkBootstrapTaskOptions(),
+	}
+	for i, opts := range background {
+		if opts.continueOnIdle {
+			t.Fatalf("background options[%d].continueOnIdle = true, want false", i)
+		}
+	}
+}
+
 func TestRunUserTaskRegistersCancelsAndCleansTask(t *testing.T) {
 	svc := NewService(config.Config{}, NewSessionStore(""))
 	rt := &fakeRuntime{}
