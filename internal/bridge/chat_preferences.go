@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/youthlin/lark-acp-bridge/internal/feishu"
 )
@@ -647,6 +648,48 @@ func stripCurrentBotMentionNames(text string, msg feishu.Message) string {
 		text = strings.ReplaceAll(text, "@"+name, replacement)
 	}
 	return strings.TrimSpace(text)
+}
+
+// stripLeadingBotMentionNames lets one slash command target multiple bots while
+// leaving user mentions and mentions used as command arguments intact.
+func stripLeadingBotMentionNames(text string, msg feishu.Message) string {
+	text = strings.TrimSpace(text)
+	if !messageMentionsBot(msg) {
+		return text
+	}
+	original := text
+	strippedCurrentBot := false
+	botOpenID := strings.TrimSpace(msg.BotOpenID)
+	for {
+		matched := false
+		for _, mention := range msg.Mentions {
+			name := strings.TrimSpace(mention.Name)
+			mentionID := strings.TrimSpace(mention.ID)
+			if name == "" || (mentionID != botOpenID && !strings.EqualFold(strings.TrimSpace(mention.Type), "bot")) {
+				continue
+			}
+			prefix := "@" + name
+			if !strings.HasPrefix(text, prefix) {
+				continue
+			}
+			remainder := text[len(prefix):]
+			if remainder != "" && len(strings.TrimLeftFunc(remainder, unicode.IsSpace)) == len(remainder) {
+				continue
+			}
+			text = strings.TrimSpace(remainder)
+			if mentionID == botOpenID {
+				strippedCurrentBot = true
+			}
+			matched = true
+			break
+		}
+		if !matched {
+			if !strippedCurrentBot {
+				return original
+			}
+			return text
+		}
+	}
 }
 
 func (s *Service) botOpenID(botID string) string {

@@ -35,6 +35,37 @@ func TestMessageMentionsBotRequiresCurrentBotOpenID(t *testing.T) {
 	}
 }
 
+func TestStripLeadingBotMentionNames(t *testing.T) {
+	mentions := []feishu.Mention{
+		testBotMention("智能助手"),
+		{ID: "ou_other_bot", Name: "其他助手", Type: "bot"},
+		{ID: "ou_user", Name: "用户甲", Type: "user"},
+	}
+	tests := []struct {
+		name     string
+		text     string
+		mentions []feishu.Mention
+		want     string
+	}{
+		{name: "multiple bots", text: "@智能助手 @其他助手 /rules set xxx", mentions: mentions, want: "/rules set xxx"},
+		{name: "reverse order", text: "@其他助手 @智能助手 /status", mentions: mentions, want: "/status"},
+		{name: "keep user mention", text: "@智能助手 @用户甲 /status", mentions: mentions, want: "@用户甲 /status"},
+		{name: "keep command argument mention", text: "@智能助手 /rules set @其他助手", mentions: mentions, want: "/rules set @其他助手"},
+		{name: "keep non-leading bot mention", text: "说明 @智能助手 /status", mentions: mentions, want: "说明 @智能助手 /status"},
+		{name: "keep command for other leading bot", text: "@其他助手 /status @智能助手", mentions: mentions, want: "@其他助手 /status @智能助手"},
+		{name: "do not handle command for other bot", text: "@其他助手 /status", mentions: mentions[1:], want: "@其他助手 /status"},
+		{name: "require mention boundary", text: "@智能助手扩展 /status", mentions: mentions, want: "@智能助手扩展 /status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := feishu.Message{BotOpenID: testBotOpenID, Mentions: tt.mentions}
+			if got := stripLeadingBotMentionNames(tt.text, msg); got != tt.want {
+				t.Fatalf("stripLeadingBotMentionNames(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSelectPendingAtHistoryDropsExpiredAndTruncatesLongMessages(t *testing.T) {
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.Local)
 	longText := strings.Repeat("长", maxPendingAtMessageLen+100)

@@ -458,6 +458,54 @@ func TestHandleFeishuMessageStatus(t *testing.T) {
 	}
 }
 
+func TestHandleFeishuMessageSlashCommandMentioningMultipleBots(t *testing.T) {
+	svc := newTestService(config.Default(), nil)
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotOpenID: testBotOpenID,
+		Text:      "@智能助手 @其他助手 /status",
+		Mentions: []feishu.Mention{
+			testBotMention("智能助手"),
+			{ID: "ou_other_bot", Name: "其他助手", Type: "bot"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if !strings.Contains(reply, "traex") {
+		t.Fatalf("reply = %q, want /status response after stripping leading bot mentions", reply)
+	}
+}
+
+func TestHandleFeishuMessageSlashCommandForOtherBotKeepsPrompt(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	cfg := config.Default()
+	agent := mustConfigAgent(t, cfg, "traex")
+	agent.DefaultCwd = t.TempDir()
+	cfg.SetAgent("traex", agent)
+	rt := &fakeRuntime{newSessionID: "acp-session-other-bot-command", promptReply: "prompt handled"}
+	svc := newTestService(cfg, store)
+	svc.setRuntime(rt)
+	reply, err := handleFeishuMessage(t, svc, context.Background(), feishu.Message{
+		BotOpenID: testBotOpenID,
+		ChatID:    "oc_group",
+		ChatType:  "group",
+		Text:      "@其他助手 /status @智能助手",
+		Mentions: []feishu.Mention{
+			{ID: "ou_other_bot", Name: "其他助手", Type: "bot"},
+			testBotMention("智能助手"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleFeishuMessage() error = %v", err)
+	}
+	if reply != "prompt handled" {
+		t.Fatalf("reply = %q, want prompt handling instead of /status response", reply)
+	}
+	if len(rt.promptCallsSnapshot()) != 1 {
+		t.Fatalf("prompt calls = %+v, want one prompt call", rt.promptCallsSnapshot())
+	}
+}
+
 func TestHandleFeishuMessageCommandsListsACPCommands(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
 	session := testReadySession(t, store)
