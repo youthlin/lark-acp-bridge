@@ -21,19 +21,24 @@ const (
 )
 
 var secretInputPatterns = []struct {
-	re          *regexp.Regexp
-	valueGroup  int
-	description string
+	re              *regexp.Regexp
+	keyGroup        int
+	valueGroupStart int
+	valueGroupEnd   int
+	description     string
 }{
 	{
-		re:          regexp.MustCompile(`(?i)(\bAuthorization\s*:\s*(?:Bearer|Basic)\s+)([^\s\r\n]+)`),
-		valueGroup:  2,
-		description: "authorization",
+		re:              regexp.MustCompile(`(?i)(\bAuthorization\s*:\s*(?:Bearer|Basic)\s+)([^\s\r\n]+)`),
+		valueGroupStart: 2,
+		valueGroupEnd:   2,
+		description:     "authorization",
 	},
 	{
-		re:          regexp.MustCompile(`(?i)(["']?(?:\b(?:openai[_-]?api[_-]?key|ark[_-]?api[_-]?key|aws[_-]?access[_-]?key[_-]?id|awsaccesskeyid|aws[_-]?secret[_-]?access[_-]?key|awssecretaccesskey|api[_-]?key|apikey|app[_-]?secret|appsecret|client[_-]?secret|clientsecret|secret[_-]?key|secretkey|access[_-]?token|accesstoken|refresh[_-]?token|refreshtoken|password|passwd|secret|token|key|ak|sk)\b|密码|密钥|私钥)["']?\s*[:=：＝]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|\x60([^\x60\r\n]*)\x60|([^\s\r\n,;#]+))`),
-		valueGroup:  -1,
-		description: "key-value",
+		re:              regexp.MustCompile(`(?i)(["']?(\b[a-z][a-z0-9_-]*|[\p{Han}]{0,16}(?:密码|密钥|私钥))["']?\s*[:=：＝]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|\x60([^\x60\r\n]*)\x60|([^\s\r\n,;#]+))`),
+		keyGroup:        2,
+		valueGroupStart: 3,
+		valueGroupEnd:   6,
+		description:     "key-value",
 	},
 }
 
@@ -190,7 +195,13 @@ func collectSecretTextMatches(text string) []secretTextMatch {
 	var matches []secretTextMatch
 	for _, pattern := range secretInputPatterns {
 		for _, idx := range pattern.re.FindAllStringSubmatchIndex(text, -1) {
-			start, end := secretMatchValueRange(idx, pattern.valueGroup)
+			if pattern.keyGroup > 0 {
+				keyStart, keyEnd := submatchRange(idx, pattern.keyGroup)
+				if keyStart < 0 || keyEnd <= keyStart || !isSensitiveSecretKey(text[keyStart:keyEnd]) {
+					continue
+				}
+			}
+			start, end := firstSubmatchRange(idx, pattern.valueGroupStart, pattern.valueGroupEnd)
 			if start < 0 || end <= start {
 				continue
 			}
@@ -218,17 +229,35 @@ func collectSecretTextMatches(text string) []secretTextMatch {
 	return out
 }
 
-func secretMatchValueRange(idx []int, valueGroup int) (int, int) {
-	if valueGroup > 0 {
-		return submatchRange(idx, valueGroup)
-	}
-	for group := 2; group <= 5; group++ {
+func firstSubmatchRange(idx []int, firstGroup, lastGroup int) (int, int) {
+	for group := firstGroup; group <= lastGroup; group++ {
 		start, end := submatchRange(idx, group)
 		if start >= 0 && end >= start {
 			return start, end
 		}
 	}
 	return -1, -1
+}
+
+func isSensitiveSecretKey(key string) bool {
+	key = strings.Trim(strings.ToLower(strings.TrimSpace(key)), `"'`)
+	if key == "" {
+		return false
+	}
+	if strings.HasSuffix(key, "密码") || strings.HasSuffix(key, "密钥") || strings.HasSuffix(key, "私钥") {
+		return true
+	}
+	normalized := strings.NewReplacer("_", "", "-", "").Replace(key)
+	switch normalized {
+	case "openaikey", "arkkey", "openaiapikey", "arkapikey",
+		"awsaccesskeyid", "awssecretaccesskey",
+		"apikey", "xapikey", "appsecret", "clientsecret", "secretkey",
+		"accesstoken", "refreshtoken",
+		"password", "passwd", "secret", "token", "key", "ak", "sk":
+		return true
+	default:
+		return false
+	}
 }
 
 func submatchRange(idx []int, group int) (int, int) {

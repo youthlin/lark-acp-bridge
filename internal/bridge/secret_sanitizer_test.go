@@ -121,9 +121,9 @@ func TestSanitizePromptSecretsKeepsBaseURLAndPlainKeyText(t *testing.T) {
 }
 
 func TestRedactSensitiveValuesForDisplayRedactsGenericAndChineseKeys(t *testing.T) {
-	text := "key=key-value password=pw-value 密码=pwd-value 密钥=secret-key 私钥=private-key 初始密码：`initial-value` token＝full-token use the key concept"
+	text := "key=key-value password=pw-value 密码=pwd-value 密钥=secret-key 私钥=private-key 初始密码：`initial-value` token＝full-token OPENAI_API_KEY=openai-value openai-key:vendor-value x-api-key=x-api-value clientSecret=client-value AWSAccessKeyId=aws-value file_token=document-token monkey=banana hockey=puck BASE_URL=https://example.com use the key concept"
 	got := redactSensitiveValuesForDisplay(text)
-	for _, unexpected := range []string{"key-value", "pw-value", "pwd-value", "secret-key", "private-key", "initial-value", "full-token"} {
+	for _, unexpected := range []string{"key-value", "pw-value", "pwd-value", "secret-key", "private-key", "initial-value", "full-token", "openai-value", "vendor-value", "x-api-value", "client-value", "aws-value"} {
 		if strings.Contains(got, unexpected) {
 			t.Fatalf("redactSensitiveValuesForDisplay() = %q, should not include %q", got, unexpected)
 		}
@@ -136,10 +136,42 @@ func TestRedactSensitiveValuesForDisplayRedactsGenericAndChineseKeys(t *testing.
 		"私钥=" + secretInputPlaceholder,
 		"初始密码：`" + secretInputPlaceholder + "`",
 		"token＝" + secretInputPlaceholder,
+		"OPENAI_API_KEY=" + secretInputPlaceholder,
+		"openai-key:" + secretInputPlaceholder,
+		"x-api-key=" + secretInputPlaceholder,
+		"clientSecret=" + secretInputPlaceholder,
+		"AWSAccessKeyId=" + secretInputPlaceholder,
+		"file_token=document-token",
+		"monkey=banana",
+		"hockey=puck",
+		"BASE_URL=https://example.com",
 		"use the key concept",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("redactSensitiveValuesForDisplay() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestIsSensitiveSecretKey(t *testing.T) {
+	for _, key := range []string{
+		"key",
+		"openai-key",
+		"OPENAI_API_KEY",
+		"X_API_KEY",
+		"x-api-key",
+		"clientSecret",
+		"AWSAccessKeyId",
+		"初始密码",
+		"访问密钥",
+	} {
+		if !isSensitiveSecretKey(key) {
+			t.Errorf("isSensitiveSecretKey(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"BASE_URL", "file_token", "comment_token", "image_key", "monkey", "hockey", "username", "keynote"} {
+		if isSensitiveSecretKey(key) {
+			t.Errorf("isSensitiveSecretKey(%q) = true, want false", key)
 		}
 	}
 }
