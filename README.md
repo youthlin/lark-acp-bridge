@@ -12,7 +12,7 @@ Lark ACP Bridge 用于把飞书 / Lark Bot 对话桥接到兼容 ACP 的编码�
 - 第一版优先支持 `traex acp serve`，同时保留接入其他 ACP server 的配置空间。
 - 话题群默认一条飞书话题对应一个 ACP session；普通群和私聊默认整个 chat 对应一个 ACP session，除非用户发送 `/new` 重开。
 - 将智能体消息、计划、工具调用和权限请求逐步映射回飞书消息或交互卡片。
-- 能力声明保持保守；当前仅在 bot 配置了 workspace 时声明受限的文本文件读写能力，用于维护 workspace 记忆、知识和技能文件，终端能力暂不声明。
+- 能力声明保持保守；不声明 ACP client-side `fs` / `terminal` 能力，让 ACP agent 在 session cwd 内使用自身本地工具维护 workspace 记忆、知识和技能文件。
 
 ## 初版架构
 
@@ -49,7 +49,7 @@ $EDITOR ~/.lark-acp-bridge/config.json
 ~/.lark-acp-bridge/config.json
 ```
 
-启动时会读取该文件；如果文件不存在，会自动创建一份默认配置。首次启动时，如果没有可用 bot 配置，bridge 会先进入一键创建流程：终端输出飞书 / Lark 验证链接，用户打开链接并确认创建应用后，bridge 会直接拿到 App ID 和 App Secret，并自动写入 `default` bot 配置。
+启动时会读取该文件；如果文件不存在，会自动创建一份默认配置。首次启动时，如果配置里只有一个待填写的 `default` bot 骨架（`id` 为 `default` 或留空、`app_id` 为空、`bot_open_id` 和 `owner_open_ids` 为空、`workspace` 与 secret 路径都是默认值），bridge 会先进入一键创建流程：终端输出飞书 / Lark 验证链接，用户打开链接并确认创建应用后，bridge 会直接拿到 App ID 和 App Secret，并自动写入 `default` bot 配置。其他 bot 缺少 `app_id` 时不会进入该流程，启动会直接退出并提示编辑配置文件或手动执行 `lark-acp-bridge bots register default`。
 
 也可以提前手动执行一键创建流程：
 
@@ -94,7 +94,7 @@ lark-acp-bridge bots list
 lark-acp-bridge bots remove default
 ```
 
-也支持省略 `bots` 的简写，例如 `lark-acp-bridge register default` 或 `lark-acp-bridge add default cli_xxx --stdin-secret`。`bots register` 和 `bots add` 都会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。启动时只支持加密 file secret；如果 `.appsecret` 不是加密格式，或者缺少对应 `.key`，bridge 会拒绝启动。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段；`bots register` 还支持 `--timeout`、`--app-name` 和 `--app-desc` 等一键创建参数。`bots add` 适合导入已经存在的应用凭据，`bots register` 适合新建应用。`bots create-lark-cli-profile <id> [--profile <name>]` 会在 bridge 进程内解密对应 bot 的 app_secret，并通过 stdin 调用 `lark-cli profile add --app-secret-stdin` 创建 profile；不传 `--profile` 时默认使用 `lark-acp-<id>`。
+省略 `bots` 的旧简写（例如 `lark-acp-bridge register default`）已移除，顶层只识别 `run`/`start`/`stop`/`restart`、`bots`、`service`、`task` 和 `update`，其余写法会报“无法识别的命令”。`bots register` 和 `bots add` 都会生成两个文件：`~/.lark-acp-bridge/secrets/<id>.appsecret` 保存加密后的 secret，`~/.lark-acp-bridge/secrets/<id>.key` 保存随机生成的解密密钥，两个文件权限均为 `600`；`config.json` 中只写入 `app_secret` 的 file 引用，不写明文 secret。启动时只支持加密 file secret；如果 `.appsecret` 不是加密格式，或者缺少对应 `.key`，bridge 会拒绝启动。这个设计用于避免模型直接读取 `<id>.appsecret` 时看到明文，但如果同一主体同时拥有 `.appsecret` 和 `.key` 的读取权限，仍可解密。也可以通过 `--workspace`、`--secret-file`、`--bot-open-id` 和 `--owner-open-ids` 指定更多字段；`bots register` 还支持 `--timeout`、`--app-name` 和 `--app-desc` 等一键创建参数。`bots add` 适合导入已经存在的应用凭据，`bots register` 适合新建应用。`bots create-lark-cli-profile <id> [--profile <name>]` 会在 bridge 进程内解密对应 bot 的 app_secret，并通过 stdin 调用 `lark-cli profile add --app-secret-stdin` 创建 profile；不传 `--profile` 时默认使用 `lark-acp-<id>`。
 
 `workspace` 是该 bot 的持久化工作目录，用于存放 L0 记忆、L1 知识和 L2 技能；启动时会自动创建目录。`bot_open_id` 是这个 bot 自己的 open_id，用于群聊中确认 `@Bot` 是否真的提及当前 bot；为空时，bridge 启动时会尝试通过飞书机器人信息接口自动读取，读取失败时需要手动配置，否则群聊默认需要 at 的过滤无法可靠识别提及。`owner_open_ids` 是这个 bot 的 owner 白名单，用于审批 ACP agent 发起的权限卡片和执行 `/restart`。为空时，bridge 启动时会尝试通过飞书应用接口自动读取应用所有者、创建者和协作者中的管理员/开发者作为 owner；如果接口权限不足或未解析到 owner，权限卡片不会允许任何人批准，也不能通过飞书命令重启服务。多个 bot 可以共享同一套 ACP agent 配置，但必须使用不同的 `id`，并且展开后的 `workspace` 绝对路径也必须不同。
 
@@ -215,15 +215,16 @@ go run ./cmd/lark-acp-bridge --version
 go run ./cmd/lark-acp-bridge run
 ```
 
-也可以临时指定配置文件：
+也可以临时指定配置文件。不要直接指向仓库里受版本管理的 `config.example.json`：用这份骨架首次启动会进入一键创建流程，成功后把 App ID 写回该文件；而写配置（注册/添加 bot、`service install`）会把 `$HOME` 展开成绝对路径，导致工作区出现额外改动。请先复制到临时路径：
 
 ```bash
-go run ./cmd/lark-acp-bridge --config ./config.example.json
+cp config.example.json /tmp/lark-acp-bridge-config.json
+go run ./cmd/lark-acp-bridge --config /tmp/lark-acp-bridge-config.json
 ```
 
 ## 运行
 
-直接运行不带子命令时，默认按后台 `restart` 方式运行：如果已有后台进程，会先停止再启动新的后台进程。
+在 Unix（Linux/macOS）上，直接运行不带子命令时，默认按后台 `restart` 方式运行：如果已有后台进程，会先停止再启动新的后台进程。Windows 等非 Unix 平台没有内置后台模式，不带子命令时按前台 `run` 运行，`start`/`stop`/`restart` 会直接报“当前平台不支持后台运行模式”。
 
 ```bash
 go run ./cmd/lark-acp-bridge
@@ -237,7 +238,7 @@ go run ./cmd/lark-acp-bridge
 ~/.lark-acp-bridge/config.json.lock
 ```
 
-Unix 和 Windows 上，所有真正运行 Bridge 的入口都会按展开后的配置文件路径获取进程级独占锁，包括前台 `run`、内置后台 daemon、systemd 和 launchd。同一配置文件同一时间只能运行一个实例；重复启动会立即退出，并在错误中显示已有实例 PID。不同配置文件使用不同锁，可以通过 `run` 或各自的进程管理器分别运行。`.lock` 文件会保留在磁盘上，是否有实例运行以内核锁为准，不要根据文件是否存在判断服务状态。其他平台保持原有前台运行能力，但当前不提供跨进程单实例保证。
+Unix 和 Windows 上，所有真正运行 Bridge 的入口都会按展开后的配置文件路径获取进程级独占锁，包括前台 `run`、Unix 上的内置后台 daemon，以及 systemd 和 launchd 拉起的 `run` 进程。同一配置文件同一时间只能运行一个实例；重复启动会立即退出，并在错误中显示已有实例 PID。不同配置文件使用不同锁，可以通过 `run` 或各自的进程管理器分别运行。`.lock` 文件会保留在磁盘上，是否有实例运行以内核锁为准，不要根据文件是否存在判断服务状态。其他平台保持原有前台运行能力，但当前不提供跨进程单实例保证。
 
 内置 daemon 对同一目录下的配置共用上述 `lark-acp-bridge.pid/.log`，以兼容旧版本运行文件；需要在同一目录并行运行不同配置时，应使用 `run` 和独立的 systemd/launchd 服务，而不是内置 daemon。
 
@@ -250,12 +251,14 @@ go run ./cmd/lark-acp-bridge stop     # 停止后台进程
 go run ./cmd/lark-acp-bridge restart  # 重启后台进程
 ```
 
-也可以把当前可执行文件安装为用户级系统服务。建议先安装稳定二进制，避免把 `go run` 生成的临时可执行文件写入服务配置：
+也可以把当前可执行文件安装为用户级系统服务（仅 Linux systemd user unit 和 macOS launchd user agent，其他平台会报不支持）。建议先安装稳定二进制，避免把 `go run` 生成的临时可执行文件写入服务配置：
 
 ```bash
 go install ./cmd/lark-acp-bridge
 lark-acp-bridge service install
 ```
+
+`service install` 会先写入服务文件，再读取配置文件写入 `restart_command`；配置文件不存在时会写完服务文件后报“读取配置文件”失败，此时服务里没有 `restart_command`。请先启动一次或用 `bots add` 生成配置，再用 `--config` 指定其他路径。
 
 Linux 会写入 systemd user unit：
 
@@ -284,7 +287,7 @@ launchctl enable gui/$(id -u)/com.youthlin.lark-acp-bridge
 launchctl kickstart -k gui/$(id -u)/com.youthlin.lark-acp-bridge
 ```
 
-`service install` 会写入服务文件，并同步更新配置文件里的 `restart_command`，让飞书 `/restart` 交给对应的 systemd / launchd 服务管理器处理。它不会主动启动或停止真实服务；服务定义使用 `lark-acp-bridge --config <path> run` 前台模式。安装时会把当前 `PATH` 写入服务环境，方便服务进程找到 `agent_list[].command` 里配置的 `traex`、`aiden`、`codex-acp` 等命令，并自动去掉 `.trae/tmp` 和 `go-build` 这类临时目录；同时会写入 `GOCACHE=/tmp/.cache/go-build`，避免受限服务环境无法写入默认 Go build cache。可用 `--config` 指定配置文件，用 `--binary` 指定可执行文件路径，用 `--working-dir` 指定服务工作目录，用 `--path` 显式覆盖服务进程的 `PATH`。卸载前建议先停用服务，再删除服务文件：
+`service install` 会写入服务文件，并同步更新配置文件里的 `restart_command`，让飞书 `/restart` 交给对应的 systemd / launchd 服务管理器处理。它不会主动启动或停止真实服务；服务定义使用 `lark-acp-bridge --config <path> run` 前台模式。安装时会把当前 `PATH` 写入服务环境，方便服务进程找到 `agent_list[].command` 里配置的 `traex`、`aiden`、`codex-acp` 等命令，并自动去掉 `.trae/tmp` 和 `go-build` 这类临时目录；同时会把 `GOCACHE` 写入用户临时目录下的 `lark-acp-bridge-<uid>/go-build`（即 `$TMPDIR` 下的独立子目录，Linux 默认 `/tmp/lark-acp-bridge-<uid>/go-build`），避免受限服务环境无法写入默认 Go build cache。可用 `--config` 指定配置文件，用 `--binary` 指定可执行文件路径，用 `--working-dir` 指定服务工作目录，用 `--path` 显式覆盖服务进程的 `PATH`。卸载前建议先停用服务，再删除服务文件：
 
 ```bash
 systemctl --user disable --now lark-acp-bridge.service
@@ -323,7 +326,7 @@ Feishu Adapter 使用官方 Go SDK：
 github.com/larksuite/oapi-sdk-go/v3
 ```
 
-如果任一 `bots[]` 缺少 `app_id`、`app_secret` 或 `workspace`，服务会退出并提示配置路径和飞书智能体创建入口；填好凭证后再重新启动。
+如果任一 `bots[]` 缺少 `app_id`、`app_secret` 或 `workspace`，服务会退出：`workspace` 为空时直接报“workspace 不能为空”，`app_id`/secret 缺失时提示编辑配置文件或执行 `lark-acp-bridge bots register default`；填好凭证后再重新启动。只有上文的默认 bot 骨架会自动进入一键创建流程。
 
 当前飞书侧已支持：
 
